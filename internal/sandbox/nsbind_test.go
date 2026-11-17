@@ -15,7 +15,7 @@ import (
 // (a loopback listener living there becomes reachable only after the join).
 func TestNsBind(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "nsbind")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", exe, "../testdata/nsbind.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", exe, "../../testdata/nsbind.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

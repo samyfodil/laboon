@@ -18,7 +18,7 @@ import (
 // run on its default overlay driver without the --storage-driver vfs workaround.
 func TestMountOverlay(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "mountoverlay")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/mountoverlay.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mountoverlay.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

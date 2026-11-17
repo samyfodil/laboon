@@ -15,7 +15,7 @@ import (
 // path, read and write, confined to the subtree.
 func TestMountFileBind(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "cfgbind")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/cfgbind.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/cfgbind.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	host := t.TempDir()

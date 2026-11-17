@@ -24,7 +24,7 @@ import (
 func buildHello(t *testing.T) string {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "hello")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/hello.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/hello.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	return out
@@ -77,7 +77,7 @@ func TestNoRewriteRunsViaTrap(t *testing.T) {
 
 func TestRunDynamic(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "hello-dyn")
-	if b, err := exec.Command("gcc", "-O2", "-o", out, "../testdata/hello.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-o", out, "../../testdata/hello.c").CombinedOutput(); err != nil {
 		t.Skipf("gcc unavailable: %v\n%s", err, b)
 	}
 	var stdout bytes.Buffer
@@ -133,7 +133,7 @@ func TestRelativeProgramPath(t *testing.T) {
 
 func TestAbortExitsWithSignalStatus(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "abort")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/abort.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/abort.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	code, err := Run(context.Background(), out, Config{
@@ -149,7 +149,7 @@ func TestAbortExitsWithSignalStatus(t *testing.T) {
 // A pty's slave opens by the name ptsname gives, under any root.
 func TestOpenpty(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "openpty")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/openpty.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/openpty.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -163,7 +163,7 @@ func TestOpenpty(t *testing.T) {
 // in the supervisor.
 func TestChildAbortWithSleepingThread(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "abortsleep")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/abortsleep.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/abortsleep.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -175,7 +175,7 @@ func TestChildAbortWithSleepingThread(t *testing.T) {
 
 func TestKillBlockedChild(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "killblocked")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/killblocked.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/killblocked.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -187,7 +187,7 @@ func TestKillBlockedChild(t *testing.T) {
 
 func TestPipeWriteEndError(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "pollerr")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/pollerr.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/pollerr.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -199,7 +199,7 @@ func TestPipeWriteEndError(t *testing.T) {
 
 func TestStopAndOrphanedStop(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "orphanstop")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/orphanstop.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/orphanstop.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -211,7 +211,7 @@ func TestStopAndOrphanedStop(t *testing.T) {
 
 func TestCloneOnStack(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "clonestack")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/clonestack.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/clonestack.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -239,7 +239,7 @@ func TestSysVIPC(t *testing.T) {
 // killed mid-transfer must not leave its descriptor for the next mapping.
 func TestKillWhileMapping(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "killmmap")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/killmmap.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/killmmap.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -254,7 +254,7 @@ func TestKillWhileMapping(t *testing.T) {
 // return at once.
 func TestKillWhileWaiting(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "killwait")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/killwait.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/killwait.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -286,7 +286,7 @@ func TestThreadExec(t *testing.T) {
 // kicks without re-kicking).
 func TestKickRace(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "kickrace")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/kickrace.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/kickrace.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	for _, mode := range []string{"futex", "read"} {
@@ -308,7 +308,7 @@ func TestKickRace(t *testing.T) {
 // caller with its own result once the handler is done.
 func TestSigSyscall(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "sigsyscall")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/sigsyscall.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/sigsyscall.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -324,7 +324,7 @@ func TestSigSyscall(t *testing.T) {
 func TestASLR(t *testing.T) {
 	for _, mode := range [][]string{{"-static-pie"}, {"-static", "-no-pie", "-fno-pie"}} {
 		out := filepath.Join(t.TempDir(), "aslr")
-		args := append(append([]string{"-O2"}, mode...), "-o", out, "../testdata/aslr.c")
+		args := append(append([]string{"-O2"}, mode...), "-o", out, "../../testdata/aslr.c")
 		if b, err := exec.Command("gcc", args...).CombinedOutput(); err != nil {
 			t.Skipf("static gcc unavailable: %v\n%s", err, b)
 		}
@@ -340,7 +340,7 @@ func TestASLR(t *testing.T) {
 // the file's last close removes it and releases the file to its peer.
 func TestEpollClose(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "epollclose")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/epollclose.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/epollclose.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -355,7 +355,7 @@ func TestEpollClose(t *testing.T) {
 // (testdata/rseq.c).
 func TestRseq(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "rseq")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/rseq.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/rseq.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc with sys/rseq.h unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -369,7 +369,7 @@ func TestRseq(t *testing.T) {
 // (testdata/vdso.c).
 func TestVdso(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "vdso")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/vdso.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/vdso.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -384,7 +384,7 @@ func TestVdso(t *testing.T) {
 // mapping's edge is read whole.
 func TestArgFault(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "argfault")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/argfault.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/argfault.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -400,7 +400,7 @@ func TestArgFault(t *testing.T) {
 // (testdata/nldump.c).
 func TestNetlinkDump(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "nldump")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/nldump.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/nldump.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -415,7 +415,7 @@ func TestNetlinkDump(t *testing.T) {
 // (testdata/vforkshare.c).
 func TestVforkShare(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "vforkshare")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/vforkshare.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/vforkshare.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -431,7 +431,7 @@ func TestVforkShare(t *testing.T) {
 // receives from it, and a service on the host's 127.0.0.1 is out of reach.
 func TestOwnLoopback(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "vlo")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", bin, "../testdata/vlo.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", bin, "../../testdata/vlo.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	svc, err := net.Listen("tcp", "127.0.0.1:0")
@@ -481,7 +481,7 @@ func TestOwnLoopback(t *testing.T) {
 // smaps_rollup sums them (testdata/smaps.c).
 func TestProcSmaps(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "smaps")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", bin, "../testdata/smaps.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", bin, "../../testdata/smaps.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var out bytes.Buffer
@@ -505,7 +505,7 @@ func TestVnetSockets(t *testing.T) {
 		nets []bool
 	}{{"vaddr", []bool{false, true}}, {"vreuse", []bool{false, true}}, {"vmcast", []bool{false}}} {
 		bin := filepath.Join(dir, c.prog)
-		if b, err := exec.Command("gcc", "-O2", "-static", "-o", bin, "../testdata/"+c.prog+".c").CombinedOutput(); err != nil {
+		if b, err := exec.Command("gcc", "-O2", "-static", "-o", bin, "../../testdata/"+c.prog+".c").CombinedOutput(); err != nil {
 			t.Skipf("static gcc unavailable: %v\n%s", err, b)
 		}
 		for _, network := range c.nets {
@@ -522,7 +522,7 @@ func TestVnetSockets(t *testing.T) {
 // a file does (testdata/jitsys.c).
 func TestJitSys(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "jitsys")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/jitsys.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/jitsys.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -537,7 +537,7 @@ func TestJitSys(t *testing.T) {
 // and by any process sharing it (testdata/sharedexec.c).
 func TestSharedExec(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "sharedexec")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/sharedexec.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/sharedexec.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -553,7 +553,7 @@ func TestSharedExec(t *testing.T) {
 // (testdata/selfstore.c).
 func TestSelfStore(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "selfstore")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/selfstore.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/selfstore.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -569,7 +569,7 @@ func TestSelfStore(t *testing.T) {
 // (testdata/crossexec.c).
 func TestCrossExec(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "crossexec")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/crossexec.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/crossexec.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -583,7 +583,7 @@ func TestCrossExec(t *testing.T) {
 // atomic write, whatever its iovecs (testdata/writevatomic.c).
 func TestWritevAtomic(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "writevatomic")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/writevatomic.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/writevatomic.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -597,7 +597,7 @@ func TestWritevAtomic(t *testing.T) {
 // (testdata/mmapplace.c), checked against the host mappings as they are made.
 func TestMmapPlace(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "mmapplace")
-	if b, err := exec.Command("gcc", "-O2", "-static-pie", "-o", out, "../testdata/mmapplace.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static-pie", "-o", out, "../../testdata/mmapplace.c").CombinedOutput(); err != nil {
 		t.Skipf("static-pie gcc unavailable: %v\n%s", err, b)
 	}
 	vmaValidate = true
@@ -611,7 +611,7 @@ func TestMmapPlace(t *testing.T) {
 
 func TestThreads(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "threads")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/threads.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/threads.c").CombinedOutput(); err != nil {
 		t.Skipf("static pthread gcc unavailable: %v\n%s", err, b)
 	}
 	var stdout bytes.Buffer
@@ -631,7 +631,7 @@ func TestThreads(t *testing.T) {
 
 func TestRWXDefaultAndRejectRWX(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "rwx")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/rwx.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/rwx.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	for _, tc := range []struct {
@@ -653,7 +653,7 @@ func TestRWXDefaultAndRejectRWX(t *testing.T) {
 
 func TestExecve(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "execer")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/execer.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/execer.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	if _, err := os.Stat("/bin/busybox"); err != nil {
@@ -673,7 +673,7 @@ func TestExecve(t *testing.T) {
 
 func TestForkWait(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "forker")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/forker.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/forker.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -688,7 +688,7 @@ func TestForkWait(t *testing.T) {
 
 func TestForkExec(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "forkexec")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/forkexec.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/forkexec.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	if _, err := os.Stat("/bin/busybox"); err != nil {
@@ -706,7 +706,7 @@ func TestForkExec(t *testing.T) {
 
 func TestSlotReuse(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "churn")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/churn.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/churn.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -726,7 +726,7 @@ func TestStubsDieWithSupervisor(t *testing.T) {
 		return
 	}
 	out := filepath.Join(t.TempDir(), "forkblock")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/forkblock.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/forkblock.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	sup := exec.Command(os.Args[0], "-test.run=^TestStubsDieWithSupervisor$")
@@ -768,7 +768,7 @@ func TestComputingStubsDieWithSupervisor(t *testing.T) {
 		return
 	}
 	out := filepath.Join(t.TempDir(), "forkspin")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/forkspin.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/forkspin.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	sup := exec.Command(os.Args[0], "-test.run=^TestComputingStubsDieWithSupervisor$")
@@ -831,7 +831,7 @@ func descendants(pid int) []int {
 
 func TestJoinThenUnmapStack(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "joinunmap")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/joinunmap.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/joinunmap.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -850,7 +850,7 @@ func TestDetachedThreadsExit(t *testing.T) {
 	}
 	out := filepath.Join(t.TempDir(), "detach")
 	target := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH] + "-linux-musl"
-	if b, err := exec.Command(z, "cc", "-target", target, "-O2", "-static", "-o", out, "../testdata/detach.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command(z, "cc", "-target", target, "-O2", "-static", "-o", out, "../../testdata/detach.c").CombinedOutput(); err != nil {
 		t.Skipf("build: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -864,7 +864,7 @@ func TestDetachedThreadsExit(t *testing.T) {
 // thread ends with that thread, freeing what it held.
 func TestLeaderExitsFirst(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "leaderexit")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/leaderexit.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/leaderexit.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -878,7 +878,7 @@ func TestLeaderExitsFirst(t *testing.T) {
 // control word, also when the fork came in through a signal handler.
 func TestForkKeepsFP(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "forkfp")
-	args := []string{"-O2", "-static", "-o", out, "../testdata/forkfp.c"}
+	args := []string{"-O2", "-static", "-o", out, "../../testdata/forkfp.c"}
 	if runtime.GOARCH == "amd64" {
 		if !cpuHasAVX() {
 			t.Skip("no AVX")
@@ -905,7 +905,7 @@ func cpuHasAVX() bool {
 // killed, not served.
 func TestStubJumpKilled(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "stubjump")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/stubjump.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/stubjump.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -923,7 +923,7 @@ func TestStubSignalScoped(t *testing.T) {
 		t.Skipf("Landlock ABI %d has no signal scope", int(abi))
 	}
 	out := filepath.Join(t.TempDir(), "stubjump")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/stubjump.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/stubjump.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -937,7 +937,7 @@ func TestStubSignalScoped(t *testing.T) {
 // process ends do not leave the supervisor waiting on them.
 func TestThreadExitRacesExitGroup(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "threadexitrace")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/threadexitrace.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/threadexitrace.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -953,7 +953,7 @@ func TestThreadExitRacesExitGroup(t *testing.T) {
 // under -race it checks the exit's memory accounting.
 func TestExitWhileMapping(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "exitrace")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../testdata/exitrace.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", out, "../../testdata/exitrace.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	code, err := Run(context.Background(), out, Config{Args: []string{"exitrace"}})
@@ -964,7 +964,7 @@ func TestExitWhileMapping(t *testing.T) {
 
 func TestExitLeavesBlockedChildren(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "forkexit")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/forkexit.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/forkexit.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	done := make(chan struct{})
@@ -986,7 +986,7 @@ func TestExitLeavesBlockedChildren(t *testing.T) {
 
 func TestWaitReapsOnlyOwnChildren(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "waitown")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/waitown.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/waitown.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -998,7 +998,7 @@ func TestWaitReapsOnlyOwnChildren(t *testing.T) {
 
 func TestMemCap(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "eat")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../testdata/eatmem.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", out, "../../testdata/eatmem.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
@@ -1039,7 +1039,7 @@ func TestGoProgram(t *testing.T) {
 	dir := t.TempDir()
 	for _, mode := range []string{"exe", "pie"} {
 		out := filepath.Join(dir, "go-"+mode)
-		cmd := exec.Command("go", "build", "-buildmode="+mode, "-o", out, "../testdata/gothreads.go")
+		cmd := exec.Command("go", "build", "-buildmode="+mode, "-o", out, "../../testdata/gothreads.go")
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if b, err := cmd.CombinedOutput(); err != nil {
 			t.Skipf("go build unavailable: %v\n%s", err, b)

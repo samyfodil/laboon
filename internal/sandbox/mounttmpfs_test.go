@@ -14,7 +14,7 @@ import (
 // back, and the mount is isolated from the rootfs path it covered.
 func TestMountTmpfs(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "mounttmpfs")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/mounttmpfs.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mounttmpfs.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

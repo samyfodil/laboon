@@ -41,7 +41,7 @@ func TestMountSocket(t *testing.T) {
 
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "x11sock")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../testdata/x11sock.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/x11sock.c").CombinedOutput(); err != nil {
 		t.Skipf("build: %v\n%s", err, b)
 	}
 

@@ -16,7 +16,7 @@ import (
 // runs as root (Config.User nil), so the child can setuid away.
 func TestKillCred(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "killcred")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/killcred.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/killcred.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

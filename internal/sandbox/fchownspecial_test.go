@@ -14,7 +14,7 @@ import (
 // std streams it points there), not fail resolving a nonexistent path.
 func TestFchownSpecial(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "fchownspecial")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/fchownspecial.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/fchownspecial.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

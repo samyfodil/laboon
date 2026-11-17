@@ -18,7 +18,7 @@ func TestVforkLifecycle(t *testing.T) {
 	for _, name := range []string{"execspawn", "vforkhold"} {
 		t.Run(name, func(t *testing.T) {
 			exe := filepath.Join(t.TempDir(), name)
-			if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", exe, "../testdata/"+name+".c").CombinedOutput(); err != nil {
+			if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", exe, "../../testdata/"+name+".c").CombinedOutput(); err != nil {
 				t.Skipf("static gcc unavailable: %v\n%s", err, b)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -38,13 +38,13 @@ func TestPosixSpawn(t *testing.T) {
 	dir := t.TempDir()
 	hello := filepath.Join(dir, "hello")
 	builds := map[string][]string{
-		hello:                             {"gcc", "-O2", "-static", "-o", hello, "../testdata/hello.c"},
-		filepath.Join(dir, "spawn-glibc"): {"gcc", "-O2", "-static", "-o", filepath.Join(dir, "spawn-glibc"), "../testdata/spawn.c"},
+		hello:                             {"gcc", "-O2", "-static", "-o", hello, "../../testdata/hello.c"},
+		filepath.Join(dir, "spawn-glibc"): {"gcc", "-O2", "-static", "-o", filepath.Join(dir, "spawn-glibc"), "../../testdata/spawn.c"},
 	}
 	if z := zigCC(); z != "" {
 		musl := filepath.Join(dir, "spawn-musl")
 		target := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH] + "-linux-musl"
-		builds[musl] = []string{z, "cc", "-target", target, "-O2", "-static", "-o", musl, "../testdata/spawn.c"}
+		builds[musl] = []string{z, "cc", "-target", target, "-O2", "-static", "-o", musl, "../../testdata/spawn.c"}
 	}
 	for _, c := range builds {
 		if b, err := exec.Command(c[0], c[1:]...).CombinedOutput(); err != nil {

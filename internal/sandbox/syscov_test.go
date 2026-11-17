@@ -18,7 +18,7 @@ import (
 // Windows gates run the same probe against their hosts.
 func TestSyscallCoverage(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "syscov")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/syscov.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/syscov.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

@@ -60,11 +60,11 @@ func TestListMergesOverlayLayers(t *testing.T) {
 func TestFsOps(t *testing.T) {
 	dir := t.TempDir()
 	builds := map[string][]string{
-		"glibc": {"gcc", "-O2", "-static", "-w", "-pthread", "-o", filepath.Join(dir, "glibc"), "../testdata/fsops.c"},
+		"glibc": {"gcc", "-O2", "-static", "-w", "-pthread", "-o", filepath.Join(dir, "glibc"), "../../testdata/fsops.c"},
 	}
 	if z := zigCC(); z != "" {
 		target := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH] + "-linux-musl"
-		builds["musl"] = []string{z, "cc", "-target", target, "-O2", "-static", "-o", filepath.Join(dir, "musl"), "../testdata/fsops.c"}
+		builds["musl"] = []string{z, "cc", "-target", target, "-O2", "-static", "-o", filepath.Join(dir, "musl"), "../../testdata/fsops.c"}
 	}
 	for libc, c := range builds {
 		if b, err := exec.Command(c[0], c[1:]...).CombinedOutput(); err != nil {

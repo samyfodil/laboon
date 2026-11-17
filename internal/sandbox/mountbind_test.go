@@ -14,7 +14,7 @@ import (
 // the vfs like any other mount.
 func TestMountBind(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "mountbind")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/mountbind.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mountbind.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

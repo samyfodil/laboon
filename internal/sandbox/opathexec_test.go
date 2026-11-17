@@ -14,7 +14,7 @@ import (
 // name is unlinked — the fexecve / bind-mount-ro re-exec a container runtime uses.
 func TestOPathExec(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "opathexec")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/opathexec.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/opathexec.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

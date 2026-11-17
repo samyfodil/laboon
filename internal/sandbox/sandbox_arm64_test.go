@@ -21,9 +21,9 @@ func TestSyscallPreservesRegisters(t *testing.T) {
 	regs, threads := filepath.Join(dir, "regs"), filepath.Join(dir, "threads")
 	belowsp := filepath.Join(dir, "belowsp")
 	for _, c := range [][]string{
-		{"-O2", "-static", "-o", belowsp, "../testdata/belowsp_arm64.c"},
-		{"-O2", "-static", "-o", regs, "../testdata/regs_arm64.c"},
-		{"-O2", "-static", "-pthread", "-o", threads, "../testdata/threads.c"},
+		{"-O2", "-static", "-o", belowsp, "../../testdata/belowsp_arm64.c"},
+		{"-O2", "-static", "-o", regs, "../../testdata/regs_arm64.c"},
+		{"-O2", "-static", "-pthread", "-o", threads, "../../testdata/threads.c"},
 	} {
 		if b, err := exec.Command("gcc", c...).CombinedOutput(); err != nil {
 			t.Skipf("static gcc unavailable: %v\n%s", err, b)
@@ -70,8 +70,8 @@ func TestBTIRemapKeepsRewrittenCode(t *testing.T) {
 		}
 		lib, exe := filepath.Join(dir, "libbti.so"), filepath.Join(dir, "btimain")
 		for _, c := range [][]string{
-			append([]string{"-O2", "-fPIC", "-shared", "-o", lib, "../testdata/btilib.c"}, flags...),
-			append([]string{"-O2", "-o", exe, "../testdata/btimain.c", "-L" + dir, "-lbti", "-Wl,-rpath," + dir}, flags...),
+			append([]string{"-O2", "-fPIC", "-shared", "-o", lib, "../../testdata/btilib.c"}, flags...),
+			append([]string{"-O2", "-o", exe, "../../testdata/btimain.c", "-L" + dir, "-lbti", "-Wl,-rpath," + dir}, flags...),
 		} {
 			if b, err := exec.Command("gcc", c...).CombinedOutput(); err != nil {
 				t.Skipf("gcc: %v\n%s", err, b)

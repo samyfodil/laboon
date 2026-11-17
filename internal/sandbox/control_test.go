@@ -16,7 +16,7 @@ import (
 // handle, and Control.Pid must name the running host leader.
 func TestControlSignal(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "sigwait")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/sigwait.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/sigwait.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	pr, pw, err := os.Pipe()

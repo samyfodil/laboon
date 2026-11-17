@@ -16,7 +16,7 @@ import (
 // map a stub fd, the Windows stub a duplicated section.
 func TestShm(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "shmtest")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/shmtest.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/shmtest.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

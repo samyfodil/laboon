@@ -14,7 +14,7 @@ import (
 // inherit the fifo type from stale per-inode metadata.
 func TestFifoReuse(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "fiforeuse")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/fiforeuse.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/fiforeuse.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

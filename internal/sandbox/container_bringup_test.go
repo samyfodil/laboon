@@ -13,7 +13,7 @@ import (
 func runC(t *testing.T, csrc, marker string) {
 	t.Helper()
 	exe := filepath.Join(t.TempDir(), "t")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/"+csrc).CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/"+csrc).CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

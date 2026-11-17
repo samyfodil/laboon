@@ -15,7 +15,7 @@ import (
 
 func TestPtrace(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "ptrace")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", exe, "../testdata/ptrace.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", exe, "../../testdata/ptrace.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	t.Run("cancel", func(t *testing.T) {
@@ -70,7 +70,7 @@ func TestPtraceThreadExec(t *testing.T) {
 		t.Skip("strace unavailable")
 	}
 	exe := filepath.Join(t.TempDir(), "execspawn")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", exe, "../testdata/execspawn.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", exe, "../../testdata/execspawn.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

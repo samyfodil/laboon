@@ -14,7 +14,7 @@ import (
 // clone event and a start stop for each, and each one's end.
 func TestPtraceThreads(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "ptracethreads")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", exe, "../testdata/ptracethreads.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", exe, "../../testdata/ptracethreads.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

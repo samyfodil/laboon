@@ -25,7 +25,7 @@ func TestCreateRace(t *testing.T) {
 		}
 	}
 	bin := filepath.Join(lower, "createrace")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", bin, "../testdata/createrace.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", bin, "../../testdata/createrace.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	for _, c := range []struct {

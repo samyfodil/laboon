@@ -14,7 +14,7 @@ import (
 // with the right number and open to the host device's behavior.
 func TestMknodDev(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "mknoddev")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/mknoddev.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mknoddev.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

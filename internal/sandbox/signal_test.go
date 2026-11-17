@@ -29,11 +29,11 @@ func zigCC() string {
 func TestSignals(t *testing.T) {
 	dir := t.TempDir()
 	builds := map[string][]string{
-		"glibc": {"gcc", "-O2", "-static", "-pthread", "-o", filepath.Join(dir, "glibc"), "../testdata/signals.c"},
+		"glibc": {"gcc", "-O2", "-static", "-pthread", "-o", filepath.Join(dir, "glibc"), "../../testdata/signals.c"},
 	}
 	if z := zigCC(); z != "" {
 		target := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH] + "-linux-musl"
-		builds["musl"] = []string{z, "cc", "-target", target, "-O2", "-static", "-o", filepath.Join(dir, "musl"), "../testdata/signals.c"}
+		builds["musl"] = []string{z, "cc", "-target", target, "-O2", "-static", "-o", filepath.Join(dir, "musl"), "../../testdata/signals.c"}
 	}
 	for libc, c := range builds {
 		if b, err := exec.Command(c[0], c[1:]...).CombinedOutput(); err != nil {
@@ -68,7 +68,7 @@ func TestShellJobs(t *testing.T) {
 // and os/exec rely on signals too.
 func TestGoSignals(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "gosignals")
-	cmd := exec.Command("go", "build", "-o", exe, "../testdata/gosignals")
+	cmd := exec.Command("go", "build", "-o", exe, "../../testdata/gosignals")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("go build unavailable: %v\n%s", err, b)

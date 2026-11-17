@@ -17,7 +17,7 @@ import (
 func TestCPUFilesInEmptyRoot(t *testing.T) {
 	root := t.TempDir()
 	exe := filepath.Join(root, "cpuinfo")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/cpuinfo.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/cpuinfo.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var out bytes.Buffer

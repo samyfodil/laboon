@@ -16,7 +16,7 @@ import (
 func TestNetNamespace(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "netns")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../testdata/netns.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/netns.c").CombinedOutput(); err != nil {
 		t.Skipf("build: %v\n%s", err, b)
 	}
 	var out bytes.Buffer

@@ -16,7 +16,7 @@ import (
 // Windows VMs through their gates).
 func TestPtraceSetRegs(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "setregs")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/ptracesetregs.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/ptracesetregs.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

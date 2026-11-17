@@ -31,7 +31,7 @@ func TestCopyUpModeCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(lower, "copyupmode")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../testdata/copyupmode.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/copyupmode.c").CombinedOutput(); err != nil {
 		t.Skipf("build: %v\n%s", err, b)
 	}
 

@@ -17,7 +17,7 @@ import (
 func TestNetModelEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "netmodel")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../testdata/netmodel.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/netmodel.c").CombinedOutput(); err != nil {
 		t.Skipf("build: %v\n%s", err, b)
 	}
 	var out bytes.Buffer
@@ -37,7 +37,7 @@ func TestNetModelEndToEnd(t *testing.T) {
 func TestNetModelHostEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "netmodelhost")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../testdata/netmodelhost.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/netmodelhost.c").CombinedOutput(); err != nil {
 		t.Skipf("build: %v\n%s", err, b)
 	}
 	var out bytes.Buffer

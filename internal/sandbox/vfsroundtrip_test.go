@@ -91,7 +91,7 @@ func TestVFSRoundTrip(t *testing.T) {
 func buildGuest(t *testing.T, lower, name string) string {
 	t.Helper()
 	bin := filepath.Join(lower, name)
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../testdata/"+name+".c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/"+name+".c").CombinedOutput(); err != nil {
 		t.Skipf("build %s: %v\n%s", name, err, b)
 	}
 	return bin

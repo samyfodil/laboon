@@ -20,7 +20,7 @@ func TestSingleStep(t *testing.T) {
 		t.Skip("x86 trap-flag single-step")
 	}
 	exe := filepath.Join(t.TempDir(), "singlestep")
-	if b, err := exec.Command("gcc", "-O0", "-static", "-o", exe, "../testdata/singlestep.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O0", "-static", "-o", exe, "../../testdata/singlestep.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

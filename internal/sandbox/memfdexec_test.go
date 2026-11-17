@@ -15,7 +15,7 @@ import (
 // stub launch) rely on it.
 func TestMemfdExec(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "memfdexec")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/memfdexec.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/memfdexec.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

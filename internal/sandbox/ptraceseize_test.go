@@ -15,7 +15,7 @@ import (
 // included, as Linux has them.
 func TestPtraceSeize(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "ptraceseize")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", exe, "../testdata/ptraceseize.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-pthread", "-o", exe, "../../testdata/ptraceseize.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	for _, args := range [][]string{{exe}, {exe, "stopped-mt"}} {

@@ -15,7 +15,7 @@ import (
 // not the supervisor's own (no host secrets via envp or /proc/self/environ).
 func TestEnvNotLeaked(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "envleak")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/envleak.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/envleak.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	os.Setenv("LABOON_SECRET_PROBE", "leaked") // a host var that must not reach the guest

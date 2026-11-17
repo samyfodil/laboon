@@ -16,7 +16,7 @@ import (
 // device that looked like a plain rdev-0 file made it clobber the stdout pipe.
 func TestTmpfsDevRdev(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "tmpfsdev")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/tmpfsdev.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/tmpfsdev.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

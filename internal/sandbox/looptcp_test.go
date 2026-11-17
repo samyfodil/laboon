@@ -13,7 +13,7 @@ import (
 // A TCP client and server on 127.0.0.1 inside an isolated netns talk over vnet.
 func TestLoopTCP(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "looptcp")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", exe, "../testdata/looptcp.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", exe, "../../testdata/looptcp.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

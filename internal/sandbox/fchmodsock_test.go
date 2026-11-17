@@ -14,7 +14,7 @@ import (
 // a path (conmon relies on this for its console socket and stderr pipe).
 func TestFchmodSocketPipe(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "fchmodsock")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/fchmodsock.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/fchmodsock.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

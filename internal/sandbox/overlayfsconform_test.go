@@ -35,7 +35,7 @@ func TestOverlayFSConformance(t *testing.T) {
 		}
 	}
 	bin := filepath.Join(lower, "vfsmutate")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../testdata/vfsmutate.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/vfsmutate.c").CombinedOutput(); err != nil {
 		t.Skipf("build: %v\n%s", err, b)
 	}
 

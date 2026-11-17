@@ -16,7 +16,7 @@ import (
 func TestSeccompEnforced(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "seccomp")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../testdata/seccomp.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/seccomp.c").CombinedOutput(); err != nil {
 		t.Skipf("build: %v\n%s", err, b)
 	}
 	var out bytes.Buffer
@@ -34,7 +34,7 @@ func TestSeccompEnforced(t *testing.T) {
 func TestSeccompTrap(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "seccomp_trap")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../testdata/seccomp_trap.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/seccomp_trap.c").CombinedOutput(); err != nil {
 		t.Skipf("build: %v\n%s", err, b)
 	}
 	var out bytes.Buffer
@@ -55,7 +55,7 @@ func TestSeccompTrap(t *testing.T) {
 func TestSeccompSigreturn(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "seccomp_sigreturn")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../testdata/seccomp_sigreturn.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/seccomp_sigreturn.c").CombinedOutput(); err != nil {
 		t.Skipf("build: %v\n%s", err, b)
 	}
 	var out bytes.Buffer

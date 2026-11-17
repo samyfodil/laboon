@@ -21,7 +21,7 @@ func TestStraceArm64(t *testing.T) {
 		t.Skip("arm64 register set")
 	}
 	exe := filepath.Join(t.TempDir(), "stracearm")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/stracearm.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/stracearm.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

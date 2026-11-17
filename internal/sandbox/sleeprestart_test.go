@@ -15,7 +15,7 @@ import (
 // by restart_syscall; a handler, even with SA_RESTART, ends it with EINTR.
 func TestSleepRestart(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "sleeprestart")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../testdata/sleeprestart.c").CombinedOutput(); err != nil {
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/sleeprestart.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
