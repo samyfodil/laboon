@@ -205,6 +205,13 @@ func (fs *dfs) dynMagic(gp string) (uint64, bool) {
 // (vfs.NewMemFS) at target: volatile and separate from the rootfs, as the kernel
 // tmpfs is. A mode= option, if given, sets the root directory's permission bits.
 func (g *dguest) mountMem(target, data string) int64 {
+	if sharedMemMount(target) {
+		// The POSIX shared-memory area must be host-backed so a MAP_SHARED mapping
+		// works (shared-memory programs — postgres, Chromium — rely on it); a pure
+		// in-memory backend has no host fd to map. Its files are hostRF, so
+		// hostRF.mmap does the shared mapping with no extra code.
+		return g.mountFS(target)
+	}
 	mfs := vfs.NewMemFS()
 	if mode := tmpfsMode(data); mode != 0 {
 		m := mode
@@ -215,6 +222,17 @@ func (g *dguest) mountMem(target, data string) int64 {
 	}
 	g.addDynMount(target, mfs)
 	return 0
+}
+
+// sharedMemMount reports whether a tmpfs mount at target is the POSIX
+// shared-memory area (/dev/shm or /run/shm, including under a container rootfs),
+// which must be host-backed so a MAP_SHARED mapping works. It is a kernel
+// filesystem path, like /proc and /sys — not a guess about the program mounting
+// it.
+func sharedMemMount(target string) bool {
+	t := strings.TrimRight(target, "/")
+	return t == "/dev/shm" || strings.HasSuffix(t, "/dev/shm") ||
+		t == "/run/shm" || strings.HasSuffix(t, "/run/shm")
 }
 
 // tmpfsMode reads the octal mode= option from a tmpfs mount's option string, or 0
