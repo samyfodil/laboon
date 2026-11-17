@@ -341,25 +341,42 @@ func (g *dguest) mremapMove(old, oldLen, newLen, flags uint64, anon bool) int64 
 // mmapFile maps a guest file. Executable mappings are rewritten before they
 // become executable. g.mp.mu held.
 func (g *dguest) mmapFile(a [6]uint64) int64 {
-	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], int64(a[5])
 	d, ok := g.ft.get(int(int32(a[4])))
 	if !ok {
 		return sErr(lxEBADF)
 	}
-	if d.f == nil {
-		if d.rf != nil && flags&unix.MAP_SHARED == 0 {
-			return g.mmapMemPrivate(d, a) // a non-host backend: private copy; a shared mapping needs a host fd (ENODEV until a host-backed tmpFS)
-		}
+	if m, ok := d.rf.(mmapRegFile); ok {
+		return m.mmap(g, a) // a regular file maps itself; its host fd (if any) stays inside the impl
+	}
+	if d.ev != nil || d.ep != nil || d.sk != nil || d.f == nil {
 		return sErr(lxENODEV)
 	}
-	if d.ev != nil || d.ep != nil || d.sk != nil {
-		return sErr(lxENODEV)
+	return g.mmapHostFd(d.f, a) // a device or other host fd that is not a regular file
+}
+
+// mmapRegFile is a regFile that maps itself into the guest: hostRF with its host
+// fd, memRF with a private copy. The fd never leaves the implementation, so the
+// mmap handler does not distinguish a host-backed filesystem from any other.
+type mmapRegFile interface {
+	mmap(g *dguest, a [6]uint64) int64
+}
+
+func (h *hostRF) mmap(g *dguest, a [6]uint64) int64 { return g.mmapHostFd(h.f, a) }
+
+func (m *memRF) mmap(g *dguest, a [6]uint64) int64 {
+	if a[3]&unix.MAP_SHARED != 0 || a[2]&unix.PROT_EXEC != 0 {
+		return sErr(lxENODEV) // a shared or executable mapping needs a host fd (a host-backed tmpFS does this, later)
 	}
-	f := d.f
+	return g.mmapMemPrivate(m, a)
+}
+
+// mmapHostFd maps a host file into the guest: a shared mapping is the host's own
+// (its descriptor passed to the stub), a fixed executable re-map reuses the code
+// already there, and a private mapping is the file mapped directly (mmapPrivate)
+// or read into an anonymous region and rewritten if executable.
+func (g *dguest) mmapHostFd(f *os.File, a [6]uint64) int64 {
+	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], int64(a[5])
 	if flags&unix.MAP_SHARED != 0 {
-		// Shared memory is the host's own, executable or not: what one
-		// mapping writes, every other runs. A syscall in it traps through
-		// seccomp, as one in code made at run time does.
 		return g.mmapShared(f, a)
 	}
 	if flags&unix.MAP_FIXED != 0 && prot&unix.PROT_EXEC != 0 && prot&unix.PROT_WRITE == 0 &&
@@ -404,7 +421,7 @@ func (g *dguest) mmapFile(a [6]uint64) int64 {
 // cannot map directly. A shared mapping is refused by mmapFile (it needs a
 // coherent host mapping), and an executable one is not supported here (the code
 // would have to be read back for rewriting from a file that is not on the host).
-func (g *dguest) mmapMemPrivate(d *dfile, a [6]uint64) int64 {
+func (g *dguest) mmapMemPrivate(m *memRF, a [6]uint64) int64 {
 	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], a[5]
 	if prot&unix.PROT_EXEC != 0 {
 		return sErr(lxENODEV)
@@ -422,7 +439,7 @@ func (g *dguest) mmapMemPrivate(d *dfile, a [6]uint64) int64 {
 	buf := g.ioBuf(int(min(int64(length), ioChunk)))
 	for pos := int64(0); pos < int64(length); {
 		b := buf[:min(int64(length)-pos, int64(len(buf)))]
-		k, err := d.rf.readAt(b, int64(off)+pos)
+		k, err := m.readAt(b, int64(off)+pos)
 		if k > 0 {
 			if g.writeMem(uint64(r)+uint64(pos), b[:k]) != nil {
 				return sErr(lxEFAULT)
