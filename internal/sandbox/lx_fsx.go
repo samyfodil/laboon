@@ -1112,7 +1112,16 @@ func (g *dguest) ftruncate(fd int64, length int64) int64 {
 	if length < 0 {
 		return sErr(lxEINVAL)
 	}
-	if d.f == nil || d.isDir || !d.writable() {
+	if d.isDir || !d.writable() {
+		return sErr(lxEINVAL)
+	}
+	if d.f == nil {
+		if d.mem != nil && d.mem.vf != nil { // an in-memory backend file (tmpfs, WithFS)
+			if err := d.mem.vf.Truncate(length); err != nil {
+				return sErr(osErrno(err))
+			}
+			return 0
+		}
 		return sErr(lxEINVAL)
 	}
 	fi, err := fileStat(d.f)

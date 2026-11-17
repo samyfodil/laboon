@@ -346,7 +346,13 @@ func (g *dguest) mmapFile(a [6]uint64) int64 {
 	if !ok {
 		return sErr(lxEBADF)
 	}
-	if d.f == nil || d.ev != nil || d.ep != nil || d.sk != nil {
+	if d.f == nil {
+		if d.mem != nil && d.mem.vf != nil && flags&unix.MAP_SHARED == 0 {
+			return g.mmapMemPrivate(d, a) // in-memory backend: private copy; shared is ENODEV
+		}
+		return sErr(lxENODEV)
+	}
+	if d.ev != nil || d.ep != nil || d.sk != nil {
 		return sErr(lxENODEV)
 	}
 	f := d.f
@@ -381,6 +387,37 @@ func (g *dguest) mmapFile(a [6]uint64) int64 {
 		if res := g.installCode(uint64(r), data, prot, &codeSource{f: f, off: uint64(off)}, false); res < 0 {
 			return res
 		}
+		return r
+	}
+	if err := g.writeMem(uint64(r), data); err != nil {
+		return sErr(lxEFAULT)
+	}
+	if res := g.host(unix.SYS_MPROTECT, uint64(r), alignUp(length), prot); res < 0 {
+		return res
+	}
+	return r
+}
+
+// mmapMemPrivate maps a private copy of an in-memory backend file (tmpfs,
+// WithFS): there is no host fd to map, so the bytes are read through the vfs.File
+// and copied into an anonymous mapping, as the host path does for a region it
+// cannot map directly. A shared mapping is refused by mmapFile (it needs a
+// coherent host mapping), and an executable one is not supported here (the code
+// would have to be read back for rewriting from a file that is not on the host).
+func (g *dguest) mmapMemPrivate(d *dfile, a [6]uint64) int64 {
+	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], a[5]
+	if prot&unix.PROT_EXEC != 0 {
+		return sErr(lxENODEV)
+	}
+	g.dropFileCode(addr, length)
+	data := make([]byte, length)
+	if _, err := d.mem.vf.ReadAt(data, int64(off)); err != nil && err != io.EOF {
+		return sErr(lxEIO)
+	}
+	r := g.notReserved(g.mapAt(addr, length, flags, false, func(at, fixed uint64) int64 {
+		return g.host(unix.SYS_MMAP, at, length, unix.PROT_READ|unix.PROT_WRITE, fixed|unix.MAP_PRIVATE|unix.MAP_ANONYMOUS, ^uint64(0), 0)
+	}), length)
+	if r < 0 {
 		return r
 	}
 	if err := g.writeMem(uint64(r), data); err != nil {

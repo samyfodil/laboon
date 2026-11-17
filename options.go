@@ -182,6 +182,17 @@ func WithMountReadOnly(host, guest string) Option {
 	}
 }
 
+// WithFS mounts fs, a FileSystem, at the guest path guest. It is the general form
+// of WithMount: where WithMount binds a host directory, WithFS mounts any backend
+// — NewMemFS for in-memory storage, NewDirFS for a host tree, Overlay for a
+// union, any of them wrapped with ReadOnly or HardenFS, or a FileSystem you
+// implement yourself. Mounting over an existing path shadows it.
+func WithFS(guest string, fs FileSystem) Option {
+	return func(o *options) {
+		o.cfg.Mounts = append(o.cfg.Mounts, sandbox.Mount{Guest: guest, FS: fs})
+	}
+}
+
 // Terminal and WinSize are re-exported so a caller using WithTerminal need not
 // import the sandbox package.
 type (

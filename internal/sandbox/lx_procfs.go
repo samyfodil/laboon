@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"hash/fnv"
+	"io"
 	"os"
 	"path"
 	"sort"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/samyfodil/laboon/internal/vfs"
 )
 
 // Synthetic /proc, /sys and /dev. The rootfs carries none of them, so the
@@ -719,9 +722,11 @@ func emptyDir() string {
 	return emptyPath
 }
 
-// memFile is an open synthetic file: its node, the content last generated and
-// the description's offset. It has no host file (dfile.f is nil), so generic
-// fd code treats it as a non-host fd; read, write, lseek and fstat ask memOf.
+// memFile is an open non-host file: it has no host file (dfile.f is nil), so
+// generic fd code treats it as a non-host fd and read, write, lseek and fstat ask
+// memOf. It serves two kinds. A synthetic file (/proc, /sys) generates its bytes
+// on demand from a pnode (n). An in-memory backend file (tmpfs, WithFS) reads and
+// writes real content through a vfs.File handle (vf) over a vfs.Node (vn).
 type memFile struct {
 	memory procMemIO
 	mu     sync.Mutex
@@ -732,6 +737,10 @@ type memFile struct {
 	data   []byte
 	pos    int64
 	done   bool // data generated
+
+	vn     vfs.Node // in-memory backend: the node (stat, size); nil for a synthetic file
+	vf     vfs.File // its content handle (read/write/truncate)
+	append bool     // O_APPEND: writes go to the current end
 }
 
 func (m *memFile) accmode() uint64 {
@@ -776,6 +785,20 @@ func (g *dguest) memRead(fd int64, bufAddr uint64, n int64) (int64, bool) {
 	if n < 0 {
 		return sErr(lxEINVAL), true
 	}
+	if m.vf != nil {
+		buf := make([]byte, n)
+		m.mu.Lock()
+		k, err := m.vf.ReadAt(buf, m.pos)
+		m.pos += int64(k)
+		m.mu.Unlock()
+		if k == 0 && err != nil && err != io.EOF {
+			return sErr(lxEIO), true
+		}
+		if err := g.writeMem(bufAddr, buf[:k]); err != nil {
+			return sErr(lxEFAULT), true
+		}
+		return int64(k), true
+	}
 	m.mu.Lock()
 	if m.memory != nil {
 		r := g.procMemIO(m, bufAddr, n, m.pos, false)
@@ -807,6 +830,17 @@ func (g *dguest) memPread(fd int64, bufAddr uint64, n, off int64) (int64, bool) 
 	if n < 0 || off < 0 {
 		return sErr(lxEINVAL), true
 	}
+	if m.vf != nil {
+		buf := make([]byte, n)
+		k, err := m.vf.ReadAt(buf, off)
+		if k == 0 && err != nil && err != io.EOF {
+			return sErr(lxEIO), true
+		}
+		if err := g.writeMem(bufAddr, buf[:k]); err != nil {
+			return sErr(lxEFAULT), true
+		}
+		return int64(k), true
+	}
 	if m.memory != nil {
 		return g.procMemIO(m, bufAddr, n, off, false), true
 	}
@@ -828,6 +862,29 @@ func (g *dguest) memWrite(fd int64, bufAddr uint64, n int64) (int64, bool) {
 	}
 	if !m.wr {
 		return sErr(lxEBADF), true
+	}
+	if m.vf != nil {
+		if n < 0 {
+			return sErr(lxEINVAL), true
+		}
+		buf, err := g.readMem(bufAddr, int(n))
+		if err != nil {
+			return sErr(lxEFAULT), true
+		}
+		m.mu.Lock()
+		off := m.pos
+		if m.append {
+			if a, e := m.vn.Stat(); e == nil {
+				off = a.Size
+			}
+		}
+		k, werr := m.vf.WriteAt(buf, off)
+		m.pos = off + int64(k)
+		m.mu.Unlock()
+		if werr != nil && k == 0 {
+			return sErr(osErrno(werr)), true
+		}
+		return int64(k), true
 	}
 	if m.memory != nil {
 		m.mu.Lock()
@@ -852,7 +909,27 @@ func (g *dguest) memWrite(fd int64, bufAddr uint64, n int64) (int64, bool) {
 
 func (g *dguest) memPwrite(fd int64, addr uint64, n, off int64) (int64, bool) {
 	m := g.memOf(fd)
-	if m == nil || m.memory == nil {
+	if m == nil {
+		return 0, false
+	}
+	if m.vf != nil {
+		if !m.wr {
+			return sErr(lxEBADF), true
+		}
+		if n < 0 || off < 0 {
+			return sErr(lxEINVAL), true
+		}
+		buf, err := g.readMem(addr, int(n))
+		if err != nil {
+			return sErr(lxEFAULT), true
+		}
+		k, werr := m.vf.WriteAt(buf, off)
+		if werr != nil && k == 0 {
+			return sErr(osErrno(werr)), true
+		}
+		return int64(k), true
+	}
+	if m.memory == nil {
 		return 0, false
 	}
 	return g.procMemIO(m, addr, n, off, true), true
@@ -905,7 +982,16 @@ func (g *dguest) memLseek(fd, off, whence int64) (int64, bool) {
 	case 0: // SEEK_SET
 	case 1: // SEEK_CUR
 		base = m.pos
-	default: // seq_files have no SEEK_END
+	case 2: // SEEK_END
+		if m.vf == nil {
+			return sErr(lxEINVAL), true // a synthetic seq_file has no end
+		}
+		a, err := m.vn.Stat()
+		if err != nil {
+			return sErr(lxEIO), true
+		}
+		base = a.Size
+	default:
 		return sErr(lxEINVAL), true
 	}
 	if base+off < 0 {

@@ -400,20 +400,22 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		if wr || creat {
 			return sErr(lxEISDIR)
 		}
-		f, e := g.openFile(gp)
+		loc, err := g.vns().Resolve(gp, false)
+		if err != nil {
+			return sErr(osErrno(err))
+		}
+		f, mem, e := g.openDir(loc, gp)
 		if e != 0 {
 			return sErr(e)
 		}
-		d := &dfile{f: f, gp: gp, isDir: true, stub: -1}
+		d := &dfile{f: f, gp: gp, isDir: true, stub: -1, mem: mem}
 		// Pin the directory's identity so getdents enumerates the directory that
 		// was opened, not whichever one later occupies this path: if the path is
 		// rmdir'd and remade, or another directory is renamed onto it, a fresh
 		// resolve of the (unchanged) path would otherwise list the impostor.
 		// canon survives copy-up, so a later write into the directory does not
 		// make it look replaced.
-		if loc, err := g.vns().Resolve(gp, false); err == nil {
-			d.dirID, d.dirIDok = g.ov.canon(loc.Node.ID()), true
-		}
+		d.dirID, d.dirIDok = g.ov.canon(loc.Node.ID()), true
 		return g.installD(d, flags)
 	}
 	if fi.Mode()&os.ModeNamedPipe != 0 {
@@ -445,8 +447,7 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		}
 		of, ok := nf.(*os.File)
 		if !ok {
-			nf.Close()
-			return sErr(lxEINVAL)
+			return g.installVFile(gp, loc.Node, nf, flags)
 		}
 		return g.install(of, gp, flags)
 	}
@@ -466,8 +467,7 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		}
 		of, ok := nf.(*os.File)
 		if !ok {
-			nf.Close()
-			return sErr(lxEINVAL)
+			return g.installVFile(gp, loc.Node, nf, flags)
 		}
 		if flags&lxOTrunc != 0 {
 			g.fileModified(of)
@@ -478,11 +478,21 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		}
 		return fd
 	}
-	f, e := g.openFile(gp)
-	if e != 0 {
-		return sErr(e)
+	// A read-only open of a regular file (dirs, fifos, devices and writable opens
+	// are handled above). A host backend returns an *os.File; an in-memory backend
+	// (tmpfs, WithFS) returns a vfs.File served through the vfs interface.
+	loc, err := g.vns().Resolve(gp, false)
+	if err != nil {
+		return sErr(osErrno(err))
 	}
-	return g.install(f, gp, flags)
+	nf, err := loc.Node.Open(goOpenFlags(flags) &^ (os.O_CREATE | os.O_EXCL | os.O_TRUNC))
+	if err != nil {
+		return sErr(osErrno(err))
+	}
+	if of, ok := nf.(*os.File); ok {
+		return g.install(of, gp, flags)
+	}
+	return g.installVFile(gp, loc.Node, nf, flags)
 }
 
 // openVirtualDev opens a mknod'd char device by mapping its device number to
@@ -561,8 +571,11 @@ func (g *dguest) createFile(gp string, flags, mode int64) int64 {
 	}
 	of, ok := nf.(*os.File)
 	if !ok {
-		nf.Close()
-		return sErr(lxEINVAL)
+		fd := g.installVFile(gp, c, nf, flags)
+		if fd >= 0 {
+			g.notify(gp, inCreate, 0)
+		}
+		return fd
 	}
 	fd := g.install(of, gp, flags)
 	if fd >= 0 {
@@ -591,6 +604,23 @@ func (g *dguest) openTmpfile(dir string, flags, mode int64) int64 {
 		}
 	}
 	return g.installD(d, flags)
+}
+
+// installVFile tracks a non-host file — an in-memory backend's (tmpfs, WithFS):
+// the guest fd is backed by the vfs.File handle vf over node, not a host file, so
+// read, write, lseek, fstat and ftruncate serve through the vfs interface (the
+// memFile in lx_procfs.go). Content never leaves the supervisor; mmap of such a
+// file is refused (ENODEV), as for a synthetic file.
+func (g *dguest) installVFile(gp string, node vfs.Node, vf vfs.File, flags int64) int64 {
+	m := &memFile{
+		vn:     node,
+		vf:     vf,
+		name:   path.Base(gp),
+		rd:     flags&lxOAccmod != lxOWronly,
+		wr:     flags&lxOAccmod != lxORdonly,
+		append: flags&lxOAppend != 0,
+	}
+	return g.installD(&dfile{gp: gp, stub: -1, mem: m}, flags)
 }
 
 // install tracks a freshly opened host file as a new description with the

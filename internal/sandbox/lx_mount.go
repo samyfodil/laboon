@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/samyfodil/laboon/internal/vfs"
@@ -106,9 +107,16 @@ func (g *dguest) mount(srcAddr, tgtAddr, fsAddr, flags, dataAddr uint64) int64 {
 		return sErr(lxEFAULT)
 	}
 	switch fstype {
-	case "tmpfs", "ramfs", "mqueue", "devpts":
-		// mqueue and devpts need only a writable mount point here; the container
-		// workloads this serves do not exercise their object semantics.
+	case "tmpfs", "ramfs":
+		// A real in-memory filesystem: volatile and separate from the rootfs, as
+		// the kernel tmpfs is (writes do not land in the container's overlay upper).
+		// /dev/shm is provisioned host-backed elsewhere, since it needs a real host
+		// fd for MAP_SHARED; a file mmapped MAP_SHARED on this tmpfs gets ENODEV.
+		data, _ := g.readCStr(dataAddr)
+		return g.mountMem(target, data)
+	case "mqueue", "devpts":
+		// These need only a writable mount point here; the container workloads this
+		// serves do not exercise their object semantics.
 		return g.mountFS(target)
 	case "proc":
 		return g.mountPseudo(target, newPnodeFS(g.procRoot(), devProc, 0x9fa0, target))
@@ -191,6 +199,35 @@ func (fs *dfs) dynMagic(gp string) (uint64, bool) {
 		}
 	}
 	return magic, best >= 0
+}
+
+// mountMem services `mount -t tmpfs|ramfs` with a real in-memory filesystem
+// (vfs.NewMemFS) at target: volatile and separate from the rootfs, as the kernel
+// tmpfs is. A mode= option, if given, sets the root directory's permission bits.
+func (g *dguest) mountMem(target, data string) int64 {
+	mfs := vfs.NewMemFS()
+	if mode := tmpfsMode(data); mode != 0 {
+		m := mode
+		mfs.Root().SetAttr(vfs.AttrUpdate{Mode: &m})
+	}
+	if err := g.vns().Mount(target, mfs); err != nil {
+		return sErr(osErrno(err))
+	}
+	g.addDynMount(target, mfs)
+	return 0
+}
+
+// tmpfsMode reads the octal mode= option from a tmpfs mount's option string, or 0
+// if absent.
+func tmpfsMode(data string) uint32 {
+	for _, kv := range strings.Split(data, ",") {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == "mode" {
+			if m, err := strconv.ParseUint(v, 8, 32); err == nil {
+				return uint32(m)
+			}
+		}
+	}
+	return 0
 }
 
 // mountPseudo mounts a synthetic filesystem (proc, sysfs, cgroup2) at target. A

@@ -310,6 +310,17 @@ func (fs *dfs) ensureBinds(mounts []Mount) {
 			if at == "/" || at == "." {
 				continue // the root bind is Config.Root, not a dynamic mount
 			}
+			if m.FS != nil {
+				// A filesystem supplied directly (WithFS): mount it as given, read-only
+				// if asked. No host directory, confinement or socket bind applies — it
+				// is whatever backend the embedder composed.
+				mfs := m.FS
+				if m.ReadOnly {
+					mfs = vfs.ReadOnly(mfs)
+				}
+				fs.binds = append(fs.binds, dynMount{at: at, mfs: mfs})
+				continue
+			}
 			host, err := filepath.EvalSymlinks(m.Host)
 			if err != nil {
 				continue
@@ -1139,12 +1150,13 @@ func (g *dguest) openFile(gp string) (*os.File, lxErrno) {
 		return nil, osErrno(err)
 	}
 	f, err := loc.Node.Open(os.O_RDONLY)
-	if err == errPseudoOpen && loc.Node.Kind() == vfs.Dir {
-		// A pseudo filesystem (proc/sysfs/cgroup2) relocated under a container
-		// rootfs: its directory has no host file to open, so back the descriptor
-		// with an empty directory. getdents reads the synthetic listing through
-		// the namespace by path, as it does for the canonical /proc, /sys, /dev.
-		// A container runtime opens <rootfs>/sys to create mount points under it.
+	if (err == errPseudoOpen || errors.Is(err, vfs.ErrNoHostFile)) && loc.Node.Kind() == vfs.Dir {
+		// A directory with no host file to open: a pseudo filesystem
+		// (proc/sysfs/cgroup2) relocated under a container rootfs, or an in-memory
+		// backend (tmpfs, WithFS). Back the descriptor with an empty directory;
+		// getdents reads the real listing through the namespace by path, as it does
+		// for the canonical /proc, /sys, /dev. A container runtime opens
+		// <rootfs>/sys to create mount points under it.
 		of, e := os.Open(emptyDir())
 		if e != nil {
 			return nil, osErrno(e)
@@ -1156,10 +1168,78 @@ func (g *dguest) openFile(gp string) (*os.File, lxErrno) {
 	}
 	of, ok := f.(*os.File)
 	if !ok {
-		f.Close()
-		return nil, lxEINVAL
+		// A non-host regular file (an in-memory backend: tmpfs, WithFS) a caller
+		// here must read as a host file — loading an executable to map and rewrite.
+		// Copy it into a temporary host file. (A plain read-only open does not reach
+		// here; it is served through the vfs.File directly.)
+		return g.spillToHost(f)
 	}
 	return of, 0
+}
+
+// spillToHost copies a non-host file's content into a temporary host file and
+// returns it, for a caller that must have a real host file (the loader maps and
+// rewrites an executable). The temp file is unlinked, so it is reclaimed when the
+// returned handle is closed.
+func (g *dguest) spillToHost(vf vfs.File) (*os.File, lxErrno) {
+	tmp, err := anonFile(g.dfs.tmpDir, "lc-spill-")
+	if err != nil {
+		vf.Close()
+		return nil, osErrno(err)
+	}
+	buf := make([]byte, 1<<20)
+	for off := int64(0); ; {
+		n, rerr := vf.ReadAt(buf, off)
+		if n > 0 {
+			if _, werr := tmp.WriteAt(buf[:n], off); werr != nil {
+				tmp.Close()
+				vf.Close()
+				return nil, osErrno(werr)
+			}
+			off += int64(n)
+		}
+		if rerr != nil {
+			vf.Close()
+			if rerr != io.EOF {
+				tmp.Close()
+				return nil, lxEIO
+			}
+			return tmp, 0
+		}
+		if n == 0 {
+			vf.Close()
+			return tmp, 0
+		}
+	}
+}
+
+// openDir opens a directory for getdents and fchdir. A host backend gives a host
+// file. A non-host directory — a pseudo filesystem (/proc, /sys) or an in-memory
+// backend (tmpfs, WithFS) — has no host file, so it is backed by an empty host
+// directory and getdents reads the real listing through the namespace by path.
+// For an in-memory backend the node is returned too, so fstat answers from it
+// rather than the placeholder; a pseudo node keeps the placeholder's attributes.
+func (g *dguest) openDir(loc vfs.Loc, gp string) (*os.File, *memFile, lxErrno) {
+	f, err := loc.Node.Open(os.O_RDONLY)
+	if err == nil {
+		if of, ok := f.(*os.File); ok {
+			return of, nil, 0
+		}
+		f.Close() // a backend returning a non-host File for a directory: treat as in-memory
+	} else if err == errPseudoOpen {
+		ed, e := os.Open(emptyDir())
+		if e != nil {
+			return nil, nil, osErrno(e)
+		}
+		return ed, nil, 0
+	} else if !errors.Is(err, vfs.ErrNoHostFile) {
+		return nil, nil, osErrno(err)
+	}
+	ed, e := os.Open(emptyDir())
+	if e != nil {
+		return nil, nil, osErrno(e)
+	}
+	return ed, &memFile{vn: loc.Node, name: path.Base(gp)}, 0
 }
 
 // file returns fd's host file, EBADF for unknown fds.
@@ -1835,6 +1915,9 @@ func (g *dguest) fdStat(fd int64) (lxStat, lxErrno) {
 func (g *dguest) fdStatOf(d *dfile) (lxStat, lxErrno) {
 	if d.fx.opath {
 		return g.statGuest(d.name())
+	}
+	if d.mem != nil && d.mem.vn != nil {
+		return g.statGuest(d.name()) // in-memory backend (file or dir): stat via the namespace
 	}
 	if d.f == nil {
 		if d.mem != nil {

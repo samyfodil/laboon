@@ -199,7 +199,7 @@ func (ns *Namespace) ResolveOp(op, p string, followLast bool) (Loc, error) {
 func (ns *Namespace) resolve(p string, followLast bool, hops int) (Loc, error) {
 	if ns.genOf == nil || hops != 0 {
 		var crossed bool
-		return ns.walk(p, followLast, hops, &crossed)
+		return ns.walk(p, followLast, hops, &crossed, "")
 	}
 	g := ns.genOf()
 	key := resolveKey{p: p, followLast: followLast}
@@ -212,7 +212,7 @@ func (ns *Namespace) resolve(p string, followLast bool, hops int) (Loc, error) {
 	}
 	ns.cacheMu.Unlock()
 	var crossed bool
-	loc, err := ns.walk(p, followLast, 0, &crossed)
+	loc, err := ns.walk(p, followLast, 0, &crossed, "")
 	// Cache only a success that stayed within the versioned overlay root. Skip
 	// it if the walk crossed a mount (a dynamic fs like /proc is not covered by
 	// the overlay's generation, and a /proc/self/fd link can resolve back into
@@ -234,7 +234,7 @@ func (ns *Namespace) resolve(p string, followLast bool, hops int) (Loc, error) {
 	return loc, err
 }
 
-func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool) (Loc, error) {
+func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, floor string) (Loc, error) {
 	cur := ns.at("")
 	// Split raw, not cleaned: path.Clean collapses "a/link/.." to "a" lexically,
 	// which skips following link. POSIX resolves ".." against the symlink target,
@@ -246,7 +246,11 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool) (L
 		case "", ".":
 			continue
 		case "..":
-			cur = ns.at(parent(cur.Path))
+			par := parent(cur.Path)
+			if floor != "" && len(par) < len(floor) {
+				par = floor // a confined symlink's "../" cannot climb above the instance root
+			}
+			cur = ns.at(par)
 			if cur.FS != ns.root {
 				*crossed = true // ".." landed in a mounted (unversioned) filesystem
 			}
@@ -278,14 +282,30 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool) (L
 			if err != nil {
 				return Loc{}, err
 			}
+			// A confined filesystem (HardenFS with WithConfinedLinks) is a symlink
+			// boundary: its links resolve relative to its own mount point, so an
+			// absolute target restarts there and "../" cannot climb out. Any other
+			// filesystem keeps Linux semantics — an absolute target restarts at the
+			// namespace root — which is what a guest tmpfs needs.
+			symFloor := floor
+			if c, ok := cur.FS.(Confined); ok && c.Confined() {
+				symFloor = ns.mountPointOf(cur.Path)
+			}
 			base := cur.Path
 			if path.IsAbs(tgt) {
-				base = "" // absolute: restart at the namespace root
+				base = symFloor
+			}
+			target := join(base, tgt)
+			if symFloor != "" {
+				// Confined: walk the uncleaned path so the walk's floor-clamped "../"
+				// handling resolves it, instead of join collapsing "../" lexically —
+				// which would let a relative target escape the instance root.
+				target = base + "/" + tgt
 			}
 			// Resolve the target with walk, not resolve: hops>0 never caches, and
 			// passing crossed through propagates a mount a symlink target traverses
 			// (e.g. a /proc/self/fd link) so the outer result is not cached.
-			next, err := ns.walk(join(base, tgt), true, hops, crossed)
+			next, err := ns.walk(target, true, hops, crossed, symFloor)
 			if err != nil {
 				return Loc{}, err
 			}
@@ -321,6 +341,19 @@ func (ns *Namespace) at(abs string) Loc {
 		cur = Loc{FS: cur.FS, Node: child, Path: fastJoin(cur.Path, name)}
 	}
 	return cur
+}
+
+// mountPointOf returns the longest mount point at or above the absolute path p,
+// or "" if p is in the root filesystem. It is the instance root a confined mount
+// confines its symlinks to.
+func (ns *Namespace) mountPointOf(p string) string {
+	best := ""
+	for mp := range ns.mounts {
+		if (p == mp || strings.HasPrefix(p, mp+"/")) && len(mp) > len(best) {
+			best = mp
+		}
+	}
+	return best
 }
 
 func splitPath(p string) []string { return strings.Split(clean(p), "/") }

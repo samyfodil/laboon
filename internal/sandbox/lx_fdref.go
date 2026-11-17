@@ -22,6 +22,9 @@ func (d *dfile) unref() {
 	if d.f != nil {
 		d.f.Close()
 	}
+	if d.mem != nil && d.mem.vf != nil {
+		d.mem.vf.Close() // an in-memory backend file's content handle (tmpfs, WithFS)
+	}
 	if d.pathFD != nil {
 		d.pathFD.Close()
 	}

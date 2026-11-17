@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/samyfodil/laboon/internal/rewrite"
+	"github.com/samyfodil/laboon/internal/vfs"
 )
 
 // ErrKilled reports that the kernel killed the stub because the backstop
@@ -119,10 +120,14 @@ type UserID struct {
 	Groups   []uint32
 }
 
-// Mount binds a host path into the guest: the guest tree at or under Guest maps
-// to Host. A host directory is bound as files (read-write, confined); an
-// AF_UNIX connect under Guest reaches the host socket at the matching Host path.
+// Mount places a filesystem into the guest at Guest. The common case is a
+// host-path bind: a Host directory is bound as files (read-write, confined), and
+// an AF_UNIX connect under Guest reaches the host socket at the matching Host
+// path. Alternatively FS supplies the filesystem directly — any vfs.FileSystem
+// (in-memory, a union, a hardened or read-only wrapper, a custom backend) — and
+// Host is then unused. The public WithMount builds the former, WithFS the latter.
 type Mount struct {
 	Host, Guest string
-	ReadOnly    bool // bind the host directory read-only (EROFS on any change)
+	ReadOnly    bool           // bind read-only (EROFS on any change)
+	FS          vfs.FileSystem // if set, mount this filesystem at Guest instead of a host bind
 }
