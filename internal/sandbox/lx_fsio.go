@@ -108,6 +108,9 @@ func (d *dfile) readAt(buf []byte, off int64) (int, error) {
 	if d.pipe != nil && d.pipe.io != nil {
 		return 0, lxErr(lxESPIPE)
 	}
+	if d.rf != nil {
+		return d.rf.readAt(buf, off)
+	}
 	n, err := d.f.ReadAt(buf, off)
 	if err == io.EOF {
 		err = nil
@@ -123,6 +126,12 @@ func (d *dfile) writeAt(buf []byte, off int64) (int, error) {
 	}
 	if d.full {
 		return 0, lxErr(lxENOSPC)
+	}
+	if d.rf != nil {
+		if d.fx.oflags&lxOAppend != 0 {
+			return d.rf.write(buf)
+		}
+		return d.rf.writeAt(buf, off)
 	}
 	if d.fx.oflags&lxOAppend != 0 {
 		return d.f.Write(buf)
@@ -634,10 +643,10 @@ func (g *dguest) fallocate(fd, mode, off, n int64) int64 {
 		return sErr(lxESPIPE)
 	}
 	if d.f == nil {
-		if d.mem != nil && d.mem.vf != nil { // an in-memory file (tmpfs, WithFS)
+		if d.rf != nil { // a non-host regular file (memFS, WithFS)
 			if mode == 0 { // plain allocate: extend to off+n if needed
-				if a, e := d.mem.vn.Stat(); e == nil && off+n > a.Size {
-					if te := d.mem.vf.Truncate(off + n); te != nil {
+				if a, _, e := d.rf.attr(); e == nil && off+n > a.Size {
+					if te := d.rf.truncate(off + n); te != nil {
 						return sErr(osErrno(te))
 					}
 				}

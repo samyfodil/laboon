@@ -612,15 +612,8 @@ func (g *dguest) openTmpfile(dir string, flags, mode int64) int64 {
 // memFile in lx_procfs.go). Content never leaves the supervisor; mmap of such a
 // file is refused (ENODEV), as for a synthetic file.
 func (g *dguest) installVFile(gp string, node vfs.Node, vf vfs.File, flags int64) int64 {
-	m := &memFile{
-		vn:     node,
-		vf:     vf,
-		name:   path.Base(gp),
-		rd:     flags&lxOAccmod != lxOWronly,
-		wr:     flags&lxOAccmod != lxORdonly,
-		append: flags&lxOAppend != 0,
-	}
-	return g.installD(&dfile{gp: gp, stub: -1, mem: m}, flags)
+	rf := &memRF{vf: vf, vn: node, append: flags&lxOAppend != 0}
+	return g.installD(&dfile{gp: gp, stub: -1, rf: rf}, flags)
 }
 
 // install tracks a freshly opened host file as a new description with the

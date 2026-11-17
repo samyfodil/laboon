@@ -21,9 +21,8 @@ func (d *dfile) unref() {
 	d.releaseFx()
 	if d.f != nil {
 		d.f.Close()
-	}
-	if d.mem != nil && d.mem.vf != nil {
-		d.mem.vf.Close() // an in-memory backend file's content handle (tmpfs, WithFS)
+	} else if d.rf != nil {
+		d.rf.closeFile() // a non-host regular file's backing (memFS, WithFS); a host file is closed via d.f
 	}
 	if d.pathFD != nil {
 		d.pathFD.Close()

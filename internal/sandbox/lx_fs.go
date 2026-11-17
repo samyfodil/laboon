@@ -1262,9 +1262,45 @@ func (g *dguest) stubFd(fd int64) int {
 	return -1
 }
 
+// writeReg writes up to n bytes of guest memory at bufAddr to a non-host regular
+// file (memFS, WithFS) through its backing, a pooled chunk at a time so a large
+// write stages nothing in the supervisor, and reports how much it wrote.
+func (g *dguest) writeReg(d *dfile, bufAddr uint64, n int64) int64 {
+	buf := g.ioBuf(int(min(n, ioChunk)))
+	var total int64
+	for total < n {
+		b := buf[:min(n-total, int64(len(buf)))]
+		if g.getBuf(bufAddr+uint64(total), b) != nil {
+			if total == 0 {
+				return sErr(lxEFAULT)
+			}
+			break
+		}
+		m, err := d.rf.write(b)
+		total += int64(m)
+		if err != nil {
+			if total == 0 {
+				return sErr(ioErrno(err))
+			}
+			break
+		}
+		if m < len(b) {
+			break
+		}
+	}
+	g.modified(d)
+	return total
+}
+
 func (g *dguest) writeFile(fd int64, bufAddr uint64, n int64) int64 {
 	d, e := g.file(fd)
 	if e != 0 {
+		if d2, ok := g.ft.get(int(fd)); ok && d2.rf != nil {
+			if n < 0 {
+				return sErr(lxEINVAL)
+			}
+			return g.writeReg(d2, bufAddr, n) // a non-host regular file (memFS, WithFS)
+		}
 		if r, ok := g.memWrite(fd, bufAddr, n); ok {
 			return r
 		}
@@ -1396,6 +1432,12 @@ func (g *dguest) gatherPrefix(v [][2]uint64, off int, buf []byte) int {
 func (g *dguest) read(fd int64, bufAddr uint64, n int64) int64 {
 	d, e := g.file(fd)
 	if e != 0 {
+		if d2, ok := g.ft.get(int(fd)); ok && d2.rf != nil {
+			if n < 0 {
+				return sErr(lxEINVAL)
+			}
+			return g.readFull(d2, bufAddr, n, -1) // a non-host regular file (memFS, WithFS)
+		}
 		if r, ok := g.memRead(fd, bufAddr, n); ok {
 			return r
 		}
@@ -1514,9 +1556,14 @@ func (g *dguest) readFull(d *dfile, bufAddr uint64, n, off int64) int64 {
 		b := buf[:min(n-total, int64(len(buf)))]
 		var m int
 		var err error
-		if off < 0 {
+		switch {
+		case d.rf != nil && off < 0:
+			m, err = d.rf.read(b) // a regular file: positional read through its backing
+		case d.rf != nil:
+			m, err = d.rf.readAt(b, off+total)
+		case off < 0:
 			m, err = d.f.Read(b)
-		} else {
+		default:
 			m, err = d.readAt(b, off+total)
 		}
 		if m > 0 {
@@ -1631,6 +1678,13 @@ func (g *dguest) lseek(fd, off, whence int64) int64 {
 	d, ok := g.ft.get(int(fd))
 	if !ok || d.fx.opath {
 		return sErr(lxEBADF)
+	}
+	if d.rf != nil { // a regular file, whatever backs it
+		r, err := d.rf.seek(off, int(whence))
+		if err != nil {
+			return sErr(osErrno(err))
+		}
+		return r
 	}
 	if r, ok := g.memLseek(fd, off, whence); ok {
 		return r
@@ -1917,9 +1971,16 @@ func (g *dguest) fdStatOf(d *dfile) (lxStat, lxErrno) {
 	if d.fx.opath {
 		return g.statGuest(d.name())
 	}
-	if d.mem != nil && d.mem.vn != nil {
-		// Stat the node, not the path: correct for a file unlinked while still open
-		// (the anonymous-temp pattern), where the path no longer resolves.
+	if d.rf != nil {
+		if _, ok := d.rf.hostFd(); !ok { // a non-host regular file: stat its node, not the path, so an unlinked-but-open file is still correct
+			a, id, err := d.rf.attr()
+			if err != nil {
+				return lxStat{}, osErrno(err)
+			}
+			return nodeStat(a, id), 0
+		}
+	}
+	if d.mem != nil && d.mem.vn != nil { // a memFS directory placeholder, or memFS not yet on regFile
 		a, err := d.mem.vn.Stat()
 		if err != nil {
 			return lxStat{}, osErrno(err)

@@ -347,8 +347,10 @@ func (g *dguest) mmapFile(a [6]uint64) int64 {
 		return sErr(lxEBADF)
 	}
 	if d.f == nil {
-		if d.mem != nil && d.mem.vf != nil && flags&unix.MAP_SHARED == 0 {
-			return g.mmapMemPrivate(d, a) // in-memory backend: private copy; shared is ENODEV
+		if d.rf != nil {
+			if _, ok := d.rf.hostFd(); !ok && flags&unix.MAP_SHARED == 0 {
+				return g.mmapMemPrivate(d, a) // a non-host backend: private copy; shared is ENODEV
+			}
 		}
 		return sErr(lxENODEV)
 	}
@@ -410,18 +412,28 @@ func (g *dguest) mmapMemPrivate(d *dfile, a [6]uint64) int64 {
 		return sErr(lxENODEV)
 	}
 	g.dropFileCode(addr, length)
-	data := make([]byte, length)
-	if _, err := d.mem.vf.ReadAt(data, int64(off)); err != nil && err != io.EOF {
-		return sErr(lxEIO)
-	}
 	r := g.notReserved(g.mapAt(addr, length, flags, false, func(at, fixed uint64) int64 {
 		return g.host(unix.SYS_MMAP, at, length, unix.PROT_READ|unix.PROT_WRITE, fixed|unix.MAP_PRIVATE|unix.MAP_ANONYMOUS, ^uint64(0), 0)
 	}), length)
 	if r < 0 {
 		return r
 	}
-	if err := g.writeMem(uint64(r), data); err != nil {
-		return sErr(lxEFAULT)
+	// Populate the anonymous mapping from the file in pooled chunks (zero-alloc);
+	// the region is already zero, so bytes past end of file stay zero, as a file
+	// mapping's do.
+	buf := g.ioBuf(int(min(int64(length), ioChunk)))
+	for pos := int64(0); pos < int64(length); {
+		b := buf[:min(int64(length)-pos, int64(len(buf)))]
+		k, err := d.rf.readAt(b, int64(off)+pos)
+		if k > 0 {
+			if g.writeMem(uint64(r)+uint64(pos), b[:k]) != nil {
+				return sErr(lxEFAULT)
+			}
+			pos += int64(k)
+		}
+		if err != nil || k == 0 {
+			break
+		}
 	}
 	if res := g.host(unix.SYS_MPROTECT, uint64(r), alignUp(length), prot); res < 0 {
 		return res
