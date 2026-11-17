@@ -347,10 +347,8 @@ func (g *dguest) mmapFile(a [6]uint64) int64 {
 		return sErr(lxEBADF)
 	}
 	if d.f == nil {
-		if d.rf != nil {
-			if _, ok := d.rf.hostFd(); !ok && flags&unix.MAP_SHARED == 0 {
-				return g.mmapMemPrivate(d, a) // a non-host backend: private copy; shared is ENODEV
-			}
+		if d.rf != nil && flags&unix.MAP_SHARED == 0 {
+			return g.mmapMemPrivate(d, a) // a non-host backend: private copy; a shared mapping needs a host fd (ENODEV until a host-backed tmpFS)
 		}
 		return sErr(lxENODEV)
 	}

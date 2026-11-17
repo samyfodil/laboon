@@ -373,13 +373,15 @@ func (g *dguest) writeOff(addr uint64, off int64) lxErrno {
 func (g *dguest) sendfile(outFd, inFd int64, offAddr uint64, count int64) int64 {
 	in, ok := g.ft.get(int(inFd))
 	out, ok2 := g.ft.get(int(outFd))
-	if !ok || !ok2 || in.f == nil && in.stub < 0 || in.fx.opath || out.fx.opath {
+	if !ok || !ok2 || (in.f == nil && in.rf == nil && in.stub < 0) || in.fx.opath || out.fx.opath {
 		return sErr(lxEBADF)
 	}
-	if !out.writable() || in.fx.hasFlags && in.fx.oflags&lxOAccmod == lxOWronly {
+	if !out.writable() || (in.fx.hasFlags && in.fx.oflags&lxOAccmod == lxOWronly) {
 		return sErr(lxEBADF)
 	}
-	if in.f == nil || out.f == nil || !in.isRegular() || out.fx.oflags&lxOAppend != 0 || out.served() {
+	// The source is a regular file (host or in-memory); the destination any
+	// writable, non-append fd.
+	if (in.rf == nil && (in.f == nil || !in.isRegular())) || out.f == nil || out.fx.oflags&lxOAppend != 0 || out.served() {
 		return sErr(lxEINVAL)
 	}
 	if count < 0 {
@@ -400,6 +402,8 @@ func (g *dguest) sendfile(outFd, inFd int64, offAddr uint64, count int64) int64 
 		var err error
 		if off >= 0 {
 			n, err = in.readAt(chunk, off+total)
+		} else if in.rf != nil {
+			n, err = in.rf.read(chunk)
 		} else {
 			n, err = in.f.Read(chunk)
 			if err == io.EOF {
@@ -416,8 +420,12 @@ func (g *dguest) sendfile(outFd, inFd int64, offAddr uint64, count int64) int64 
 			break
 		}
 		w, werr := g.writeAll(out, chunk[:n], false)
-		if w < n && off < 0 {
-			in.f.Seek(int64(w-n), io.SeekCurrent) // give back what was not written
+		if w < n && off < 0 { // give back what was not written
+			if in.rf != nil {
+				in.rf.seek(int64(w-n), io.SeekCurrent)
+			} else {
+				in.f.Seek(int64(w-n), io.SeekCurrent)
+			}
 		}
 		total += int64(max(w, 0))
 		if werr != nil || w < n {
@@ -728,9 +736,6 @@ func (g *dguest) fsync(fd int64) int64 {
 			return sErr(osErrno(err))
 		}
 		return 0
-	}
-	if d.mem != nil && d.mem.vf != nil {
-		return 0 // an in-memory file not yet on regFile: nothing to flush
 	}
 	if d.f == nil || d.ev != nil || d.ep != nil || d.fx.in != nil || d.isPipe() {
 		return sErr(lxEINVAL)

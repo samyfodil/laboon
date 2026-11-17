@@ -1130,12 +1130,6 @@ func (g *dguest) ftruncate(fd int64, length int64) int64 {
 		return 0
 	}
 	if d.f == nil {
-		if d.mem != nil && d.mem.vf != nil { // memFS not yet on regFile
-			if err := d.mem.vf.Truncate(length); err != nil {
-				return sErr(osErrno(err))
-			}
-			return 0
-		}
 		return sErr(lxEINVAL)
 	}
 	fi, err := fileStat(d.f)

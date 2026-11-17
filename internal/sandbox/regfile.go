@@ -29,10 +29,6 @@ type regFile interface {
 	// attr reports the file's current attributes from its node, so fstat is
 	// correct even for a file unlinked while open.
 	attr() (vfs.Attr, vfs.NodeID, error)
-	// hostFd returns a host file descriptor for the zero-copy paths (shared mmap,
-	// sendfile), or (_, false) when the backend has none and the supervisor must
-	// copy instead.
-	hostFd() (int, bool)
 	closeFile() error
 }
 
@@ -64,8 +60,7 @@ func (h *hostRF) attr() (vfs.Attr, vfs.NodeID, error) {
 	a, err := h.vn.Stat()
 	return a, h.vn.ID(), err
 }
-func (h *hostRF) hostFd() (int, bool) { return int(h.f.Fd()), true }
-func (h *hostRF) closeFile() error    { return h.f.Close() }
+func (h *hostRF) closeFile() error { return h.f.Close() }
 
 // memRF backs a regular file with an in-memory backend (memFS, WithFS): content
 // is read and written through the vfs.File handle over the node. There is no host
@@ -134,5 +129,4 @@ func (m *memRF) attr() (vfs.Attr, vfs.NodeID, error) {
 	a, err := m.vn.Stat()
 	return a, m.vn.ID(), err
 }
-func (m *memRF) hostFd() (int, bool) { return 0, false }
-func (m *memRF) closeFile() error    { return m.vf.Close() }
+func (m *memRF) closeFile() error { return m.vf.Close() }
