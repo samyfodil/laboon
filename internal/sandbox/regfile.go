@@ -29,6 +29,13 @@ type regFile interface {
 	// attr reports the file's current attributes from its node, so fstat is
 	// correct even for a file unlinked while open.
 	attr() (vfs.Attr, vfs.NodeID, error)
+	// fstat fills the Linux stat for an open fd on this file: the backend supplies
+	// it (a host fstat, or the node's attributes), and a per-fd mode override the
+	// backend could not hold is applied on top.
+	fstat(g *dguest, d *dfile) (lxStat, lxErrno)
+	// fallocate allocates or zeroes a range (fallocate(2)); a host file extends or
+	// zeroes its storage, an in-memory one grows. The arguments are the syscall's.
+	fallocate(g *dguest, d *dfile, mode, off, length int64) int64
 	closeFile() error
 }
 
@@ -59,6 +66,21 @@ func (h *hostRF) sync() error                              { return h.f.Sync() }
 func (h *hostRF) attr() (vfs.Attr, vfs.NodeID, error) {
 	a, err := h.vn.Stat()
 	return a, h.vn.ID(), err
+}
+
+func (h *hostRF) fstat(g *dguest, d *dfile) (lxStat, lxErrno) {
+	fi, err := g.fileInfo(d)
+	if err != nil {
+		return lxStat{}, osErrno(err)
+	}
+	st := g.linuxStat(fi)
+	if p := d.fx.perm.Load(); p&permSet != 0 {
+		st.mode = st.mode&^0o7777 | p&0o7777
+	}
+	return st, 0
+}
+func (h *hostRF) fallocate(g *dguest, d *dfile, mode, off, length int64) int64 {
+	return g.fallocateHostFd(d, mode, off, length)
 }
 func (h *hostRF) closeFile() error { return h.f.Close() }
 
@@ -128,5 +150,28 @@ func (m *memRF) sync() error               { return nil }
 func (m *memRF) attr() (vfs.Attr, vfs.NodeID, error) {
 	a, err := m.vn.Stat()
 	return a, m.vn.ID(), err
+}
+
+func (m *memRF) fstat(g *dguest, d *dfile) (lxStat, lxErrno) {
+	// Stat the node, not the path: correct for a file unlinked while still open.
+	a, err := m.vn.Stat()
+	if err != nil {
+		return lxStat{}, osErrno(err)
+	}
+	st := nodeStat(a, m.vn.ID())
+	if p := d.fx.perm.Load(); p&permSet != 0 {
+		st.mode = st.mode&^0o7777 | p&0o7777
+	}
+	return st, 0
+}
+func (m *memRF) fallocate(g *dguest, d *dfile, mode, off, length int64) int64 {
+	if mode == 0 { // plain allocate: extend to off+length if needed
+		if a, _, e := m.attr(); e == nil && off+length > a.Size {
+			if te := m.truncate(off + length); te != nil {
+				return sErr(osErrno(te))
+			}
+		}
+	}
+	return 0 // KEEP_SIZE and the hole/zero modes are hints on a memory file
 }
 func (m *memRF) closeFile() error { return m.vf.Close() }

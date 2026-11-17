@@ -650,22 +650,22 @@ func (g *dguest) fallocate(fd, mode, off, n int64) int64 {
 	if d.isPipe() {
 		return sErr(lxESPIPE)
 	}
+	if d.rf != nil { // a regular file, whatever backs it
+		return d.rf.fallocate(g, d, mode, off, n)
+	}
 	if d.f == nil {
-		if d.rf != nil { // a non-host regular file (memFS, WithFS)
-			if mode == 0 { // plain allocate: extend to off+n if needed
-				if a, _, e := d.rf.attr(); e == nil && off+n > a.Size {
-					if te := d.rf.truncate(off + n); te != nil {
-						return sErr(osErrno(te))
-					}
-				}
-			}
-			return 0 // KEEP_SIZE and the hole/zero modes are hints on a memory file
-		}
 		return sErr(lxEBADF)
 	}
 	if !d.isRegular() {
 		return sErr(lxENODEV)
 	}
+	return g.fallocateHostFd(d, mode, off, n) // a regular host file with no node (O_TMPFILE)
+}
+
+// fallocateHostFd services fallocate on a host-backed regular file: a plain
+// allocate extends it, KEEP_SIZE is a no-op, and a zero-range or hole (which must
+// keep the size) zeroes the range — all under the description's seals.
+func (g *dguest) fallocateHostFd(d *dfile, mode, off, n int64) int64 {
 	fi, err := fileStat(d.f)
 	if err != nil {
 		return sErr(osErrno(err))

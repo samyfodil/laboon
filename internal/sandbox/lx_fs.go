@@ -1971,12 +1971,8 @@ func (g *dguest) fdStatOf(d *dfile) (lxStat, lxErrno) {
 	if d.fx.opath {
 		return g.statGuest(d.name())
 	}
-	if d.rf != nil && d.f == nil { // a non-host regular file: stat its node, not the path, so an unlinked-but-open file is still correct
-		a, id, err := d.rf.attr()
-		if err != nil {
-			return lxStat{}, osErrno(err)
-		}
-		return nodeStat(a, id), 0
+	if d.rf != nil { // a regular file, whatever backs it
+		return d.rf.fstat(g, d)
 	}
 	if d.mem != nil && d.mem.vn != nil { // a memFS directory placeholder, or memFS not yet on regFile
 		a, err := d.mem.vn.Stat()
