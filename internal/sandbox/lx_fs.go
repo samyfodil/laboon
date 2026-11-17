@@ -617,7 +617,8 @@ func (g *dguest) rbufOf(n int) []byte {
 // own host fd of that number, which the stub serves itself on the fast path.
 type dfile struct {
 	f       *os.File
-	gp      string // guest path (resolved, rooted), for relative lookups
+	rf      regFile // a regular file's content, whatever filesystem backs it (host, mem, synth); the file handlers dispatch through it
+	gp      string  // guest path (resolved, rooted), for relative lookups
 	isDir   bool
 	stub    int        // the stub's host stdio fd this description is, or -1
 	tty     bool       // a host terminal
@@ -1917,7 +1918,13 @@ func (g *dguest) fdStatOf(d *dfile) (lxStat, lxErrno) {
 		return g.statGuest(d.name())
 	}
 	if d.mem != nil && d.mem.vn != nil {
-		return g.statGuest(d.name()) // in-memory backend (file or dir): stat via the namespace
+		// Stat the node, not the path: correct for a file unlinked while still open
+		// (the anonymous-temp pattern), where the path no longer resolves.
+		a, err := d.mem.vn.Stat()
+		if err != nil {
+			return lxStat{}, osErrno(err)
+		}
+		return nodeStat(a, d.mem.vn.ID()), 0
 	}
 	if d.f == nil {
 		if d.mem != nil {

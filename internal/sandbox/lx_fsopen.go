@@ -631,7 +631,16 @@ func (g *dguest) install(f *os.File, gp string, flags int64) int64 {
 		f.Close()
 		return sErr(osErrno(err))
 	}
-	return g.installD(&dfile{f: f, gp: gp, isDir: fi.IsDir(), stub: -1}, flags)
+	d := &dfile{f: f, gp: gp, isDir: fi.IsDir(), stub: -1}
+	// A regular file's content is served through the regFile interface. The host
+	// fd stays in d.f for the paths not yet migrated and for the zero-copy fast
+	// paths; a named regular file also gets its node, for fstat.
+	if fi.Mode().IsRegular() {
+		if loc, e := g.vns().Resolve(gp, false); e == nil {
+			d.rf = &hostRF{f: f, vn: loc.Node}
+		}
+	}
+	return g.installD(d, flags)
 }
 
 func (g *dguest) installD(d *dfile, flags int64) int64 {

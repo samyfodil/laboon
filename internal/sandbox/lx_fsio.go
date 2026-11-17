@@ -621,7 +621,7 @@ func (g *dguest) vmsplice(fd int64, iov uint64, cnt int64) int64 {
 
 func (g *dguest) fallocate(fd, mode, off, n int64) int64 {
 	d, ok := g.ft.get(int(fd))
-	if !ok || d.f == nil || d.fx.opath || !d.writable() {
+	if !ok || d.fx.opath || !d.writable() {
 		return sErr(lxEBADF)
 	}
 	if off < 0 || n <= 0 {
@@ -632,6 +632,19 @@ func (g *dguest) fallocate(fd, mode, off, n int64) int64 {
 	}
 	if d.isPipe() {
 		return sErr(lxESPIPE)
+	}
+	if d.f == nil {
+		if d.mem != nil && d.mem.vf != nil { // an in-memory file (tmpfs, WithFS)
+			if mode == 0 { // plain allocate: extend to off+n if needed
+				if a, e := d.mem.vn.Stat(); e == nil && off+n > a.Size {
+					if te := d.mem.vf.Truncate(off + n); te != nil {
+						return sErr(osErrno(te))
+					}
+				}
+			}
+			return 0 // KEEP_SIZE and the hole/zero modes are hints on a memory file
+		}
+		return sErr(lxEBADF)
 	}
 	if !d.isRegular() {
 		return sErr(lxENODEV)
@@ -700,6 +713,15 @@ func (g *dguest) fsync(fd int64) int64 {
 	d, ok := g.ft.get(int(fd))
 	if !ok || d.fx.opath {
 		return sErr(lxEBADF)
+	}
+	if d.rf != nil { // a regular file, whatever backs it
+		if err := d.rf.sync(); err != nil {
+			return sErr(osErrno(err))
+		}
+		return 0
+	}
+	if d.mem != nil && d.mem.vf != nil {
+		return 0 // an in-memory file not yet on regFile: nothing to flush
 	}
 	if d.f == nil || d.ev != nil || d.ep != nil || d.fx.in != nil || d.isPipe() {
 		return sErr(lxEINVAL)
