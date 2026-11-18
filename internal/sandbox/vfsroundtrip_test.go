@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/samyfodil/laboon/internal/oci"
+	"github.com/samyfodil/laboon/oci"
 	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 

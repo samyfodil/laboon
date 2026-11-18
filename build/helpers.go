@@ -12,7 +12,7 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
-	"github.com/samyfodil/laboon/internal/oci"
+	"github.com/samyfodil/laboon/oci"
 	"github.com/samyfodil/laboon/internal/vfs"
 	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )

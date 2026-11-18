@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/samyfodil/laboon/internal/oci"
+	"github.com/samyfodil/laboon/oci"
 )
 
 // TestBuildHardlinkAcrossSteps proves a hardlink made in one RUN step survives

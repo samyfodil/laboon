@@ -13,7 +13,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
-	"github.com/samyfodil/laboon/internal/oci"
+	"github.com/samyfodil/laboon/oci"
 )
 
 // TestMultiStage builds a two-stage Dockerfile: a builder stage produces a file,

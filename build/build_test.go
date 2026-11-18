@@ -14,7 +14,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
-	"github.com/samyfodil/laboon/internal/oci"
+	"github.com/samyfodil/laboon/oci"
 )
 
 // TestBuild builds a small Dockerfile from a cached base image and checks the

@@ -9,7 +9,7 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
-	"github.com/samyfodil/laboon/internal/oci"
+	"github.com/samyfodil/laboon/oci"
 )
 
 // countCache wraps a real Cache and counts hits and puts, so a test can see

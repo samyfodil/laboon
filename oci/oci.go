@@ -13,12 +13,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -80,11 +80,7 @@ func Pull(ctx context.Context, ref string, opt Options) (*Image, error) {
 	}
 	// A ref names one image per architecture; amd64's entries keep the
 	// names they had before there were others.
-	key := r.Name()
-	if arch != "amd64" {
-		key += "@" + arch
-	}
-	refFile := filepath.Join(dir, "refs", url.PathEscape(key))
+	refFile := refFileFor(dir, r, arch)
 	if !opt.Refresh {
 		if out, err := local(dir, refFile, ref); err == nil {
 			return out, nil
@@ -123,11 +119,7 @@ func Store(img v1.Image, ref string, opt Options) (*Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	key := r.Name()
-	if cf.Architecture != "amd64" {
-		key += "@" + cf.Architecture
-	}
-	return store(dir, filepath.Join(dir, "refs", url.PathEscape(key)), ref, img, opt.MaxSize)
+	return store(dir, refFileFor(dir, r, cf.Architecture), ref, img, opt.MaxSize)
 }
 
 // store unpacks img into the cache at dir/<config-digest> and points refFile at
@@ -218,6 +210,8 @@ func local(dir, refFile, ref string) (*Image, error) {
 	if _, err := os.Stat(out.Root); err != nil {
 		return nil, err
 	}
+	now := time.Now()
+	os.Chtimes(filepath.Join(dir, h), now, now) // mark used, for Sweep's least-recently-used order
 	return out, nil
 }
 

@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/samyfodil/laboon/internal/oci"
+	"github.com/samyfodil/laboon/oci"
 	"github.com/samyfodil/laboon/internal/rewrite"
 	"github.com/samyfodil/laboon/internal/sandbox"
 )

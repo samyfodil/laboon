@@ -22,7 +22,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/samyfodil/laboon/internal/oci"
+	"github.com/samyfodil/laboon/oci"
 )
 
 // TestWindowsBusybox runs a static musl busybox from LC_WIN_ROOTFS, a rootfs
