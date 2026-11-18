@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 func die(code int, msg string) {
@@ -59,6 +61,12 @@ func main() {
 	}
 	if !bytes.Equal(p1[100:105], []byte("WROTE")) {
 		die(5, fmt.Sprintf("mmap stale: %q", p1[100:105]))
+	}
+
+	// msync writes the stores back to the composed filesystem now, not just at
+	// teardown (the supervisor counts the write-back).
+	if err := unix.Msync(p1, unix.MS_SYNC); err != nil {
+		die(6, "msync: "+err.Error())
 	}
 
 	fmt.Println("MMAP-OK")

@@ -29,6 +29,7 @@ const (
 	lcShmAttached = 0x4c430004 // (shmid) -> attachment cookie
 	lcShmGone     = 0x4c430005 // (cookie): no part of the attachment is mapped
 	lcCodeFile    = 0x4c430006 // (open-file id): the stub maps that file shared and executable
+	lcSyncFile    = 0x4c430007 // (open-file id): msync of a non-host file's MAP_SHARED mapping; write its backing back
 
 	kindZero = 1
 )
@@ -56,6 +57,18 @@ func init() {
 		g.mp.mu.Unlock()
 		if ok && g.dfs.run != nil && g.ps.ospid > 0 {
 			g.dfs.run.broker.code.mark(g.ps.ospid, [2]uint64{fn.dev, fn.ino})
+		}
+		return 0
+	}
+	syscalls[lcSyncFile] = func(g *dguest, a [6]uint64) int64 {
+		// The stub has flushed its pages to the host temp file; write that back
+		// to the backend so an msync reaches the composed filesystem, not just at
+		// teardown.
+		g.mp.mu.Lock()
+		sb := g.mp.backing[a[0]]
+		g.mp.mu.Unlock()
+		if sb != nil {
+			sb.writeBack()
 		}
 		return 0
 	}
@@ -114,6 +127,12 @@ func (g *dguest) mmapFd(fd int64, wshared, code bool) int64 {
 			if e != 0 {
 				return sErr(e)
 			}
+			// Record the backing under the stub's id for it, so the stub's msync
+			// of this mapping writes it back to the file (syncFile).
+			id := stubFiles.id(d, g.mp)
+			g.mp.mu.Lock()
+			g.mp.backing[id] = sb
+			g.mp.mu.Unlock()
 			return int64(sfd)
 		}
 		if e := g.materializeMapf(d); e != 0 {
@@ -258,6 +277,8 @@ type memProc struct {
 	shm    map[uint64]*shmAttach  // SysV segments attached, by address
 	semadj map[int]map[uint16]int // SEM_UNDO adjustments, by set and semaphore
 
+	backing map[uint64]*shBacking // open-file id -> the MAP_SHARED backing the stub maps for it (sharedback.go)
+
 	anon anonCode // what is known of its code made executable at run time (anoncode.go)
 }
 
@@ -270,7 +291,7 @@ func newMemProc() (*memProc, *os.File, error) {
 	}
 	unix.CloseOnExec(fds[0])
 	unix.CloseOnExec(fds[1])
-	m := &memProc{sock: fds[0], sent: map[uint64]int32{}, names: map[uint64]fileName{}, refs: 1, shm: map[uint64]*shmAttach{}, semadj: map[int]map[uint16]int{}}
+	m := &memProc{sock: fds[0], sent: map[uint64]int32{}, names: map[uint64]fileName{}, refs: 1, shm: map[uint64]*shmAttach{}, semadj: map[int]map[uint16]int{}, backing: map[uint64]*shBacking{}}
 	return m, os.NewFile(uintptr(fds[1]), "fdlink"), nil
 }
 
@@ -399,6 +420,9 @@ func (m *memProc) adopt(c *memProc, g *dguest) error {
 	}
 	for id, fn := range m.names {
 		c.names[id] = fn
+	}
+	for id, sb := range m.backing {
+		c.backing[id] = sb // the child inherits the shared mappings and their backings
 	}
 	c.mu.Unlock()
 	stubFiles.adopt(c, c.sent)

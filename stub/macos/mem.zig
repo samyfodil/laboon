@@ -93,6 +93,7 @@ const NR_EPOLL_PWAIT2: u64 = 441;
 // Supervisor services the stub calls like syscalls (sandbox/mem_darwin.go).
 pub const LC_MMAPFD: u64 = 0x4c430001; // (guest fd, shared writable, shared executable) -> stub fd | kind << 32
 const LC_CODEFILE: u64 = 0x4c430006; // (open-file id): this stub maps that file shared and executable
+const LC_SYNCFILE: u64 = 0x4c430007; // (open-file id): msync of its MAP_SHARED mapping; write the backing back to the file
 pub const LC_REWRITE: u64 = 0x4c430002; // (base, len, file off, guest fd, count only): rewrite, or count, a text range's sites
 const LC_SHMAT: u64 = 0x4c430003; // (shmid) -> stub fd | pages << 32
 const LC_SHMATTACHED: u64 = 0x4c430004; // (shmid) -> attachment cookie
@@ -1033,6 +1034,26 @@ fn markCode(lo: u64, hi: u64) void {
     for (ids[0..n]) |id| _ = root.hostCall(LC_CODEFILE, .{ id, 0, 0, 0, 0, 0 });
 }
 
+// syncFiles tells the supervisor to write each non-host file this stub maps
+// shared in [lo, hi) back to its backend. The stub has already flushed its own
+// pages to the host temp file (SYS_msync); the supervisor copies that to the
+// file. A non-host file shared mapping that the supervisor does not back is
+// ignored there, so host-file mappings in the range cost only the call.
+fn syncFiles(lo: u64, hi: u64) void {
+    var ids: [8]u64 = undefined;
+    var n: usize = 0;
+    lock.lock();
+    for (vmas.items) |e| {
+        if (e.kind != .file or !e.shared or e.hi <= lo or e.lo >= hi) continue;
+        if (std.mem.indexOfScalar(u64, ids[0..n], e.id) != null) continue;
+        if (n == ids.len) break;
+        ids[n] = e.id;
+        n += 1;
+    }
+    lock.unlock();
+    for (ids[0..n]) |id| _ = root.hostCall(LC_SYNCFILE, .{ id, 0, 0, 0, 0, 0 });
+}
+
 // fileOf is the host file (device, inode) whose shared mapping page is, if
 // it is one.
 pub fn fileOf(page: u64) ?[2]u64 {
@@ -1694,7 +1715,9 @@ fn msync(addr: u64, len: u64, flags: u64) u64 {
     if (!mapped(addr, addr + n)) return neg(ENOMEM);
     // MS_INVALIDATE is a no-op on Linux's unified page cache; Darwin's would
     // throw away dirty private pages, so it is not passed on.
-    return lx(sys(SYS_msync, addr, n, if (flags & MS_SYNC != 0) D_MS_SYNC else D_MS_ASYNC, 0, 0, 0));
+    const r = lx(sys(SYS_msync, addr, n, if (flags & MS_SYNC != 0) D_MS_SYNC else D_MS_ASYNC, 0, 0, 0));
+    if (!isErr(r)) syncFiles(addr, addr + n); // flush any non-host backing to its file
+    return r;
 }
 
 fn mincore(addr: u64, len: u64, vec: u64) u64 {

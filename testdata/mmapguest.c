@@ -49,6 +49,13 @@ int main(void) {
 		_exit(5);
 	}
 
+	// msync writes the stores back to the composed filesystem now, not just at
+	// teardown (the supervisor counts the write-back).
+	if (msync(p1, 4096, MS_SYNC) != 0) {
+		say("MSYNC-FAIL\n");
+		_exit(6);
+	}
+
 	say("MMAP-OK\n");
 	_exit(0);
 }
