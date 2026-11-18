@@ -30,6 +30,7 @@ const (
 	lcShmGone     = 0x4c430005 // (cookie): no part of the attachment is mapped
 	lcCodeFile    = 0x4c430006 // (open-file id): the stub maps that file shared and executable
 	lcSyncFile    = 0x4c430007 // (open-file id): msync of a non-host file's MAP_SHARED mapping; write its backing back
+	lcUnmapFile   = 0x4c430008 // (open-file id): the stub's last MAP_SHARED mapping of that non-host file is unmapped
 
 	kindZero = 1
 )
@@ -65,10 +66,23 @@ func init() {
 		// to the backend so an msync reaches the composed filesystem, not just at
 		// teardown.
 		g.mp.mu.Lock()
-		sb := g.mp.backing[a[0]]
+		r := g.mp.backing[a[0]]
 		g.mp.mu.Unlock()
-		if sb != nil {
-			sb.writeBack()
+		if r != nil {
+			r.sb.writeBack()
+		}
+		return 0
+	}
+	syscalls[lcUnmapFile] = func(g *dguest, a [6]uint64) int64 {
+		// The stub's last mapping of that file is gone: drop this address space's
+		// references to its backing, writing it back and releasing it once nothing
+		// maps it any more (sharedback.go).
+		g.mp.mu.Lock()
+		r := g.mp.backing[a[0]]
+		delete(g.mp.backing, a[0])
+		g.mp.mu.Unlock()
+		if r != nil {
+			g.dfs.release(r.sb, int64(r.refs))
 		}
 		return 0
 	}
@@ -127,11 +141,17 @@ func (g *dguest) mmapFd(fd int64, wshared, code bool) int64 {
 			if e != 0 {
 				return sErr(e)
 			}
-			// Record the backing under the stub's id for it, so the stub's msync
-			// of this mapping writes it back to the file (syncFile).
+			// Record the backing under the stub's id for it, with one more
+			// reference for the mapping just made (reserved in sharedBackingDarwin),
+			// so the stub's msync writes it back (syncFile) and its last unmap
+			// releases it (unmapFile).
 			id := stubFiles.id(d, g.mp)
 			g.mp.mu.Lock()
-			g.mp.backing[id] = sb
+			if r := g.mp.backing[id]; r != nil {
+				r.refs++
+			} else {
+				g.mp.backing[id] = &backingRef{sb: sb, refs: 1}
+			}
 			g.mp.mu.Unlock()
 			return int64(sfd)
 		}
@@ -219,6 +239,7 @@ func (g *dguest) sharedBackingDarwin(d *dfile) (*shBacking, lxErrno) {
 	fs.shMu.Lock()
 	defer fs.shMu.Unlock()
 	if sb := fs.shared[id]; sb != nil {
+		sb.reserve(1) // the mapping about to be made keeps it live (held under shMu, race-free vs evict)
 		return sb, 0
 	}
 	a, err := d.vn.Stat()
@@ -241,6 +262,7 @@ func (g *dguest) sharedBackingDarwin(d *dfile) (*shBacking, lxErrno) {
 		}
 	}
 	sb := &shBacking{f: tf, vf: d.vf, size: a.Size, eof: a.Size}
+	sb.reserve(1) // as above
 	fs.putBacking(id, sb)
 	return sb, 0
 }
@@ -277,9 +299,19 @@ type memProc struct {
 	shm    map[uint64]*shmAttach  // SysV segments attached, by address
 	semadj map[int]map[uint16]int // SEM_UNDO adjustments, by set and semaphore
 
-	backing map[uint64]*shBacking // open-file id -> the MAP_SHARED backing the stub maps for it (sharedback.go)
+	backing map[uint64]*backingRef // open-file id -> the MAP_SHARED backing the stub maps for it (sharedback.go)
 
 	anon anonCode // what is known of its code made executable at run time (anoncode.go)
+}
+
+// backingRef is one address space's hold on a shared backing: the backing and
+// how many of its live mappings this address space's stub made (one per mmap of
+// the file). The backing is reserved by that many, and released (and evicted
+// once nothing maps it) when the stub reports its last mapping of the file gone
+// (unmapFile) or the address space is torn down.
+type backingRef struct {
+	sb   *shBacking
+	refs int
 }
 
 // newMemProc makes a pairing; the stub's end is returned for the caller to
@@ -291,7 +323,7 @@ func newMemProc() (*memProc, *os.File, error) {
 	}
 	unix.CloseOnExec(fds[0])
 	unix.CloseOnExec(fds[1])
-	m := &memProc{sock: fds[0], sent: map[uint64]int32{}, names: map[uint64]fileName{}, refs: 1, shm: map[uint64]*shmAttach{}, semadj: map[int]map[uint16]int{}, backing: map[uint64]*shBacking{}}
+	m := &memProc{sock: fds[0], sent: map[uint64]int32{}, names: map[uint64]fileName{}, refs: 1, shm: map[uint64]*shmAttach{}, semadj: map[int]map[uint16]int{}, backing: map[uint64]*backingRef{}}
 	return m, os.NewFile(uintptr(fds[1]), "fdlink"), nil
 }
 
@@ -321,13 +353,21 @@ func (m *memProc) release(g *dguest) {
 	last := m.refs == 0
 	ids := m.sent
 	ipc := len(m.shm) > 0 || len(m.semadj) > 0
+	var refs []*backingRef
 	if last {
 		m.sent = nil
 		unix.Close(m.sock)
+		for _, r := range m.backing {
+			refs = append(refs, r)
+		}
+		m.backing = nil
 	}
 	m.mu.Unlock()
 	if !last {
 		return
+	}
+	for _, r := range refs {
+		g.dfs.release(r.sb, int64(r.refs)) // the address space is gone: drop its backings
 	}
 	stubFiles.forget(m, ids)
 	if ipc {
@@ -421,8 +461,9 @@ func (m *memProc) adopt(c *memProc, g *dguest) error {
 	for id, fn := range m.names {
 		c.names[id] = fn
 	}
-	for id, sb := range m.backing {
-		c.backing[id] = sb // the child inherits the shared mappings and their backings
+	for id, r := range m.backing {
+		c.backing[id] = &backingRef{sb: r.sb, refs: r.refs} // the child inherits the mappings
+		r.sb.reserve(int64(r.refs))                         // and keeps their backings live
 	}
 	c.mu.Unlock()
 	stubFiles.adopt(c, c.sent)

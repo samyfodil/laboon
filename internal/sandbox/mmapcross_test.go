@@ -18,13 +18,13 @@ import (
 	"github.com/samyfodil/laboon/internal/vfs"
 )
 
-// mmapGuestBin returns a guest built for the writable MAP_SHARED test. The guest
-// must be PIE: a non-PIE ET_EXEC forces the hypervisor backend on arm64 macOS,
-// which copies file mappings into VM RAM instead of sharing them. LC_MMAP_BIN,
-// when set, is a prebuilt static-PIE guest for this arch (testdata/mmapguest.c,
-// `gcc -static-pie`); the gate provides it on macOS, where a dynamic-PIE Go build
-// would need a Linux loader the host root lacks. Otherwise, on Linux, the Go form
-// is built -buildmode=pie and the host provides the loader.
+// mmapGuestBin returns the testdata/mmapguest.c guest, which selects a behavior
+// by its first argument. LC_MMAP_BIN, when set, is a prebuilt guest for this
+// arch: on macOS it must be static-PIE (`gcc -static-pie`), because a non-PIE
+// ET_EXEC forces the hypervisor backend there, which copies file mappings into
+// VM RAM instead of sharing them, and a dynamic build would need a Linux loader
+// the host root lacks; the gate provides it. Otherwise, on Linux, it is built
+// with the host's gcc.
 func mmapGuestBin(t *testing.T) string {
 	t.Helper()
 	if exe := os.Getenv("LC_MMAP_BIN"); exe != "" {
@@ -34,10 +34,8 @@ func mmapGuestBin(t *testing.T) string {
 		t.Skip("set LC_MMAP_BIN to a static-PIE guest for this arch (testdata/mmapguest.c)")
 	}
 	exe := filepath.Join(t.TempDir(), "mmapguest")
-	cmd := exec.Command("go", "build", "-buildmode=pie", "-o", exe, "../../testdata/mmapguest.go")
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Skipf("cross build unavailable: %v\n%s", err, b)
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mmapguest.c").CombinedOutput(); err != nil {
+		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	return exe
 }
@@ -82,15 +80,15 @@ func TestMmapMsyncWriteBack(t *testing.T) {
 	}
 }
 
-// runMmapGuest runs exe with mem mounted at /data and host root, requiring want
-// in its output.
-func runMmapGuest(t *testing.T, exe string, mem vfs.FileSystem, want string) {
+// runMmapGuest runs exe (with any guest args) and mem mounted at /data and host
+// root, requiring want in its output.
+func runMmapGuest(t *testing.T, exe string, mem vfs.FileSystem, want string, args ...string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	var out bytes.Buffer
 	code, err := Run(ctx, exe, Config{
-		Args:   []string{exe},
+		Args:   append([]string{exe}, args...),
 		RootFS: HostRoot("/"),
 		Mounts: []Mount{{Guest: "/data", FS: mem}},
 		Stdout: &out,
@@ -98,6 +96,44 @@ func runMmapGuest(t *testing.T, exe string, mem vfs.FileSystem, want string) {
 	})
 	if err != nil || code != 0 || !strings.Contains(out.String(), want) {
 		t.Fatalf("code=%d err=%v out=%q", code, err, out.String())
+	}
+}
+
+// Each unmap of a non-host file's shared mapping writes its backing back and
+// releases it, instead of the backing living for the whole run. The guest maps,
+// writes and unmaps twice; counting vf.WriteAt shows two write-backs (one per
+// unmap) rather than a single flush at teardown, and the file ends with the
+// second store.
+func TestMmapReevict(t *testing.T) {
+	exe := mmapGuestBin(t)
+	cfs := newWBFS(4096)
+	runMmapGuest(t, exe, cfs, "MMAP-OK", "reevict")
+	if n := cfs.file.writes.Load(); n != 2 {
+		t.Fatalf("vf write-backs = %d, want 2 (one per unmap, evicted each time)", n)
+	}
+	cfs.file.mu.Lock()
+	got := string(cfs.file.data[:11])
+	cfs.file.mu.Unlock()
+	if got != "SECOND-STOR" {
+		t.Fatalf("file = %q, want the second store written back", got)
+	}
+}
+
+// A MAP_SHARED mapping of a non-host file is coherent across fork and its backing
+// survives while a child maps it (the parent unmapping its copy must not evict
+// it from under the child); both stores reach the composed filesystem.
+func TestMmapForkShared(t *testing.T) {
+	exe := mmapGuestBin(t)
+	mem := vfs.NewMemFS()
+	if _, err := mem.(vfs.WriteFileSystem).WriteFile(mem.Root(), "f", vfs.CreateSpec{Kind: vfs.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	runMmapGuest(t, exe, mem, "MMAP-OK", "fork")
+	if got := memReadAt(t, mem, "f", 0, 6); string(got) != "PARENT" {
+		t.Fatalf("offset 0 = %q, want PARENT", got)
+	}
+	if got := memReadAt(t, mem, "f", 100, 5); string(got) != "CHILD" {
+		t.Fatalf("offset 100 = %q, want the fork child's store CHILD", got)
 	}
 }
 

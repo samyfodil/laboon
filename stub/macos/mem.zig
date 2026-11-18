@@ -94,6 +94,7 @@ const NR_EPOLL_PWAIT2: u64 = 441;
 pub const LC_MMAPFD: u64 = 0x4c430001; // (guest fd, shared writable, shared executable) -> stub fd | kind << 32
 const LC_CODEFILE: u64 = 0x4c430006; // (open-file id): this stub maps that file shared and executable
 const LC_SYNCFILE: u64 = 0x4c430007; // (open-file id): msync of its MAP_SHARED mapping; write the backing back to the file
+const LC_UNMAPFILE: u64 = 0x4c430008; // (open-file id): this stub's last MAP_SHARED mapping of that non-host file is gone
 pub const LC_REWRITE: u64 = 0x4c430002; // (base, len, file off, guest fd, count only): rewrite, or count, a text range's sites
 const LC_SHMAT: u64 = 0x4c430003; // (shmid) -> stub fd | pages << 32
 const LC_SHMATTACHED: u64 = 0x4c430004; // (shmid) -> attachment cookie
@@ -1054,6 +1055,30 @@ fn syncFiles(lo: u64, hi: u64) void {
     for (ids[0..n]) |id| _ = root.hostCall(LC_SYNCFILE, .{ id, 0, 0, 0, 0, 0 });
 }
 
+// sharedIds collects into ids the shared file ids [lo, hi) maps, returning how
+// many; used by munmap to notice when a file's last mapping is gone.
+fn sharedIds(lo: u64, hi: u64, ids: *[8]u64) usize {
+    var n: usize = 0;
+    lock.lock();
+    defer lock.unlock();
+    for (vmas.items) |e| {
+        if (e.kind != .file or !e.shared or e.hi <= lo or e.lo >= hi) continue;
+        if (std.mem.indexOfScalar(u64, ids[0..n], e.id) != null) continue;
+        if (n == ids.len) break;
+        ids[n] = e.id;
+        n += 1;
+    }
+    return n;
+}
+
+// mapsId reports whether any mapping of file id survives.
+fn mapsId(id: u64) bool {
+    lock.lock();
+    defer lock.unlock();
+    for (vmas.items) |e| if (e.kind == .file and e.id == id) return true;
+    return false;
+}
+
 // fileOf is the host file (device, inode) whose shared mapping page is, if
 // it is one.
 pub fn fileOf(page: u64) ?[2]u64 {
@@ -1124,6 +1149,10 @@ fn munmap(addr: u64, len: u64) u64 {
     // wx learns of the unmap before another thread's mapping can land there.
     wx.hold();
     defer wx.release();
+    // The non-host files this range maps shared, to tell the supervisor of the
+    // ones whose last mapping this unmap removes (so it releases their backings).
+    var ids: [8]u64 = undefined;
+    const nid = sharedIds(addr, addr + n, &ids);
     const r = sys(SYS_munmap, addr, n, 0, 0, 0, 0);
     if (r < 0) return lx(r);
     lock.lock();
@@ -1131,6 +1160,9 @@ fn munmap(addr: u64, len: u64) u64 {
     anonPunch(addr, addr + n);
     lock.unlock();
     wx.unmapped(addr, addr + n);
+    for (ids[0..nid]) |id| {
+        if (!mapsId(id)) _ = root.hostCall(LC_UNMAPFILE, .{ id, 0, 0, 0, 0, 0 });
+    }
     flushGone();
     return 0;
 }
