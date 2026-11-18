@@ -45,7 +45,7 @@ func holdCloneChild(mem []byte, idx int) {
 
 // forkCopy is a fork child's memory state: a copy of m's, for a stub not yet
 // known by pid.
-func (m *memProc) forkCopy() *memProc {
+func (m *memProc) forkCopy(fs *dfs) *memProc {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c := newMemProc(0)
@@ -58,6 +58,7 @@ func (m *memProc) forkCopy() *memProc {
 	c.lay = m.lay
 	c.used = m.used
 	c.brk, c.brkLo = m.brk, m.brkLo
+	c.forkShMaps(m, fs) // the child inherits the shared mappings; keep their backings live
 	return c
 }
 
@@ -95,7 +96,7 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 	if shmemEnabled() {
 		g.unmirrorForFork() // a real fork needs private, copy-on-write pages, not shared mirrors
 	}
-	child.mp = g.mp.forkCopy()
+	child.mp = g.mp.forkCopy(fs)
 	child.mp.hopPend = h
 	g.mp.forkShm(child.mp, g)    // the child inherits the SysV attachments
 	g.memUsed.Add(child.mp.used) // the child's copy of the address space draws from the pool
@@ -588,7 +589,7 @@ func (g *dguest) vforkExec() error {
 	}
 	ospid := int(ch.page.args[0])
 	old := g.mp
-	m := old.forkCopy()
+	m := old.forkCopy(fs)
 	m.pid.Store(int64(ospid))
 	m.hopPend = h
 	fs.adoptHop(ospid, h)

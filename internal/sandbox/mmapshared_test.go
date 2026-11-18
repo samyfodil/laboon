@@ -110,6 +110,44 @@ func TestMmapSharedNoEOFExtend(t *testing.T) {
 	}
 }
 
+// An explicit munmap of a shared mapping writes the backing back to the file and
+// releases it; the stores reach the memFS even with no msync and before teardown.
+func TestMmapEvictWriteBack(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "mmapevict")
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mmapevict.c").CombinedOutput(); err != nil {
+		t.Skipf("static gcc unavailable: %v\n%s", err, b)
+	}
+	mem := vfs.NewMemFS()
+	if _, err := mem.(vfs.WriteFileSystem).WriteFile(mem.Root(), "f", vfs.CreateSpec{Kind: vfs.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	runMmapGuest(t, exe, mem, "MMAP-EVICT-OK")
+	if got := memReadAt(t, mem, "f", 0, 11); string(got) != "EVICT-WRITE" {
+		t.Fatalf("offset 0 = %q, want EVICT-WRITE written back on munmap", got)
+	}
+}
+
+// A MAP_SHARED mapping of a non-host file is coherent across fork, and the
+// backing survives while a child still maps it; both processes' stores reach the
+// memFS.
+func TestMmapForkCoherent(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "mmapfork")
+	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mmapfork.c").CombinedOutput(); err != nil {
+		t.Skipf("static gcc unavailable: %v\n%s", err, b)
+	}
+	mem := vfs.NewMemFS()
+	if _, err := mem.(vfs.WriteFileSystem).WriteFile(mem.Root(), "f", vfs.CreateSpec{Kind: vfs.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	runMmapGuest(t, exe, mem, "MMAP-FORK-OK")
+	if got := memReadAt(t, mem, "f", 0, 6); string(got) != "PARENT" {
+		t.Fatalf("offset 0 = %q, want PARENT", got)
+	}
+	if got := memReadAt(t, mem, "f", 100, 5); string(got) != "CHILD" {
+		t.Fatalf("offset 100 = %q, want the fork child's store CHILD", got)
+	}
+}
+
 // runMmapGuest runs exe with mem mounted at /data and host root, requiring want
 // in its output.
 func runMmapGuest(t *testing.T, exe string, mem vfs.FileSystem, want string) {

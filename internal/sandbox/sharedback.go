@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/samyfodil/laboon/internal/vfs"
 )
@@ -18,11 +19,13 @@ import (
 // coherence and write-back logic here is backend- and platform-independent; only
 // creating it (memfd vs temp file) and mapping it into the stub are per-platform.
 type shBacking struct {
+	id   vfs.NodeID
 	mu   sync.Mutex
-	f    *os.File // the mapping-capable host object; the stub maps this
-	vf   vfs.File // the backend the content is written back to
-	size int64    // the object's allocated length (>= eof)
-	eof  int64    // the file's logical size: reads stop here, write-back covers [0,eof)
+	f    *os.File     // the mapping-capable host object; the stub maps this
+	vf   vfs.File     // the backend the content is written back to
+	size int64        // the object's allocated length (>= eof)
+	eof  int64        // the file's logical size: reads stop here, write-back covers [0,eof)
+	maps atomic.Int64 // live mapped pages across all address spaces; evicted at zero
 }
 
 // fd is the raw descriptor the platform maps into the stub.
@@ -107,20 +110,68 @@ func (sb *shBacking) growLocked(n int64) error {
 // writeBack copies the logical content out to the vfs.File, so the guest's
 // shared-mapping and write() stores reach the backend. Only [0, eof) is written:
 // a mapping may run past the end of the file, but those bytes are not part of it.
-func (sb *shBacking) writeBack() {
+// A write error is returned so eviction can keep a backing whose data did not
+// reach the backend.
+func (sb *shBacking) writeBack() error {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 	buf := make([]byte, 1<<20)
 	for off := int64(0); off < sb.eof; {
-		n, err := sb.f.ReadAt(buf[:min(int64(len(buf)), sb.eof-off)], off)
+		n, rerr := sb.f.ReadAt(buf[:min(int64(len(buf)), sb.eof-off)], off)
 		if n > 0 {
-			sb.vf.WriteAt(buf[:n], off)
+			if _, werr := sb.vf.WriteAt(buf[:n], off); werr != nil {
+				return werr
+			}
 			off += int64(n)
 		}
-		if err != nil || n == 0 {
-			break
+		if rerr != nil || n == 0 {
+			if rerr == io.EOF {
+				return nil
+			}
+			return rerr
 		}
 	}
+	return nil
+}
+
+// reserve raises sb's mapped-page count for a mapping about to be made. It runs
+// under fs.shMu so it cannot race an eviction's zero check: once reserved, the
+// backing stays live until the mapping is released. fs.shMu held.
+func (sb *shBacking) reserve(pages int64) { sb.maps.Add(pages) }
+
+// release lowers the mapped-page count when a mapping goes away and evicts the
+// backing once nothing maps it.
+func (fs *dfs) release(sb *shBacking, pages int64) {
+	if sb.maps.Add(-pages) <= 0 {
+		fs.evict(sb)
+	}
+}
+
+// evict writes a no-longer-mapped backing back to its file and releases it. A
+// failed write-back keeps the backing (and its data) in place so a later msync
+// or teardown retries, rather than losing the stores. The zero check is repeated
+// under fs.shMu, where reservations are made, so a mapping being made right now
+// keeps the backing.
+func (fs *dfs) evict(sb *shBacking) {
+	fs.shMu.Lock()
+	if sb.maps.Load() > 0 || fs.shared[sb.id] != sb {
+		fs.shMu.Unlock()
+		return
+	}
+	delete(fs.shared, sb.id)
+	fs.sharedN.Add(-1)
+	fs.shMu.Unlock()
+	if err := sb.writeBack(); err != nil {
+		fs.shMu.Lock()
+		if fs.shared == nil {
+			fs.shared = map[vfs.NodeID]*shBacking{}
+		}
+		fs.shared[sb.id] = sb
+		fs.sharedN.Add(1)
+		fs.shMu.Unlock()
+		return
+	}
+	sb.f.Close()
 }
 
 // backing returns the live shared backing of vnode id, or nil. The atomic count
@@ -137,6 +188,7 @@ func (fs *dfs) backing(id vfs.NodeID) *shBacking {
 
 // putBacking records sb as vnode id's backing. fs.shMu held.
 func (fs *dfs) putBacking(id vfs.NodeID, sb *shBacking) {
+	sb.id = id
 	if fs.shared == nil {
 		fs.shared = map[vfs.NodeID]*shBacking{}
 	}

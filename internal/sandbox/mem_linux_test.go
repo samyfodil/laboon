@@ -46,7 +46,7 @@ func TestForkCopyOwnsBookkeeping(t *testing.T) {
 	m.sites.add([]uint64{1})
 	m.reserved = make([]run, 1, 8)
 	g := &dguest{mp: m}
-	c := &dguest{mp: m.forkCopy()}
+	c := &dguest{mp: m.forkCopy(&dfs{})}
 	c.reserve(0x1000, 0x1000)
 	g.reserve(0x5000, 0x1000)
 	if c.mp.reserved[1].lo != 0x1000 {

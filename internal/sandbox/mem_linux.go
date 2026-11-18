@@ -40,6 +40,7 @@ type memProc struct {
 	fileCode   []fileCode
 	vm         vmaSet       // the guest's mappings: execve's teardown, the memory cap and placement
 	noWrite    vmaSet       // the mapped ranges the guest cannot write (mapped or protected without PROT_WRITE)
+	shMaps     []shMap      // this address space's MAP_SHARED mappings of non-host files, for eviction (shmaps_linux.go)
 	hostStack  run          // the stack the stub process's exec gave it, until the guest's first call unmaps it
 	special    []specialMap // the kernel's special mappings the guest has, in place or moved aside (vdso_linux.go)
 	lay        mmapLayout   // where mappings the guest leaves unplaced go

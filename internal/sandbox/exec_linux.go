@@ -111,7 +111,8 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	}
 	dg.memUsed.Add(-m.used)
 	m.used = 0
-	m.vm.r = nil // the foreign ranges are the stub process's and stay
+	m.dropShMaps(dg.dfs) // execve clears the address space: release its shared backings
+	m.vm.r = nil         // the foreign ranges are the stub process's and stay
 	m.noWrite = vmaSet{}
 	clear(m.ownStack)
 	m.reserved = nil

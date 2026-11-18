@@ -177,6 +177,7 @@ func (g *dguest) munmap(addr, length uint64) int64 {
 		return sErr(lxEINVAL)
 	}
 	g.untrack(addr, length)
+	g.mp.removeShMap(addr, addr+alignUp(length), g.dfs) // release any shared backing this unmaps
 	g.dropFileCode(addr, length)
 	g.mp.dropMirror(addr, addr+length)
 	g.parkSpecial(addr, addr+alignUp(length))
@@ -289,6 +290,7 @@ func (g *dguest) mremap(a [6]uint64) int64 {
 	if r < 0 {
 		return r
 	}
+	sb := g.mp.shMapAt(old) // a shared backing moving with the mapping, if any
 	if flags&unix.MREMAP_DONTUNMAP == 0 {
 		g.untrack(old, oldLen)
 	}
@@ -297,6 +299,16 @@ func (g *dguest) mremap(a [6]uint64) int64 {
 		return r
 	}
 	g.trackAs(uint64(r), newLen, v.anon)
+	if sb != nil {
+		// Carry the shared mapping to its new address: reserve the new pages
+		// before releasing the old, so our own mapping keeps the backing live
+		// throughout and it is never momentarily unmapped.
+		sb.reserve(int64(alignUp(newLen) / pageSize))
+		if flags&unix.MREMAP_DONTUNMAP == 0 {
+			g.mp.removeShMap(old, old+alignUp(oldLen), g.dfs)
+		}
+		g.mp.addShMap(uint64(r), uint64(r)+alignUp(newLen), sb, g.dfs)
+	}
 	if ro {
 		g.notePerm(uint64(r), newLen, unix.PROT_NONE) // one mapping moved: its protection with it
 	}
@@ -370,11 +382,18 @@ func (g *dguest) mmapVF(d *dfile, a [6]uint64) int64 {
 		return g.mmapVFExec(d, a)
 	}
 	if a[3]&unix.MAP_SHARED != 0 && d.vn != nil {
-		sb, e := g.sharedBacking(d, int64(a[5])+int64(a[1]))
+		pages := int64(alignUp(a[1]) / pageSize)
+		sb, e := g.sharedBacking(d, int64(a[5])+int64(a[1]), pages)
 		if e != 0 {
 			return sErr(e)
 		}
-		return g.mmapShared(sb.fd(), a) // the whole-file memfd; a[5] is the file offset into it
+		r := g.mmapShared(sb.fd(), a) // the whole-file memfd; a[5] is the file offset into it
+		if r < 0 {
+			g.dfs.release(sb, pages) // the mapping did not take: undo the reservation
+			return r
+		}
+		g.mp.addShMap(uint64(r), uint64(r)+alignUp(a[1]), sb, g.dfs)
+		return r
 	}
 	length := a[1]
 	mfd, err := unix.MemfdCreate("lc-mmap", unix.MFD_CLOEXEC)
@@ -399,9 +418,11 @@ func (g *dguest) mmapVF(d *dfile, a [6]uint64) int64 {
 // sharedBacking returns the one backing that every MAP_SHARED mapping of d's
 // vnode maps (a memfd here), creating it (filled from the file through ReadAt) on
 // first use and growing it to cover minEnd. It is keyed by vnode on the shared
-// dfs, so two independent opens and a fork child all map the same object. The
-// coherence and write-back logic lives in sharedback.go. g.mp.mu held.
-func (g *dguest) sharedBacking(d *dfile, minEnd int64) (*shBacking, lxErrno) {
+// dfs, so two independent opens and a fork child all map the same object, and it
+// reserves pages for the mapping about to be made so the backing stays live
+// until that mapping is released. The coherence, write-back and eviction logic
+// lives in sharedback.go. g.mp.mu held.
+func (g *dguest) sharedBacking(d *dfile, minEnd, pages int64) (*shBacking, lxErrno) {
 	fs := g.dfs
 	id := d.vn.ID()
 	fs.shMu.Lock()
@@ -413,6 +434,7 @@ func (g *dguest) sharedBacking(d *dfile, minEnd int64) (*shBacking, lxErrno) {
 		if err != nil {
 			return nil, osErrno(err)
 		}
+		sb.reserve(pages)
 		return sb, 0
 	}
 	at, err := d.vn.Stat()
@@ -436,6 +458,7 @@ func (g *dguest) sharedBacking(d *dfile, minEnd int64) (*shBacking, lxErrno) {
 		return nil, e
 	}
 	sb := &shBacking{f: f, vf: d.vf, size: size, eof: at.Size}
+	sb.reserve(pages)
 	fs.putBacking(id, sb)
 	return sb, 0
 }
