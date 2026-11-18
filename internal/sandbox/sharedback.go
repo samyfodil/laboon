@@ -26,6 +26,8 @@ type shBacking struct {
 	size int64        // the object's allocated length (>= eof)
 	eof  int64        // the file's logical size: reads stop here, write-back covers [0,eof)
 	maps atomic.Int64 // live mapped pages across all address spaces; evicted at zero
+	path string       // the backing file to delete on release (Windows, which cannot unlink an open file); empty when already unlinked
+	key  uint64       // the shared-futex key every mapping of this backing uses (Windows)
 }
 
 // fd is the raw descriptor the platform maps into the stub.
@@ -134,6 +136,35 @@ func (sb *shBacking) writeBack() error {
 	return nil
 }
 
+// fillFrom copies size bytes of r into w at the same offsets, for filling a
+// fresh backing from its file. Bytes past the content stay zero.
+func fillFrom(w *os.File, r io.ReaderAt, size int64) error {
+	buf := make([]byte, min(size, 1<<20))
+	for pos := int64(0); pos < size; {
+		b := buf[:min(size-pos, int64(len(buf)))]
+		n, err := r.ReadAt(b, pos)
+		if n > 0 {
+			if _, werr := w.WriteAt(b[:n], pos); werr != nil {
+				return werr
+			}
+			pos += int64(n)
+		}
+		if err != nil || n == 0 {
+			break
+		}
+	}
+	return nil
+}
+
+// closeFile releases the backing's host object, removing the backing file too
+// where it could not be unlinked while open (Windows).
+func (sb *shBacking) closeFile() {
+	sb.f.Close()
+	if sb.path != "" {
+		os.Remove(sb.path)
+	}
+}
+
 // reserve raises sb's mapped-page count for a mapping about to be made. It runs
 // under fs.shMu so it cannot race an eviction's zero check: once reserved, the
 // backing stays live until the mapping is released. fs.shMu held.
@@ -171,7 +202,7 @@ func (fs *dfs) evict(sb *shBacking) {
 		fs.shMu.Unlock()
 		return
 	}
-	sb.f.Close()
+	sb.closeFile()
 }
 
 // backing returns the live shared backing of vnode id, or nil. The atomic count
@@ -223,6 +254,6 @@ func (fs *dfs) flushSharedMem() {
 	fs.shMu.Unlock()
 	for _, sb := range sbs {
 		sb.writeBack()
-		sb.f.Close()
+		sb.closeFile()
 	}
 }

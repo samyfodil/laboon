@@ -6,6 +6,7 @@ import (
 	"debug/elf"
 	"encoding/binary"
 	"io"
+	"os"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -94,18 +95,34 @@ func (g *wguest) mapSection(dg *dguest, fd, off, n, prot uint64) int64 {
 			return sErr(e)
 		}
 		if d.vf != nil {
-			// A non-host file (in-memory, user-defined, network): materialize its
-			// range into an anonymous section the supervisor fills, so the guest
-			// maps that, not a real file. An executable mapping is rewritten
-			// elsewhere, so refuse it here.
+			// A non-host file (in-memory, user-defined, network): the guest never
+			// touches the real backing. A writable shared mapping maps the one
+			// per-vnode backing (sharedback.go) through a file-backed section, so
+			// every mapping and fork child is coherent and its stores are written
+			// back to the file; its views and the supervisor's reads of the file
+			// share the page cache. A read-only mapping maps an anonymous snapshot
+			// the supervisor fills (no stores to track). An executable mapping is
+			// rewritten elsewhere, so refuse it here.
 			if prot&lxProtExec != 0 {
 				return sErr(lxENODEV)
 			}
 			end := off + n
-			if sec, err = windows.CreateFileMapping(windows.InvalidHandle, nil, windows.PAGE_READWRITE, uint32(end>>32), uint32(end), nil); err == nil {
-				err = g.fillSection(sec, d, off, n)
+			if prot&lxProtWrite != 0 {
+				sb, e := dg.sharedBackingWindows(d)
+				if e != 0 {
+					return sErr(e)
+				}
+				// A file-backed section may run past the end of the file, which
+				// grows the backing file; write-back still covers only the file's
+				// logical size, so the tail is not written to the backend.
+				sec, err = windows.CreateFileMapping(windows.Handle(sb.f.Fd()), nil, windows.PAGE_READWRITE, uint32(end>>32), uint32(end), nil)
+				key, size = sb.key, end
+			} else {
+				if sec, err = windows.CreateFileMapping(windows.InvalidHandle, nil, windows.PAGE_READWRITE, uint32(end>>32), uint32(end), nil); err == nil {
+					err = g.fillSection(sec, d, off, n)
+				}
+				key, size = sectionKeys.Add(1), end
 			}
-			key, size = sectionKeys.Add(1), end
 		} else {
 			page := uint32(windows.PAGE_READONLY)
 			if prot&lxProtWrite != 0 {
@@ -157,6 +174,45 @@ func (g *wguest) mapSection(dg *dguest, fd, off, n, prot uint64) int64 {
 		return sErr(osErrno(err))
 	}
 	return int64(h)
+}
+
+// sharedBackingWindows returns the one host object every writable MAP_SHARED
+// mapping of d's vnode maps: a temp file holding the whole content, filled from
+// the file. A file-backed section over it is coherent across opens and fork
+// children, and sharedback.go writes its stores back to the file. Windows cannot
+// unlink an open file, so the path is kept and removed on release. Every mapping
+// of the vnode uses the same shared-futex key.
+func (dg *dguest) sharedBackingWindows(d *dfile) (*shBacking, lxErrno) {
+	fs := dg.dfs
+	id := d.vn.ID()
+	fs.shMu.Lock()
+	defer fs.shMu.Unlock()
+	if sb := fs.shared[id]; sb != nil {
+		return sb, 0
+	}
+	a, err := d.vn.Stat()
+	if err != nil {
+		return nil, osErrno(err)
+	}
+	tf, err := os.CreateTemp("", "lc-shmem")
+	if err != nil {
+		return nil, osErrno(err)
+	}
+	if a.Size > 0 {
+		if err := tf.Truncate(a.Size); err != nil {
+			tf.Close()
+			os.Remove(tf.Name())
+			return nil, osErrno(err)
+		}
+		if err := fillFrom(tf, d.vf, a.Size); err != nil {
+			tf.Close()
+			os.Remove(tf.Name())
+			return nil, osErrno(err)
+		}
+	}
+	sb := &shBacking{f: tf, vf: d.vf, size: a.Size, eof: a.Size, path: tf.Name(), key: sectionKeys.Add(1)}
+	fs.putBacking(id, sb)
+	return sb, 0
 }
 
 var procNtQuerySection = modNtdll.NewProc("NtQuerySection")

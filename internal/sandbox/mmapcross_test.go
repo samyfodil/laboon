@@ -80,16 +80,23 @@ func TestMmapMsyncWriteBack(t *testing.T) {
 	}
 }
 
-// runMmapGuest runs exe (with any guest args) and mem mounted at /data and host
-// root, requiring want in its output.
+// runMmapGuest runs exe (with any guest args) and mem mounted at /data,
+// requiring want in its output. The program path is resolved as a guest path
+// under the host root, so on unix the root is "/" and the guest path is exe;
+// on Windows, where "/" is not a host path, the root is the guest binary's
+// directory and the guest runs it by its base name.
 func runMmapGuest(t *testing.T, exe string, mem vfs.FileSystem, want string, args ...string) {
 	t.Helper()
+	root, gp := HostRoot("/"), exe
+	if runtime.GOOS == "windows" {
+		root, gp = HostRoot(filepath.Dir(exe)), "/"+filepath.Base(exe)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	var out bytes.Buffer
-	code, err := Run(ctx, exe, Config{
-		Args:   append([]string{exe}, args...),
-		RootFS: HostRoot("/"),
+	code, err := Run(ctx, gp, Config{
+		Args:   append([]string{gp}, args...),
+		RootFS: root,
 		Mounts: []Mount{{Guest: "/data", FS: mem}},
 		Stdout: &out,
 		Stderr: &out,
