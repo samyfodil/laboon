@@ -454,6 +454,7 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 	cw := &wguest{run: w.run, cfg: w.cfg, cache: w.cache, entry: w.entry, exitEntry: w.exitEntry, segs: w.segs, traps: w.traps.clone()}
 	w.anon.cloneInto(&cw.anon)
 	child.mp.w = cw
+	child.mp.forkBacking(g.mp) // the child inherits the shared mappings; keep their backings live
 
 	fs.mu.Lock()
 	ppid, sig := g.ps.tgid, r.exitSignal
@@ -604,6 +605,7 @@ func endWinProcess(child *dguest, code int, err error) {
 	}
 	fs.childDone(child, code, err)
 	if !shared && child.mp.w != nil && child.mp.w.sp != nil {
+		child.mp.dropBackings(fs) // the address space is gone: release its shared backings
 		child.mp.w.sp.close()
 	}
 }

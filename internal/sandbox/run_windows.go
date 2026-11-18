@@ -768,6 +768,10 @@ func (g *wguest) syscall(dg *dguest, nr uint64, a [6]uint64) int64 {
 		return g.mapFill(dg, a[0], a[1], a[2], a[3])
 	case lcMapSection:
 		return g.mapSection(dg, a[0], a[1], a[2], a[3])
+	case lcSyncBacking:
+		return dg.syncBacking(a[0])
+	case lcDropBacking:
+		return dg.dropBacking(a[0])
 	case lcFutex:
 		return g.run.futex.serve(dg, a[0], a[1], a[2], a[3], a[4], a[5])
 	case lcCodeSize:

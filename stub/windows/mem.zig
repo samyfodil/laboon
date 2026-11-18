@@ -116,6 +116,8 @@ const LC_INSN: u64 = 0x4c43002c;
 pub const LC_HOT: u64 = 0x4c43002f;
 pub const LC_COOL: u64 = 0x4c430032;
 const LC_CODEFILE: u64 = 0x4c430033;
+const LC_SYNCBACKING: u64 = 0x4c430036; // (key): msync of a non-host file's MAP_SHARED mapping; write its backing back to the file
+const LC_DROPBACKING: u64 = 0x4c430037; // (key): a MAP_SHARED mapping of a non-host file is unmapped; release its backing
 // SysV shmat: (shmid) -> duplicated section handle | pages << 32; args[0] the
 // futex key. LC_SHMATTACHED (shmid) -> attachment cookie; LC_SHMGONE (cookie)
 // when a segment's last mapping is dropped.
@@ -411,10 +413,15 @@ fn unmapRange(lo: u64, hi: u64) bool {
             a = end;
             continue;
         }
+        // A file view is unmapped whole: tell the supervisor so it releases the
+        // backing this mapping held (a non-backing key is ignored there).
+        const drop = regs[i].kind == .view and regs[i].file;
+        const key = regs[i].key;
         if (!release(i, s, end)) {
             ok = false;
             break;
         }
+        if (drop) _ = root.request(LC_DROPBACKING, .{ key, 0, 0, 0, 0, 0 });
         a = end;
     }
     if (code_freed) sweepTramps();
@@ -907,6 +914,10 @@ fn msync(addr: u64, len0: u64) u64 {
             var s: usize = end - a;
             var iosb: [2]usize = .{ 0, 0 };
             _ = NtFlushVirtualMemory(SELF, &b, &s, &iosb);
+            // A file view: its dirty pages are now in the backing file; have the
+            // supervisor write that file back to the backend (a non-backing key
+            // is ignored there).
+            if (regs[i].file) _ = root.request(LC_SYNCBACKING, .{ regs[i].key, 0, 0, 0, 0, 0 });
         }
         a = end;
     }
@@ -1554,7 +1565,6 @@ fn cool(m: usize) bool {
     thawKey(r.key, r.off);
     return true;
 }
-
 
 // unshade cools the hot pages and thaws the frozen ones of [a, a+n), for a
 // write the stub makes, and reports whether it could: one frozen for memory

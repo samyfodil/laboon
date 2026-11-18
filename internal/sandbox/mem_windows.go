@@ -19,11 +19,13 @@ import (
 // rewritten: lcCodeSize sizes the trampolines, which the stub then places in
 // branch range, and lcMapCode writes both.
 const (
-	lcMapFill    = 0x4c430020 // (fd, off, len, addr) -> 0
-	lcMapSection = 0x4c430021 // (fd or -1, off, len, prot) -> section handle in the stub (0 when no byte of the file is past off), key in args[0], section size in args[1]
-	lcCodeSize   = 0x4c430023 // (fd, off, len, addr) -> trampoline bytes
-	lcMapCode    = 0x4c430024 // (fd, off, len, addr, n) -> 0, the n trampoline areas (base, size) in the slot scratch
-	lcIdregs     = 0x4c430035 // () -> the guest's ID_AA64ISAR0/1/2 in args[0..2] (arm64)
+	lcMapFill     = 0x4c430020 // (fd, off, len, addr) -> 0
+	lcMapSection  = 0x4c430021 // (fd or -1, off, len, prot) -> section handle in the stub (0 when no byte of the file is past off), key in args[0], section size in args[1]
+	lcSyncBacking = 0x4c430036 // (key): msync of a non-host file's MAP_SHARED mapping; write its backing back to the file
+	lcDropBacking = 0x4c430037 // (key): a MAP_SHARED mapping of a non-host file is unmapped; release its backing
+	lcCodeSize    = 0x4c430023 // (fd, off, len, addr) -> trampoline bytes
+	lcMapCode     = 0x4c430024 // (fd, off, len, addr, n) -> 0, the n trampoline areas (base, size) in the slot scratch
+	lcIdregs      = 0x4c430035 // () -> the guest's ID_AA64ISAR0/1/2 in args[0..2] (arm64)
 
 	brkMax = 1 << 30 // the brk reservation after the image
 	// brkGap is left free between the image and its brk area: the arm64 stub
@@ -116,6 +118,11 @@ func (g *wguest) mapSection(dg *dguest, fd, off, n, prot uint64) int64 {
 				// grows the backing file; write-back still covers only the file's
 				// logical size, so the tail is not written to the backend.
 				sec, err = windows.CreateFileMapping(windows.Handle(sb.f.Fd()), nil, windows.PAGE_READWRITE, uint32(end>>32), uint32(end), nil)
+				if err != nil {
+					dg.dfs.release(sb, 1) // the mapping did not take: undo the reservation
+					return sErr(osErrno(err))
+				}
+				dg.mp.recordBacking(sb) // so the stub's msync/munmap reach it (syncBacking/dropBacking)
 				key, size = sb.key, end
 			} else {
 				if sec, err = windows.CreateFileMapping(windows.InvalidHandle, nil, windows.PAGE_READWRITE, uint32(end>>32), uint32(end), nil); err == nil {
@@ -188,6 +195,7 @@ func (dg *dguest) sharedBackingWindows(d *dfile) (*shBacking, lxErrno) {
 	fs.shMu.Lock()
 	defer fs.shMu.Unlock()
 	if sb := fs.shared[id]; sb != nil {
+		sb.reserve(1) // the mapping about to be made keeps it live (held under shMu, race-free vs evict)
 		return sb, 0
 	}
 	a, err := d.vn.Stat()
@@ -211,8 +219,86 @@ func (dg *dguest) sharedBackingWindows(d *dfile) (*shBacking, lxErrno) {
 		}
 	}
 	sb := &shBacking{f: tf, vf: d.vf, size: a.Size, eof: a.Size, path: tf.Name(), key: sectionKeys.Add(1)}
+	sb.reserve(1) // as above
 	fs.putBacking(id, sb)
 	return sb, 0
+}
+
+// backingRef is one address space's hold on a shared backing: the backing and
+// how many of its mappings this address space made (one per mapping of the
+// file). The backing is reserved by that many and released (and evicted once
+// nothing maps it) as each mapping is unmapped or the address space is torn down.
+type backingRef struct {
+	sb   *shBacking
+	refs int
+}
+
+// recordBacking notes that this address space maps sb (already reserved by one
+// more in sharedBackingWindows), keyed by its shared-futex key, so the stub's
+// msync and munmap of the mapping reach it.
+func (m *memProc) recordBacking(sb *shBacking) {
+	m.mu.Lock()
+	if r := m.backing[sb.key]; r != nil {
+		r.refs++
+	} else {
+		m.backing[sb.key] = &backingRef{sb: sb, refs: 1}
+	}
+	m.mu.Unlock()
+}
+
+// syncBacking writes the backing of a msynced mapping back to its file now, not
+// only at teardown; a key that is not a backing (a host-file mapping) is ignored.
+func (dg *dguest) syncBacking(key uint64) int64 {
+	m := dg.mp
+	m.mu.Lock()
+	r := m.backing[key]
+	m.mu.Unlock()
+	if r != nil {
+		r.sb.writeBack()
+	}
+	return 0
+}
+
+// dropBacking releases one mapping of a backing that a view's unmap removed,
+// writing it back and evicting it once nothing maps it.
+func (dg *dguest) dropBacking(key uint64) int64 {
+	m := dg.mp
+	var sb *shBacking
+	m.mu.Lock()
+	if r := m.backing[key]; r != nil {
+		r.refs--
+		sb = r.sb
+		if r.refs == 0 {
+			delete(m.backing, key)
+		}
+	}
+	m.mu.Unlock()
+	if sb != nil {
+		dg.dfs.release(sb, 1)
+	}
+	return 0
+}
+
+// forkBacking gives a fork child this address space's backings and reserves them
+// again, so one the parent unmaps is not freed while the child still maps it.
+func (m *memProc) forkBacking(parent *memProc) {
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	for key, r := range parent.backing {
+		m.backing[key] = &backingRef{sb: r.sb, refs: r.refs}
+		r.sb.reserve(int64(r.refs))
+	}
+}
+
+// dropBackings releases every backing this address space held, at teardown.
+func (m *memProc) dropBackings(fs *dfs) {
+	m.mu.Lock()
+	refs := m.backing
+	m.backing = map[uint64]*backingRef{}
+	m.mu.Unlock()
+	for _, r := range refs {
+		fs.release(r.sb, int64(r.refs))
+	}
 }
 
 var procNtQuerySection = modNtdll.NewProc("NtQuerySection")

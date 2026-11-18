@@ -15,15 +15,16 @@ type runInfo struct{}
 // process's threads and, until it execs, a CLONE_VM child). SysV IPC state is
 // tracked as on darwin but no segment can be attached yet.
 type memProc struct {
-	w      *wguest
-	mu     sync.Mutex
-	names  map[uint64]fileName
-	shm    map[uint64]*shmAttach
-	semadj map[int]map[uint16]int
+	w       *wguest
+	mu      sync.Mutex
+	names   map[uint64]fileName
+	shm     map[uint64]*shmAttach
+	semadj  map[int]map[uint16]int
+	backing map[uint64]*backingRef // shared-futex key -> the MAP_SHARED backing the stub maps for it (sharedback.go)
 }
 
 func newMemProc() *memProc {
-	return &memProc{names: map[uint64]fileName{}, shm: map[uint64]*shmAttach{}, semadj: map[int]map[uint16]int{}}
+	return &memProc{names: map[uint64]fileName{}, shm: map[uint64]*shmAttach{}, semadj: map[int]map[uint16]int{}, backing: map[uint64]*backingRef{}}
 }
 
 func (m *memProc) stubFd(g *dguest, d *dfile) (int, lxErrno) { return 0, lxENOSYS }
