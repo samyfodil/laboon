@@ -8,6 +8,8 @@ import (
 	"slices"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/samyfodil/laboon/internal/vfs"
 )
 
 // The memory syscalls, served in the supervisor: the macOS and Windows stubs
@@ -64,6 +66,9 @@ func (g *dguest) advise(nr uintptr, a [6]uint64) int64 {
 	defer g.mp.mu.Unlock()
 	if g.isReserved(a[0], a[1]) {
 		return sErr(lxENOMEM)
+	}
+	if nr == unix.SYS_MSYNC {
+		g.dfs.syncSharedMem() // flush a non-host file's shared mapping back to it
 	}
 	return g.host(nr, a[0], a[1], a[2])
 }
@@ -356,14 +361,22 @@ func (g *dguest) mmapFile(a [6]uint64) int64 {
 
 // mmapVF maps a non-host regular file (in-memory, user-defined, network-backed)
 // into the guest. The guest never touches the real backing: the supervisor reads
-// the mapped range into a memfd of its own through the file's ReadAt and has the
-// stub map that memfd. So any backing is mappable the same way — MAP_SHARED is
-// coherent through the memfd, MAP_PRIVATE is a copy-on-write of it. An executable
-// mapping is rewritten first (mmapVFExec), so a binary or shared library served
-// by such a filesystem runs like one on a host file.
+// the content into a memfd of its own through the file's ReadAt and has the stub
+// map that memfd. A MAP_SHARED mapping maps the one shared backing the file's
+// vnode keeps (sharedBacking), so every mapping — across processes and fork
+// children — is coherent and the writes are flushed back to the file; a
+// MAP_PRIVATE mapping is a private copy-on-write of the range. An executable
+// mapping is rewritten first (mmapVFExec). Any backing is mappable the same way.
 func (g *dguest) mmapVF(d *dfile, a [6]uint64) int64 {
 	if a[2]&unix.PROT_EXEC != 0 {
 		return g.mmapVFExec(d, a)
+	}
+	if a[3]&unix.MAP_SHARED != 0 && d.vn != nil {
+		sb, e := g.sharedBacking(d, int64(a[5])+int64(a[1]))
+		if e != 0 {
+			return sErr(e)
+		}
+		return g.mmapShared(sb.fd, a) // the whole-file memfd; a[5] is the file offset into it
 	}
 	length := a[1]
 	mfd, err := unix.MemfdCreate("lc-mmap", unix.MFD_CLOEXEC)
@@ -380,6 +393,86 @@ func (g *dguest) mmapVF(d *dfile, a [6]uint64) int64 {
 	b := a
 	b[5] = 0 // the content starts at offset 0 in the memfd
 	return g.mmapShared(mfd, b)
+}
+
+// sharedBacking returns the one memfd that backs every MAP_SHARED mapping of d's
+// vnode, creating it (filled from the file through ReadAt) on first use and
+// growing it to cover minEnd. It is keyed by vnode on the shared dfs, so two
+// independent opens and a fork child all map the same object. g.mp.mu held.
+func (g *dguest) sharedBacking(d *dfile, minEnd int64) (*shBacking, lxErrno) {
+	fs := g.dfs
+	id := d.vn.ID()
+	fs.shMu.Lock()
+	defer fs.shMu.Unlock()
+	if sb := fs.shared[id]; sb != nil {
+		if minEnd > sb.size {
+			if err := unix.Ftruncate(sb.fd, minEnd); err != nil {
+				return nil, osErrno(err)
+			}
+			sb.size = minEnd
+		}
+		return sb, 0
+	}
+	at, err := d.vn.Stat()
+	if err != nil {
+		return nil, osErrno(err)
+	}
+	size := max(at.Size, minEnd)
+	fd, err := unix.MemfdCreate("lc-shmem", unix.MFD_CLOEXEC)
+	if err != nil {
+		return nil, osErrno(err)
+	}
+	if err := unix.Ftruncate(fd, size); err != nil {
+		unix.Close(fd)
+		return nil, osErrno(err)
+	}
+	if e := g.fillMemfd(fd, d.vf, 0, at.Size); e != 0 {
+		unix.Close(fd)
+		return nil, e
+	}
+	sb := &shBacking{fd: fd, vf: d.vf, size: size}
+	if fs.shared == nil {
+		fs.shared = map[vfs.NodeID]*shBacking{}
+	}
+	fs.shared[id] = sb
+	return sb, 0
+}
+
+// writeBackShared copies a shared backing's memfd content out to its file through
+// WriteAt, so the guest's shared-mapping writes reach the vfs.File.
+func writeBackShared(sb *shBacking) {
+	buf := make([]byte, 1<<20)
+	for off := int64(0); off < sb.size; {
+		n, err := unix.Pread(sb.fd, buf[:min(int64(len(buf)), sb.size-off)], off)
+		if n > 0 {
+			sb.vf.WriteAt(buf[:n], off)
+			off += int64(n)
+		}
+		if err != nil || n == 0 {
+			break
+		}
+	}
+}
+
+// syncSharedMem writes every shared backing out to its file (an msync).
+func (fs *dfs) syncSharedMem() {
+	fs.shMu.Lock()
+	defer fs.shMu.Unlock()
+	for _, sb := range fs.shared {
+		writeBackShared(sb)
+	}
+}
+
+// flushSharedMem writes every shared backing out to its file and releases the
+// memfds, at teardown.
+func (fs *dfs) flushSharedMem() {
+	fs.shMu.Lock()
+	defer fs.shMu.Unlock()
+	for id, sb := range fs.shared {
+		writeBackShared(sb)
+		unix.Close(sb.fd)
+		delete(fs.shared, id)
+	}
 }
 
 // mmapVFExec maps an executable region of a non-host file. Executable code must

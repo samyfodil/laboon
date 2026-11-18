@@ -64,6 +64,9 @@ type dfs struct {
 	nsBindMu sync.Mutex       // guards nsBinds
 	nsBinds  map[string]int32 // namespace bind-mount path -> pinned network namespace
 
+	shMu   sync.Mutex                // guards shared
+	shared map[vfs.NodeID]*shBacking // the one MAP_SHARED backing per non-host file, keyed by vnode
+
 	usedSlots []bool
 	hops      hopTable              // each stub process's host-op entry (Linux)
 	exited    map[int]chan struct{} // host pid -> closed once that stub process has ended (watchStub)
@@ -104,6 +107,18 @@ type dproc struct {
 	stop   chan struct{}
 	g      *dguest
 	ps     *pstate // the process (thread group) this pid belongs to
+}
+
+// shBacking is the one host object (a memfd on Linux) that backs every
+// MAP_SHARED mapping of a non-host file, keyed by its vnode so independent opens
+// and fork children map the same object and see each other's writes; its content
+// is written back to the vfs.File on msync and at teardown. Any vfs.FileSystem is
+// coherent this way without doing anything mmap-specific. fd is unused on
+// platforms whose non-host backend does not serve writable shared mappings yet.
+type shBacking struct {
+	fd   int
+	vf   vfs.File
+	size int64
 }
 
 // newDfs sets up the guest root, a vfs.FileSystem. A host-directory root
@@ -413,6 +428,7 @@ func (fs *dfs) ensureBinds(mounts []Mount) {
 }
 
 func (fs *dfs) close() {
+	fs.flushSharedMem() // write back and release the MAP_SHARED backings of non-host files
 	dropIPC(fs)
 	fs.closeDevices()
 	if fs.keepUpper && fs.top != nil {
