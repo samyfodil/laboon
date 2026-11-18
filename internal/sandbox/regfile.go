@@ -26,17 +26,66 @@ func noEOF(n int, err error) (int, error) {
 	return n, err
 }
 
+// shared returns the live per-vnode MAP_SHARED backing, or nil. While one
+// exists it is the file's authoritative copy, so read/write/size/truncate route
+// through it and stay coherent with the guest's shared mappings (sharedback.go).
+func (d *dfile) shared() *shBacking {
+	if d.fs == nil || d.vn == nil {
+		return nil
+	}
+	return d.fs.backing(d.vn.ID())
+}
+
+// content reads the file's current bytes: the live shared backing if there is
+// one (so a private or executable mapping, or a sendfile, sees stores made
+// through a shared mapping), else the backend directly.
+func (d *dfile) content() io.ReaderAt {
+	if sb := d.shared(); sb != nil {
+		return sb
+	}
+	return d.vf
+}
+
+// size0 is the file's current logical size (for SEEK_END, O_APPEND and fstat):
+// from the live backing if there is one, else the node.
+func (d *dfile) size0() (int64, error) {
+	if sb := d.shared(); sb != nil {
+		return sb.size0(), nil
+	}
+	a, err := d.vn.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return a.Size, nil
+}
+
 // vfReadAt reads at an explicit offset (pread); the file offset is untouched.
-func (d *dfile) vfReadAt(p []byte, off int64) (int, error) { return noEOF(d.vf.ReadAt(p, off)) }
+func (d *dfile) vfReadAt(p []byte, off int64) (int, error) {
+	if sb := d.shared(); sb != nil {
+		return noEOF(sb.ReadAt(p, off))
+	}
+	return noEOF(d.vf.ReadAt(p, off))
+}
 
 // vfWriteAt writes at an explicit offset (pwrite); the file offset is untouched.
-func (d *dfile) vfWriteAt(p []byte, off int64) (int, error) { return d.vf.WriteAt(p, off) }
+func (d *dfile) vfWriteAt(p []byte, off int64) (int, error) {
+	if sb := d.shared(); sb != nil {
+		return sb.writeAt(p, off)
+	}
+	return d.vf.WriteAt(p, off)
+}
 
 // vfRead reads at the file offset and advances it (read(2)).
 func (d *dfile) vfRead(p []byte) (int, error) {
 	d.fmu.Lock()
 	defer d.fmu.Unlock()
-	n, err := noEOF(d.vf.ReadAt(p, d.fpos))
+	var n int
+	var err error
+	if sb := d.shared(); sb != nil {
+		n, err = noEOF(sb.ReadAt(p, d.fpos))
+	} else {
+		n, err = noEOF(d.vf.ReadAt(p, d.fpos))
+	}
 	d.fpos += int64(n)
 	return n, err
 }
@@ -48,11 +97,17 @@ func (d *dfile) vfWrite(p []byte) (int, error) {
 	defer d.fmu.Unlock()
 	off := d.fpos
 	if d.fx.oflags&lxOAppend != 0 {
-		if a, e := d.vn.Stat(); e == nil {
-			off = a.Size
+		if s, e := d.size0(); e == nil {
+			off = s
 		}
 	}
-	n, err := d.vf.WriteAt(p, off)
+	var n int
+	var err error
+	if sb := d.shared(); sb != nil {
+		n, err = sb.writeAt(p, off)
+	} else {
+		n, err = d.vf.WriteAt(p, off)
+	}
 	d.fpos = off + int64(n)
 	return n, err
 }
@@ -66,11 +121,11 @@ func (d *dfile) vfSeek(off int64, whence int) (int64, error) {
 	case 1: // SEEK_CUR
 		base = d.fpos
 	case 2: // SEEK_END
-		a, err := d.vn.Stat()
+		s, err := d.size0()
 		if err != nil {
 			return 0, err
 		}
-		base = a.Size
+		base = s
 	default:
 		return 0, syscall.EINVAL
 	}
@@ -81,7 +136,12 @@ func (d *dfile) vfSeek(off int64, whence int) (int64, error) {
 	return d.fpos, nil
 }
 
-func (d *dfile) vfTruncate(size int64) error { return d.vf.Truncate(size) }
+func (d *dfile) vfTruncate(size int64) error {
+	if sb := d.shared(); sb != nil {
+		return sb.truncate(size)
+	}
+	return d.vf.Truncate(size)
+}
 
 // vfSync flushes the backing if it can; an in-memory backing is already durable.
 func (d *dfile) vfSync() error {
@@ -100,6 +160,10 @@ func (g *dguest) vfFstat(d *dfile) (lxStat, lxErrno) {
 		return lxStat{}, osErrno(err)
 	}
 	st := nodeStat(a, d.vn.ID())
+	if sb := d.shared(); sb != nil { // the live size, which may lead the backend
+		st.size = sb.size0()
+		st.blocks = (st.size + 511) / 512
+	}
 	if p := d.fx.perm.Load(); p&permSet != 0 {
 		st.mode = st.mode&^0o7777 | p&0o7777
 	}

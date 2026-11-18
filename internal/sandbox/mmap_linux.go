@@ -8,8 +8,6 @@ import (
 	"slices"
 
 	"golang.org/x/sys/unix"
-
-	"github.com/samyfodil/laboon/internal/vfs"
 )
 
 // The memory syscalls, served in the supervisor: the macOS and Windows stubs
@@ -376,7 +374,7 @@ func (g *dguest) mmapVF(d *dfile, a [6]uint64) int64 {
 		if e != 0 {
 			return sErr(e)
 		}
-		return g.mmapShared(sb.fd, a) // the whole-file memfd; a[5] is the file offset into it
+		return g.mmapShared(sb.fd(), a) // the whole-file memfd; a[5] is the file offset into it
 	}
 	length := a[1]
 	mfd, err := unix.MemfdCreate("lc-mmap", unix.MFD_CLOEXEC)
@@ -387,7 +385,10 @@ func (g *dguest) mmapVF(d *dfile, a [6]uint64) int64 {
 	if err := unix.Ftruncate(mfd, int64(length)); err != nil {
 		return sErr(osErrno(err))
 	}
-	if e := g.fillMemfd(mfd, d.vf, int64(a[5]), int64(length)); e != 0 {
+	// Read the file's current bytes — the live shared backing if there is one, so
+	// a private mapping sees writes made through a shared mapping — not a stale
+	// snapshot of the backend.
+	if e := g.fillMemfd(mfd, d.content(), int64(a[5]), int64(length)); e != 0 {
 		return sErr(e)
 	}
 	b := a
@@ -395,21 +396,22 @@ func (g *dguest) mmapVF(d *dfile, a [6]uint64) int64 {
 	return g.mmapShared(mfd, b)
 }
 
-// sharedBacking returns the one memfd that backs every MAP_SHARED mapping of d's
-// vnode, creating it (filled from the file through ReadAt) on first use and
-// growing it to cover minEnd. It is keyed by vnode on the shared dfs, so two
-// independent opens and a fork child all map the same object. g.mp.mu held.
+// sharedBacking returns the one backing that every MAP_SHARED mapping of d's
+// vnode maps (a memfd here), creating it (filled from the file through ReadAt) on
+// first use and growing it to cover minEnd. It is keyed by vnode on the shared
+// dfs, so two independent opens and a fork child all map the same object. The
+// coherence and write-back logic lives in sharedback.go. g.mp.mu held.
 func (g *dguest) sharedBacking(d *dfile, minEnd int64) (*shBacking, lxErrno) {
 	fs := g.dfs
 	id := d.vn.ID()
 	fs.shMu.Lock()
 	defer fs.shMu.Unlock()
 	if sb := fs.shared[id]; sb != nil {
-		if minEnd > sb.size {
-			if err := unix.Ftruncate(sb.fd, minEnd); err != nil {
-				return nil, osErrno(err)
-			}
-			sb.size = minEnd
+		sb.mu.Lock()
+		err := sb.growLocked(minEnd)
+		sb.mu.Unlock()
+		if err != nil {
+			return nil, osErrno(err)
 		}
 		return sb, 0
 	}
@@ -422,57 +424,20 @@ func (g *dguest) sharedBacking(d *dfile, minEnd int64) (*shBacking, lxErrno) {
 	if err != nil {
 		return nil, osErrno(err)
 	}
-	if err := unix.Ftruncate(fd, size); err != nil {
-		unix.Close(fd)
+	f := os.NewFile(uintptr(fd), "lc-shmem")
+	if err := f.Truncate(size); err != nil {
+		f.Close()
 		return nil, osErrno(err)
 	}
+	// Fill from the backend directly: the backing is being created, so content()
+	// would just return the backend anyway, and reading it avoids any recursion.
 	if e := g.fillMemfd(fd, d.vf, 0, at.Size); e != 0 {
-		unix.Close(fd)
+		f.Close()
 		return nil, e
 	}
-	sb := &shBacking{fd: fd, vf: d.vf, size: size}
-	if fs.shared == nil {
-		fs.shared = map[vfs.NodeID]*shBacking{}
-	}
-	fs.shared[id] = sb
+	sb := &shBacking{f: f, vf: d.vf, size: size, eof: at.Size}
+	fs.putBacking(id, sb)
 	return sb, 0
-}
-
-// writeBackShared copies a shared backing's memfd content out to its file through
-// WriteAt, so the guest's shared-mapping writes reach the vfs.File.
-func writeBackShared(sb *shBacking) {
-	buf := make([]byte, 1<<20)
-	for off := int64(0); off < sb.size; {
-		n, err := unix.Pread(sb.fd, buf[:min(int64(len(buf)), sb.size-off)], off)
-		if n > 0 {
-			sb.vf.WriteAt(buf[:n], off)
-			off += int64(n)
-		}
-		if err != nil || n == 0 {
-			break
-		}
-	}
-}
-
-// syncSharedMem writes every shared backing out to its file (an msync).
-func (fs *dfs) syncSharedMem() {
-	fs.shMu.Lock()
-	defer fs.shMu.Unlock()
-	for _, sb := range fs.shared {
-		writeBackShared(sb)
-	}
-}
-
-// flushSharedMem writes every shared backing out to its file and releases the
-// memfds, at teardown.
-func (fs *dfs) flushSharedMem() {
-	fs.shMu.Lock()
-	defer fs.shMu.Unlock()
-	for id, sb := range fs.shared {
-		writeBackShared(sb)
-		unix.Close(sb.fd)
-		delete(fs.shared, id)
-	}
 }
 
 // mmapVFExec maps an executable region of a non-host file. Executable code must
@@ -486,8 +451,9 @@ func (fs *dfs) flushSharedMem() {
 func (g *dguest) mmapVFExec(d *dfile, a [6]uint64) int64 {
 	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], int64(a[5])
 	g.dropFileCode(addr, length)
+	src := d.content() // the live shared backing if there is one, else the backend
 	data := make([]byte, length)
-	if _, err := d.vf.ReadAt(data, off); err != nil && err != io.EOF {
+	if _, err := src.ReadAt(data, off); err != nil && err != io.EOF {
 		return sErr(lxEIO)
 	}
 	r := g.notReserved(g.mapAt(addr, length, flags, false, func(at, fixed uint64) int64 {
@@ -496,7 +462,7 @@ func (g *dguest) mmapVFExec(d *dfile, a [6]uint64) int64 {
 	if r < 0 {
 		return r
 	}
-	if res := g.installCode(uint64(r), data, prot, &codeSource{r: d.vf, off: uint64(off)}, false); res < 0 {
+	if res := g.installCode(uint64(r), data, prot, &codeSource{r: src, off: uint64(off)}, false); res < 0 {
 		return res
 	}
 	return r

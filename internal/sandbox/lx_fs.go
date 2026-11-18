@@ -64,8 +64,9 @@ type dfs struct {
 	nsBindMu sync.Mutex       // guards nsBinds
 	nsBinds  map[string]int32 // namespace bind-mount path -> pinned network namespace
 
-	shMu   sync.Mutex                // guards shared
-	shared map[vfs.NodeID]*shBacking // the one MAP_SHARED backing per non-host file, keyed by vnode
+	shMu    sync.Mutex                // guards shared
+	shared  map[vfs.NodeID]*shBacking // the one MAP_SHARED backing per non-host file, keyed by vnode (sharedback.go)
+	sharedN atomic.Int64              // number of live backings; zero makes every read/write skip the lookup
 
 	usedSlots []bool
 	hops      hopTable              // each stub process's host-op entry (Linux)
@@ -107,18 +108,6 @@ type dproc struct {
 	stop   chan struct{}
 	g      *dguest
 	ps     *pstate // the process (thread group) this pid belongs to
-}
-
-// shBacking is the one host object (a memfd on Linux) that backs every
-// MAP_SHARED mapping of a non-host file, keyed by its vnode so independent opens
-// and fork children map the same object and see each other's writes; its content
-// is written back to the vfs.File on msync and at teardown. Any vfs.FileSystem is
-// coherent this way without doing anything mmap-specific. fd is unused on
-// platforms whose non-host backend does not serve writable shared mappings yet.
-type shBacking struct {
-	fd   int
-	vf   vfs.File
-	size int64
 }
 
 // newDfs sets up the guest root, a vfs.FileSystem. A host-directory root
@@ -699,6 +688,7 @@ type dfile struct {
 	f       *os.File
 	vf      vfs.File   // a non-host regular file's backing (in-memory, user-defined); nil for host and non-regular fds
 	vn      vfs.Node   // its node, for fstat and SEEK_END
+	fs      *dfs       // set with vf/vn: reaches the per-vnode MAP_SHARED backing (sharedback.go)
 	fpos    int64      // its file offset (laboon owns it; the backing has only ReadAt/WriteAt)
 	fmu     sync.Mutex // serializes fpos across concurrent read/write on a shared description
 	mapf    *os.File   // darwin: an unlinked temp file holding a non-host file's content for the stub to map; nil until first mmap

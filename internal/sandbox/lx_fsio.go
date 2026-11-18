@@ -184,14 +184,23 @@ func (d *dfile) sealCheckWrite(off int64, n int) lxErrno {
 
 func (g *dguest) pread(fd int64, bufAddr uint64, n, off int64) int64 {
 	d, e := g.ioFile(fd)
-	if e == 0 && d.served() {
-		return sErr(lxESPIPE)
-	}
 	if e != 0 {
+		// A non-host regular file (memFS, WithFS) has no host fd, so ioFile
+		// rejects it; serve its positional read through the backing, up to the
+		// end of file, like the sequential read path does.
+		if d2, ok := g.ft.get(int(fd)); ok && d2.vf != nil {
+			if n < 0 || off < 0 {
+				return sErr(lxEINVAL)
+			}
+			return g.readFull(d2, bufAddr, n, off)
+		}
 		if r, ok := g.memPread(fd, bufAddr, n, off); ok {
 			return r
 		}
 		return sErr(e)
+	}
+	if d.served() {
+		return sErr(lxESPIPE)
 	}
 	if n < 0 || off < 0 {
 		return sErr(lxEINVAL)
@@ -226,11 +235,17 @@ func (g *dguest) pwrite(fd int64, bufAddr uint64, n, off int64) int64 {
 		return r
 	}
 	d, e := g.ioFile(fd)
-	if e == 0 && d.served() {
-		return sErr(lxESPIPE)
-	}
 	if e != 0 {
-		return sErr(e)
+		// A non-host regular file has no host fd (see pread); its positional
+		// write goes through the backing via d.writeAt below.
+		if d2, ok := g.ft.get(int(fd)); ok && d2.vf != nil {
+			d, e = d2, 0
+		} else {
+			return sErr(e)
+		}
+	}
+	if d.served() {
+		return sErr(lxESPIPE)
 	}
 	if n < 0 || off < 0 {
 		return sErr(lxEINVAL)

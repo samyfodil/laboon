@@ -322,7 +322,3 @@ func (g *wguest) mapCode(dg *dguest, fd, off, n, addr, count uint64) int64 {
 	}
 	return 0
 }
-
-// flushSharedMem is a no-op: this backend does not serve a non-host file's
-// writable MAP_SHARED through a shared backing yet (see mmap_linux.go).
-func (fs *dfs) flushSharedMem() {}

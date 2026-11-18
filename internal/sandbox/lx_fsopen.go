@@ -612,7 +612,7 @@ func (g *dguest) openTmpfile(dir string, flags, mode int64) int64 {
 // driving vf's ReadAt/WriteAt/Truncate and the node's Stat (regfile.go); mmap
 // copies the content in, or maps it directly if vf is an *os.File (mmap_linux.go).
 func (g *dguest) installVFile(gp string, node vfs.Node, vf vfs.File, flags int64) int64 {
-	return g.installD(&dfile{gp: gp, stub: -1, vf: vf, vn: node}, flags)
+	return g.installD(&dfile{gp: gp, stub: -1, vf: vf, vn: node, fs: g.dfs}, flags)
 }
 
 // install tracks a freshly opened host file as a new description with the

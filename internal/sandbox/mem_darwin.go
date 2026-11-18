@@ -460,7 +460,3 @@ func (g *dguest) guestPageSize() int {
 	}
 	return os.Getpagesize()
 }
-
-// flushSharedMem is a no-op: this backend does not serve a non-host file's
-// writable MAP_SHARED through a shared backing yet (see mmap_linux.go).
-func (fs *dfs) flushSharedMem() {}
