@@ -692,6 +692,7 @@ type dfile struct {
 	fpos    int64      // its file offset (laboon owns it; the backing has only ReadAt/WriteAt)
 	fmu     sync.Mutex // serializes fpos across concurrent read/write on a shared description
 	mapf    *os.File   // darwin: an unlinked temp file holding a non-host file's content for the stub to map; nil until first mmap
+	shbf    *os.File   // darwin: the per-vnode shared backing (sharedback.go) the stub maps for a writable MAP_SHARED mapping; borrowed, not closed here
 	gp      string     // guest path (resolved, rooted), for relative lookups
 	isDir   bool
 	stub    int        // the stub's host stdio fd this description is, or -1

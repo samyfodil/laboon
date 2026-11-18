@@ -148,52 +148,5 @@ func TestMmapForkCoherent(t *testing.T) {
 	}
 }
 
-// runMmapGuest runs exe with mem mounted at /data and host root, requiring want
-// in its output.
-func runMmapGuest(t *testing.T, exe string, mem vfs.FileSystem, want string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	var out bytes.Buffer
-	code, err := Run(ctx, exe, Config{
-		Args:   []string{exe},
-		RootFS: HostRoot("/"),
-		Mounts: []Mount{{Guest: "/data", FS: mem}},
-		Stdout: &out,
-		Stderr: &out,
-	})
-	if err != nil || code != 0 || !strings.Contains(out.String(), want) {
-		t.Fatalf("code=%d err=%v out=%q", code, err, out.String())
-	}
-}
-
-func memReadAt(t *testing.T, mem vfs.FileSystem, name string, off int64, n int) []byte {
-	t.Helper()
-	node, err := mem.Lookup(mem.Root(), name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f, err := node.Open(0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	b := make([]byte, n)
-	if _, err := f.ReadAt(b, off); err != nil && err != io.EOF {
-		t.Fatal(err)
-	}
-	return b
-}
-
-func memSize(t *testing.T, mem vfs.FileSystem, name string) int64 {
-	t.Helper()
-	node, err := mem.Lookup(mem.Root(), name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err := node.Stat()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return a.Size
-}
+// runMmapGuest, memReadAt and memSize are shared with the cross-platform test in
+// mmapcross_test.go.

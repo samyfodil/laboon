@@ -84,13 +84,37 @@ func (g *dguest) mmapFd(fd int64, wshared, code bool) int64 {
 	}
 	if d.vf != nil {
 		// A non-host file (in-memory, user-defined, network): the guest never
-		// touches the real backing — the supervisor materializes the content into
-		// an unlinked temp file through the file's ReadAt and the stub maps that.
-		// A private executable mapping is still rewritten in place afterwards
-		// (lcRewrite -> libSites reads the materialized file). Only a shared
-		// writable or shared executable mapping is unsupported, so refuse those.
-		if code || wshared {
+		// touches the real backing. A writable shared mapping maps the one
+		// per-vnode shared backing (sharedback.go), so every mapping and fork
+		// child is coherent and its stores are written back to the file; a shared
+		// executable mapping would have to be rewritten per process, which a
+		// shared file cannot be, so refuse it. Any other mapping maps a private
+		// snapshot the stub copies on write, materialized through the file's
+		// ReadAt. A private executable mapping is rewritten in place afterwards
+		// (lcRewrite -> libSites reads the materialized file).
+		if code {
 			return sErr(lxENODEV)
+		}
+		if wshared {
+			// Under the hypervisor the guest's memory is VM RAM the stub fills
+			// from the fd (a copy), not a shared mapping of the host file, so its
+			// stores would never reach the backing. Writing them back needs
+			// dirty-page tracking in VM RAM, which is not done yet; refuse rather
+			// than silently drop writes. The rewriter backend maps the backing
+			// directly, so it is coherent there.
+			if g.ps.hvf {
+				return sErr(lxENODEV)
+			}
+			sb, e := g.sharedBackingDarwin(d)
+			if e != 0 {
+				return sErr(e)
+			}
+			d.shbf = sb.f // the stub maps this; the mapping is coherent at the inode, across opens
+			sfd, e := g.mp.stubFd(g, d)
+			if e != 0 {
+				return sErr(e)
+			}
+			return int64(sfd)
 		}
 		if e := g.materializeMapf(d); e != 0 {
 			return sErr(e)
@@ -153,13 +177,53 @@ func (g *dguest) materializeMapf(d *dfile) lxErrno {
 			tf.Close()
 			return osErrno(err)
 		}
-		if e := g.fillFile(tf, d.vf, a.Size); e != 0 {
+		// Read current content (the shared backing if one is live, so a private
+		// mapping sees writes made through a shared mapping), not a stale snapshot.
+		if e := g.fillFile(tf, d.content(), a.Size); e != 0 {
 			tf.Close()
 			return e
 		}
 	}
 	d.mapf = tf
 	return 0
+}
+
+// sharedBackingDarwin returns the one host object every writable MAP_SHARED
+// mapping of d's vnode maps: an unlinked temp file holding the whole content,
+// filled through the file's ReadAt. All opens and fork children map the same
+// inode, so the mapping is coherent, and sharedback.go writes its stores back to
+// the file at teardown. mmapFd carries no offset or length, so the backing is the
+// whole file.
+func (g *dguest) sharedBackingDarwin(d *dfile) (*shBacking, lxErrno) {
+	fs := g.dfs
+	id := d.vn.ID()
+	fs.shMu.Lock()
+	defer fs.shMu.Unlock()
+	if sb := fs.shared[id]; sb != nil {
+		return sb, 0
+	}
+	a, err := d.vn.Stat()
+	if err != nil {
+		return nil, osErrno(err)
+	}
+	tf, err := os.CreateTemp("", "lc-shmem")
+	if err != nil {
+		return nil, osErrno(err)
+	}
+	os.Remove(tf.Name()) // unlink; the fd keeps it alive
+	if a.Size > 0 {
+		if err := tf.Truncate(a.Size); err != nil {
+			tf.Close()
+			return nil, osErrno(err)
+		}
+		if e := g.fillFile(tf, d.vf, a.Size); e != 0 {
+			tf.Close()
+			return nil, e
+		}
+	}
+	sb := &shBacking{f: tf, vf: d.vf, size: a.Size, eof: a.Size}
+	fs.putBacking(id, sb)
+	return sb, 0
 }
 
 // fillFile copies size bytes of r into w through ReadAt; any part past the
@@ -295,8 +359,10 @@ func (m *memProc) stubFd(g *dguest, d *dfile) (int, lxErrno) {
 	nrecv := 0
 	if _, ok := m.sent[id]; !ok {
 		f := d.f
-		if f == nil {
-			f = d.mapf // a non-host file's materialized mmap backing (mmapFd)
+		if d.shbf != nil {
+			f = d.shbf // a non-host file's shared mmap backing (mmapFd, writable MAP_SHARED)
+		} else if f == nil {
+			f = d.mapf // a non-host file's materialized private mmap backing (mmapFd)
 		}
 		if err := m.send(fdOpInstall, id, f); err != nil {
 			return 0, osErrno(err)
