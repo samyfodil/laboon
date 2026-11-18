@@ -36,7 +36,7 @@ func TestUnixAddrContained(t *testing.T) {
 		var out bytes.Buffer
 		code, err := Run(context.Background(), bin, Config{
 			Args:   []string{"unixsock", host, filepath.Join(host, "host.sock"), "lc-host-abstract-" + filepath.Base(host)},
-			Stdout: &out, Stderr: &out, Root: "/", Net: netOn,
+			Stdout: &out, Stderr: &out, RootFS: HostRoot("/"), Net: netOn,
 		})
 		if err != nil || code != 0 {
 			t.Fatalf("net %v: code %d (testdata/unixsock.c line) err %v\n%s", netOn, code, err, out.String())

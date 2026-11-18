@@ -21,6 +21,7 @@ import (
 	"github.com/samyfodil/laboon/internal/oci"
 	"github.com/samyfodil/laboon/internal/sandbox"
 	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
 // Options configure a build.
@@ -522,7 +523,7 @@ func (b *builder) exec(ctx context.Context, in Instruction) (v1.Layer, error) {
 	code, err := sandbox.Run(ctx, argv[0], sandbox.Config{
 		Args:   argv,
 		Env:    ensureEnv(env, "HOME", "/root"),
-		Root:   b.root,
+		RootFS: sandbox.HostRoot(b.root),
 		Upper:  upper,
 		Dir:    b.cfg.WorkingDir,
 		Net:    b.opt.Net,
@@ -558,8 +559,8 @@ func (b *builder) copy(in Instruction) (v1.Layer, error) {
 	// Resolve sources confined to their root and write the layer confined to the
 	// step directory, both through the vfs, so COPY/ADD cannot escape the build
 	// context or a prior stage via a symlink or "..".
-	srcNS := vfs.NewNamespace(vfs.NewDirFS(srcRoot))
-	dstNS := vfs.NewNamespace(vfs.NewDirFS(upper))
+	srcNS := vfs.NewNamespace(hostfs.NewDirFS(srcRoot))
+	dstNS := vfs.NewNamespace(hostfs.NewDirFS(upper))
 	// .dockerignore applies to the build context, not a --from stage.
 	var ignore *ignoreMatcher
 	if in.Flags["from"] == "" {
@@ -642,7 +643,7 @@ func (b *builder) copy(in Instruction) (v1.Layer, error) {
 		}
 	}
 	// --chown=uid:gid sets the layer's owner; otherwise root.
-	layer, err := vfs.LayerFromDir(upper)
+	layer, err := hostfs.LayerFromDir(upper)
 	if err != nil {
 		return nil, err
 	}
@@ -665,7 +666,7 @@ func (b *builder) copy(in Instruction) (v1.Layer, error) {
 // capture turns a run's kept upper directory into an image layer and folds it
 // into the working root for the next step.
 func (b *builder) capture(upper string) (v1.Layer, error) {
-	layer, err := vfs.LayerFromDir(upper)
+	layer, err := hostfs.LayerFromDir(upper)
 	if err != nil {
 		return nil, err
 	}
@@ -675,7 +676,7 @@ func (b *builder) capture(upper string) (v1.Layer, error) {
 	return b.tarLayer(layer)
 }
 
-func (b *builder) tarLayer(layer *vfs.Layer) (v1.Layer, error) {
+func (b *builder) tarLayer(layer *hostfs.Layer) (v1.Layer, error) {
 	b.step++
 	tp := filepath.Join(b.work, fmt.Sprintf("stage-%d-layer-%d.tar", b.sidx, b.step))
 	f, err := os.Create(tp)
@@ -700,7 +701,7 @@ func (b *builder) stepDir() string {
 }
 
 func layerFromDir(dir, tarPath string) (v1.Layer, error) {
-	layer, err := vfs.LayerFromDir(dir)
+	layer, err := hostfs.LayerFromDir(dir)
 	if err != nil {
 		return nil, err
 	}

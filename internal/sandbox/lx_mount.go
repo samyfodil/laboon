@@ -148,10 +148,18 @@ func (g *dguest) mountOverlay(target, data string) int64 {
 	fs := g.dfs
 	var layers []vfs.FileSystem
 	for i := len(lower) - 1; i >= 0; i-- { // reverse: leftmost lower is highest precedence
-		layers = append(layers, newHostDirFS(fs.overlayLayerHost(lower[i]), fs.hostFS))
+		h, ok := fs.overlayLayerHost(lower[i])
+		if !ok {
+			return sErr(lxEACCES) // a layer resolving outside the backing tree is an escape
+		}
+		layers = append(layers, newHostDirFS(h, fs.hostFS))
 	}
 	if upper != "" {
-		layers = append(layers, newHostDirFS(fs.overlayLayerHost(upper), fs.hostFS))
+		h, ok := fs.overlayLayerHost(upper)
+		if !ok {
+			return sErr(lxEACCES)
+		}
+		layers = append(layers, newHostDirFS(h, fs.hostFS))
 	}
 	ovl := vfs.NewOverlayFS(layers...)
 	if err := g.vns().Mount(target, ovl); err != nil {
@@ -208,8 +216,8 @@ func (g *dguest) mountMem(target, data string) int64 {
 	if sharedMemMount(target) {
 		// The POSIX shared-memory area must be host-backed so a MAP_SHARED mapping
 		// works (shared-memory programs — postgres, Chromium — rely on it); a pure
-		// in-memory backend has no host fd to map. Its files are hostRF, so
-		// hostRF.mmap does the shared mapping with no extra code.
+		// in-memory backend has no host fd to map. A host-backed file's vfs.File is
+		// an *os.File, so mmap maps it directly, MAP_SHARED included, no extra code.
 		return g.mountFS(target)
 	}
 	mfs := vfs.NewMemFS()

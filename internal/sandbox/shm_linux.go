@@ -58,7 +58,7 @@ func (g *dguest) shmat(id int, addr uint64, flg int64) int64 {
 	if addr != 0 && g.isReserved(addr, size) {
 		return sErr(lxEINVAL)
 	}
-	r := g.mmapShared(s.d.f, [6]uint64{addr, size, prot, flags, 0, 0})
+	r := g.mmapShared(hostFd(s.d.f), [6]uint64{addr, size, prot, flags, 0, 0})
 	if r == sErr(lxEEXIST) {
 		return sErr(lxEINVAL) // the range is taken and SHM_REMAP not given
 	}

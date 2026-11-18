@@ -27,7 +27,7 @@ func TestPullAndRun(t *testing.T) {
 	code, err := sandbox.Run(context.Background(), prog, sandbox.Config{
 		Args:   []string{"cat", "/etc/os-release"},
 		Env:    img.Config.Env,
-		Root:   img.Root,
+		RootFS: sandbox.HostRoot(img.Root),
 		Stdout: &out,
 		Stderr: &out,
 	})

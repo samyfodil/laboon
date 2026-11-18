@@ -163,8 +163,8 @@ const codeSalt = "linux-amd64-code-3"
 // seccomp to catch loudly rather than patching a data word.
 func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *codeSource) {
 	id, ok := src.identity()
-	if ok {
-		if ef, err := elf.NewFile(src.f); err == nil {
+	if src != nil && src.r != nil {
+		if ef, err := elf.NewFile(src.r); err == nil {
 			for _, p := range ef.Progs {
 				if p.Type == elf.PT_LOAD && p.Flags&elf.PF_X != 0 && p.Off == src.off && uint64(len(code)) >= p.Filesz {
 					cw.(*rewrite.Rewriter).Apply(g.segmentPlan(analyzeImage(ef), p, code), code, addr)

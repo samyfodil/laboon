@@ -41,7 +41,7 @@ func TestLoopbackWithoutNet(t *testing.T) {
 		var out bytes.Buffer
 		code, err := Run(context.Background(), "/loopnet", Config{
 			Args:   append([]string{"loopnet"}, c.args...),
-			Stdout: &out, Stderr: &out, Root: dir, NoNet: c.noNet,
+			Stdout: &out, Stderr: &out, RootFS: HostRoot(dir), NoNet: c.noNet,
 			Net: c.net, AllowDomains: c.allow,
 		})
 		if err != nil || code != 0 {

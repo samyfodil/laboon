@@ -21,7 +21,7 @@ func TestCPUFilesInEmptyRoot(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var out bytes.Buffer
-	code, err := Run(context.Background(), "/cpuinfo", Config{Args: []string{"cpuinfo"}, Stdout: &out, Stderr: &out, Root: root})
+	code, err := Run(context.Background(), "/cpuinfo", Config{Args: []string{"cpuinfo"}, Stdout: &out, Stderr: &out, RootFS: HostRoot(root)})
 	if err != nil || code != 0 {
 		t.Fatalf("code = %d, err = %v, output %q", code, err, out.String())
 	}

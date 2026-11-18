@@ -19,7 +19,7 @@ func TestEpollEt(t *testing.T) {
 		t.Skipf("build: %v\n%s", err, b)
 	}
 	var out bytes.Buffer
-	code, err := Run(context.Background(), bin, Config{Args: []string{"epollet"}, Stdout: &out, Stderr: &out, Root: "/"})
+	code, err := Run(context.Background(), bin, Config{Args: []string{"epollet"}, Stdout: &out, Stderr: &out, RootFS: HostRoot("/")})
 	if err != nil || code != 0 {
 		t.Fatalf("code %d (testdata/epollet.c line) err %v\n%s", code, err, out.String())
 	}

@@ -376,13 +376,32 @@ func (h *memFile) WriteAt(p []byte, off int64) (int, error) {
 	defer n.fs.mu.Unlock()
 	end := off + int64(len(p))
 	if end > int64(len(n.data)) {
-		grown := make([]byte, end)
-		copy(grown, n.data)
-		n.data = grown
+		n.data = grow(n.data, int(end))
 	}
 	copy(n.data[off:end], p)
 	n.mtime, n.ctime = memNow(), memNow()
 	return len(p), nil
+}
+
+// grow returns b extended to length n with the new bytes zeroed, enlarging
+// capacity geometrically so repeated extends are amortized O(1) rather than a
+// full reallocation each time (a file written in sequential chunks would
+// otherwise be O(n^2)). The gap a sparse write leaves past the old end reads as
+// zero, as on a real filesystem.
+func grow(b []byte, n int) []byte {
+	if n <= cap(b) {
+		old := len(b)
+		b = b[:n]
+		clear(b[old:])
+		return b
+	}
+	c := cap(b) * 2
+	if c < n {
+		c = n
+	}
+	nb := make([]byte, n, c)
+	copy(nb, b)
+	return nb
 }
 
 func (h *memFile) Truncate(size int64) error {
@@ -395,9 +414,7 @@ func (h *memFile) Truncate(size int64) error {
 	if size <= int64(len(n.data)) {
 		n.data = n.data[:size]
 	} else {
-		grown := make([]byte, size)
-		copy(grown, n.data)
-		n.data = grown
+		n.data = grow(n.data, int(size))
 	}
 	n.mtime, n.ctime = memNow(), memNow()
 	return nil

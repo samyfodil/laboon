@@ -1,9 +1,11 @@
-package vfs
+package hostfs
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/samyfodil/laboon/internal/vfs"
 )
 
 // TestAttrFullStat checks a Node's Stat carries the full stat (size, nlink,
@@ -14,7 +16,7 @@ func TestAttrFullStat(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(lower, "f"), []byte("twelve bytes"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fs := NewOverlayFS(NewDirFS(lower), NewDirFS(t.TempDir()))
+	fs := vfs.NewOverlayFS(NewDirFS(lower), NewDirFS(t.TempDir()))
 	n, err := fs.Lookup(fs.Root(), "f")
 	if err != nil {
 		t.Fatal(err)

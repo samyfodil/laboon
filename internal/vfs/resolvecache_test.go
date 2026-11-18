@@ -25,7 +25,7 @@ func TestResolveCacheInvalidation(t *testing.T) {
 	must(os.WriteFile(filepath.Join(lowerDir, "a/f"), []byte("lower"), 0o644))
 	must(os.WriteFile(filepath.Join(lowerDir, "a/g"), []byte("lower-g"), 0o644))
 
-	ofs := NewOverlayFS(NewDirFS(lowerDir), NewDirFS(upperDir))
+	ofs := NewOverlayFS(newTestDirFS(lowerDir), newTestDirFS(upperDir))
 	ns := NewNamespace(ofs)
 	if ns.genOf == nil {
 		t.Fatal("overlay is not generational; cache would be disabled")
@@ -89,7 +89,7 @@ func TestResolveCacheConcurrent(t *testing.T) {
 		os.MkdirAll(d, 0o755)
 		os.WriteFile(filepath.Join(d, "f"+string(rune('a'+i))), []byte("x"), 0o644)
 	}
-	ofs := NewOverlayFS(NewDirFS(lowerDir), NewDirFS(upperDir))
+	ofs := NewOverlayFS(newTestDirFS(lowerDir), newTestDirFS(upperDir))
 	ns := NewNamespace(ofs)
 	dloc, _ := ns.Resolve("/d", true)
 

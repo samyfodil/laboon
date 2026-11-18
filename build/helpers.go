@@ -14,6 +14,7 @@ import (
 
 	"github.com/samyfodil/laboon/internal/oci"
 	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
 // baseConfig seeds the image config from the base image's.
@@ -120,7 +121,7 @@ func ownerIDs(spec string) (uint32, uint32) {
 	return uint32(uid), uint32(gid)
 }
 
-func applyChown(l *vfs.Layer, uid, gid uint32) { l.SetOwnerAll(uid, gid) }
+func applyChown(l *hostfs.Layer, uid, gid uint32) { l.SetOwnerAll(uid, gid) }
 
 // dstFSWrite creates name under dir with the given mode and writes data, using
 // the backend's bulk WriteFile when it offers one. For COPY/ADD heredoc bodies.

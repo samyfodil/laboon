@@ -20,7 +20,10 @@ import "io"
 type NodeID struct{ Dev, Ino uint64 }
 
 // A File is an open handle to a regular file's content. Offsets are the caller's
-// to track; the handle holds the backing resources until Close.
+// to track; the handle holds the backing resources until Close. A memory mapping
+// is served by the host above this interface: it reads the content through ReadAt
+// into a descriptor of its own and maps that, so any backing — host, in-memory,
+// network — is mappable without the File doing anything mmap-specific.
 type File interface {
 	io.ReaderAt
 	io.WriterAt

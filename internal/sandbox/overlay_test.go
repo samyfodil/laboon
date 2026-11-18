@@ -24,7 +24,7 @@ func runBusybox(t *testing.T, script string) (int, string) {
 		Args:   []string{"sh", "-c", script},
 		Stdout: &out,
 		Stderr: &out,
-		Root:   "/",
+		RootFS: HostRoot("/"),
 	})
 	if err != nil {
 		t.Fatalf("run: %v (output %q)", err, out.String())
@@ -71,7 +71,7 @@ func TestFsOps(t *testing.T) {
 			t.Skipf("build: %v\n%s", err, b)
 		}
 		var o bytes.Buffer
-		code, err := Run(context.Background(), filepath.Join(dir, libc), Config{Args: []string{"fsops"}, Stdout: &o, Stderr: &o, Root: "/"})
+		code, err := Run(context.Background(), filepath.Join(dir, libc), Config{Args: []string{"fsops"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 		if err != nil || code != 0 || !strings.Contains(o.String(), "done fails=0") {
 			t.Errorf("%s: code=%d err=%v\n%s", libc, code, err, o.String())
 		}

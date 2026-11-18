@@ -21,7 +21,7 @@ func TestPtraceSeize(t *testing.T) {
 	for _, args := range [][]string{{exe}, {exe, "stopped-mt"}} {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		var out bytes.Buffer
-		code, err := Run(ctx, exe, Config{Args: args, Root: "/", Stdout: &out, Stderr: &out})
+		code, err := Run(ctx, exe, Config{Args: args, RootFS: HostRoot("/"), Stdout: &out, Stderr: &out})
 		cancel()
 		if err != nil || code != 0 || !strings.Contains(out.String(), "ptraceseize fails=0") {
 			t.Fatalf("%v: code=%d err=%v out=%q", args[1:], code, err, out.String())

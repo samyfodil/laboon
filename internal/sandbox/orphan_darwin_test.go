@@ -36,7 +36,7 @@ func stubsOf(t *testing.T, chanPath string) []string {
 func orphanCheck(t *testing.T, want int, args ...string) {
 	root := os.Getenv("LC_TEST_ROOT")
 	if os.Getenv("LC_ORPHAN_HELPER") != "" {
-		Run(context.Background(), "/bin/busybox", Config{Root: root, Args: args})
+		Run(context.Background(), "/bin/busybox", Config{RootFS: HostRoot(root), Args: args})
 		return
 	}
 	if root == "" {

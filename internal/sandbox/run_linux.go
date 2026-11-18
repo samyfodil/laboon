@@ -97,7 +97,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	}
 	defer os.RemoveAll(tmp)
 	done := make(chan struct{})
-	fs, err := newDfs(cfg.Root, cfg.Upper, mem, done, tmp)
+	fs, err := newDfs(cfg.RootFS, cfg.Upper, mem, done, tmp)
 	if err != nil {
 		return 0, err
 	}
@@ -168,7 +168,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	fs.run = &runInfo{stubFile: stubFile, chanFile: chanFile, life: lifeline, entryOff: entryOff,
 		pgid: cmd.Process.Pid, xfer: xferSup}
 	exe := path.Clean("/" + prog)
-	if cfg.Root == "" {
+	if cfg.RootFS == nil { // rootless: the program path is a host path
 		if exe, err = filepath.Abs(prog); err != nil {
 			return 0, err
 		}

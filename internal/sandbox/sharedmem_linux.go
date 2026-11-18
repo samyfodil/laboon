@@ -160,7 +160,7 @@ func (g *dguest) mmapMirroredAnon(addr, length, prot, flags uint64) (int64, bool
 		return 0, false
 	}
 	f := os.NewFile(uintptr(fd), "lc-guestmem")
-	sfd, e := g.passFd(f)
+	sfd, e := g.passFd(hostFd(f))
 	if e != 0 {
 		unix.Munmap(buf)
 		f.Close()

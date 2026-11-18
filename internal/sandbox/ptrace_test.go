@@ -22,7 +22,7 @@ func TestPtrace(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 		out := &ptraceCancelWriter{cancel: cancel}
-		Run(ctx, exe, Config{Args: []string{exe, "cancel"}, Root: "/", Stdout: out, Stderr: out})
+		Run(ctx, exe, Config{Args: []string{exe, "cancel"}, RootFS: HostRoot("/"), Stdout: out, Stderr: out})
 		if !strings.Contains(out.String(), "ready\n") {
 			t.Fatalf("tracee never stopped: %s", out.String())
 		}
@@ -39,7 +39,7 @@ func TestPtrace(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 				defer cancel()
 				var out bytes.Buffer
-				code, err := Run(ctx, exe, Config{Args: []string{exe, mode}, Root: "/", Stdout: &out, Stderr: &out})
+				code, err := Run(ctx, exe, Config{Args: []string{exe, mode}, RootFS: HostRoot("/"), Stdout: &out, Stderr: &out})
 				if err != nil || code != 0 || !strings.HasSuffix(out.String(), "OK\n") {
 					t.Fatalf("code=%d err=%v out=%q", code, err, out.String())
 				}
@@ -56,7 +56,7 @@ func TestPtraceStrace(t *testing.T) {
 	for _, args := range [][]string{{strace, "/bin/echo", "hi"}, {strace, "-f", "-e", "trace=write", "/bin/sh", "-c", "echo hi; /bin/echo child"}} {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		var out, trace bytes.Buffer
-		code, err := Run(ctx, strace, Config{Args: args, Root: "/", Stdout: &out, Stderr: &trace})
+		code, err := Run(ctx, strace, Config{Args: args, RootFS: HostRoot("/"), Stdout: &out, Stderr: &trace})
 		cancel()
 		if err != nil || code != 0 || !strings.Contains(out.String(), "hi\n") || !strings.Contains(trace.String(), "write(1,") || !strings.Contains(trace.String(), "exited with 0") || badPtraceTrace(trace.String()) {
 			t.Fatalf("args=%v code=%d err=%v out=%q trace=%s", args, code, err, out.String(), trace.String())
@@ -76,7 +76,7 @@ func TestPtraceThreadExec(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	var out, trace bytes.Buffer
-	code, err := Run(ctx, strace, Config{Args: []string{strace, "-f", "-e", "trace=process", exe}, Root: "/", Stdout: &out, Stderr: &trace})
+	code, err := Run(ctx, strace, Config{Args: []string{strace, "-f", "-e", "trace=process", exe}, RootFS: HostRoot("/"), Stdout: &out, Stderr: &trace})
 	if err != nil || code != 0 || !strings.HasSuffix(out.String(), "OK\n") || badPtraceTrace(trace.String()) {
 		t.Fatalf("code=%d err=%v out=%q trace=%s", code, err, out.String(), trace.String())
 	}

@@ -25,7 +25,7 @@ func TestRunTmpIsolated(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		Run(ctx, "/bin/busybox", Config{Root: root, Args: []string{"sleep", "30"}})
+		Run(ctx, "/bin/busybox", Config{RootFS: HostRoot(root), Args: []string{"sleep", "30"}})
 	}()
 	var chanPath string
 	for i := 0; i < 100 && chanPath == ""; i++ {
@@ -50,7 +50,7 @@ func TestRunTmpIsolated(t *testing.T) {
 			t.Fatal(err)
 		}
 		code, err := Run(context.Background(), "/sbescape.elf", Config{
-			Root: root, Args: []string{"sbescape", target}, Stdout: f, Stderr: f,
+			RootFS: HostRoot(root), Args: []string{"sbescape", target}, Stdout: f, Stderr: f,
 		})
 		f.Close()
 		out, _ := os.ReadFile(f.Name())

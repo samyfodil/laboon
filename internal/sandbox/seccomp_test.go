@@ -22,7 +22,7 @@ func TestSeccompEnforced(t *testing.T) {
 	var out bytes.Buffer
 	code, err := Run(context.Background(), bin, Config{
 		Args:   []string{"seccomp"},
-		Stdout: &out, Stderr: &out, Root: "/",
+		Stdout: &out, Stderr: &out, RootFS: HostRoot("/"),
 	})
 	if err != nil || code != 0 {
 		t.Fatalf("code %d err %v\n%s", code, err, out.String())
@@ -40,7 +40,7 @@ func TestSeccompTrap(t *testing.T) {
 	var out bytes.Buffer
 	code, err := Run(context.Background(), bin, Config{
 		Args:   []string{"seccomp_trap"},
-		Stdout: &out, Stderr: &out, Root: "/",
+		Stdout: &out, Stderr: &out, RootFS: HostRoot("/"),
 	})
 	if err != nil || code != 0 {
 		t.Fatalf("code %d err %v\n%s", code, err, out.String())
@@ -61,7 +61,7 @@ func TestSeccompSigreturn(t *testing.T) {
 	var out bytes.Buffer
 	code, err := Run(context.Background(), bin, Config{
 		Args:   []string{"seccomp_sigreturn"},
-		Stdout: &out, Stderr: &out, Root: "/",
+		Stdout: &out, Stderr: &out, RootFS: HostRoot("/"),
 	})
 	if err != nil || code != 42 {
 		t.Fatalf("code %d err %v (want 42: rt_sigreturn trapped -> SIGSYS -> exit 42)\n%s", code, err, out.String())

@@ -1,4 +1,4 @@
-package vfs
+package hostfs
 
 import (
 	"io"
@@ -6,6 +6,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/samyfodil/laboon/internal/vfs"
 )
 
 // LayerFromDir opens an existing self-describing OCI layer directory as a
@@ -24,11 +26,11 @@ func LayerFromDir(dir string) (*Layer, error) {
 			return nil
 		}
 		base := filepath.Base(hp)
-		if !strings.HasPrefix(base, whPrefix) || base == whOpaque {
+		if !strings.HasPrefix(base, vfs.WhiteoutPrefix) || base == vfs.OpaqueMarker {
 			return nil
 		}
 		rel, _ := filepath.Rel(dir, filepath.Dir(hp))
-		l.wh[clean(filepath.ToSlash(filepath.Join(rel, base[len(whPrefix):])))] = true
+		l.wh[clean(filepath.ToSlash(filepath.Join(rel, base[len(vfs.WhiteoutPrefix):])))] = true
 		return nil
 	})
 	return l, nil
@@ -59,14 +61,14 @@ func (l *Layer) ApplyTo(root string) error {
 		base := path.Base(name)
 		parent := path.Dir(name)
 		switch {
-		case base == vfsMetaFile:
+		case base == vfs.MetaFileName:
 			return nil // internal sidecar
-		case base == whOpaque:
+		case base == vfs.OpaqueMarker:
 			os.RemoveAll(filepath.Join(root, filepath.FromSlash(parent)))
 			dst.removeOverride(parent)
 			return nil
-		case strings.HasPrefix(base, whPrefix):
-			gone := path.Join(parent, base[len(whPrefix):])
+		case strings.HasPrefix(base, vfs.WhiteoutPrefix):
+			gone := path.Join(parent, base[len(vfs.WhiteoutPrefix):])
 			os.RemoveAll(filepath.Join(root, filepath.FromSlash(gone)))
 			dst.removeOverride(gone)
 			return nil
@@ -97,7 +99,7 @@ func (l *Layer) ApplyTo(root string) error {
 			// Names that shared an inode in the layer stay hardlinks in root, so a
 			// later build step sees the same link group, not independent copies.
 			linked := false
-			if id, nlink, ok := FileID(fi); ok && nlink > 1 {
+			if id, nlink, ok := vfs.FileID(fi); ok && nlink > 1 {
 				if first, seen := links[id]; seen {
 					os.Remove(target)
 					if os.Link(first, target) == nil {

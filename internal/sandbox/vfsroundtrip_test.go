@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/samyfodil/laboon/internal/oci"
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
 // TestVFSRoundTrip is the overlay serialization gate: a guest writes a rich
@@ -46,7 +46,7 @@ func TestVFSRoundTrip(t *testing.T) {
 	// Run 1: produce the change set in upper1.
 	var out bytes.Buffer
 	code, err := Run(context.Background(), "/"+filepath.Base(mutate), Config{
-		Args: []string{"/" + filepath.Base(mutate)}, Root: lower, Upper: upper1,
+		Args: []string{"/" + filepath.Base(mutate)}, RootFS: HostRoot(lower), Upper: upper1,
 		Stdout: &out, Stderr: &out,
 	})
 	if err != nil || code != 0 {
@@ -54,7 +54,7 @@ func TestVFSRoundTrip(t *testing.T) {
 	}
 
 	// Serialize upper1 to an OCI tar and reload it — the heart of the round trip.
-	l1, err := vfs.LayerFromDir(upper1)
+	l1, err := hostfs.LayerFromDir(upper1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestVFSRoundTrip(t *testing.T) {
 	// Run 2: vfscheck asserts the merged lower reflects run 1 exactly.
 	out.Reset()
 	code, err = Run(context.Background(), "/"+filepath.Base(check), Config{
-		Args: []string{"/" + filepath.Base(check)}, Root: merged, Upper: upper2,
+		Args: []string{"/" + filepath.Base(check)}, RootFS: HostRoot(merged), Upper: upper2,
 		Stdout: &out, Stderr: &out,
 	})
 	if err != nil || code != 0 {

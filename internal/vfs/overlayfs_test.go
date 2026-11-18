@@ -21,7 +21,7 @@ func TestOverlayFS(t *testing.T) {
 	must(os.MkdirAll(filepath.Join(lowerDir, "etc"), 0o755))
 	must(os.WriteFile(filepath.Join(lowerDir, "etc/base"), []byte("base"), 0o644))
 	must(os.WriteFile(filepath.Join(lowerDir, "gone"), []byte("x"), 0o644))
-	ofs := NewOverlayFS(NewDirFS(lowerDir), NewDirFS(upperDir))
+	ofs := NewOverlayFS(newTestDirFS(lowerDir), newTestDirFS(upperDir))
 	ns := NewNamespace(ofs)
 	read := func(p string) string {
 		t.Helper()
@@ -80,7 +80,7 @@ func TestOverlayFS(t *testing.T) {
 	must(os.MkdirAll(filepath.Join(lowerDir, "d"), 0o755))
 	must(os.WriteFile(filepath.Join(lowerDir, "d/a"), []byte("x"), 0o644))
 	must(os.WriteFile(filepath.Join(lowerDir, "d/b"), []byte("y"), 0o644))
-	ofs2 := NewOverlayFS(NewDirFS(lowerDir), NewDirFS(upperDir))
+	ofs2 := NewOverlayFS(newTestDirFS(lowerDir), newTestDirFS(upperDir))
 	ns2 := NewNamespace(ofs2)
 	dloc, _ := ns2.Resolve("/d", true)
 	must(ofs2.Remove(dloc.Node, "a", false))

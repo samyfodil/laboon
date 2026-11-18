@@ -1115,15 +1115,15 @@ func (g *dguest) ftruncate(fd int64, length int64) int64 {
 	if d.isDir || !d.writable() {
 		return sErr(lxEINVAL)
 	}
-	if d.rf != nil { // a regular file, whatever backs it
-		a, _, err := d.rf.attr()
-		if err != nil {
-			return sErr(osErrno(err))
-		}
-		if e := d.checkSeals(a.Size, length, false); e != 0 {
+	if d.vf != nil { // a regular file, whatever backs it
+		st, e := g.vfFstat(d)
+		if e != 0 {
 			return sErr(e)
 		}
-		if err := d.rf.truncate(length); err != nil {
+		if e := d.checkSeals(st.size, length, false); e != 0 {
+			return sErr(e)
+		}
+		if err := d.vfTruncate(length); err != nil {
 			return sErr(osErrno(err))
 		}
 		g.modified(d)

@@ -21,7 +21,7 @@ func TestUTSNamespace(t *testing.T) {
 	var out bytes.Buffer
 	code, err := Run(context.Background(), bin, Config{
 		Args:   []string{"utsns"},
-		Stdout: &out, Stderr: &out, Root: "/",
+		Stdout: &out, Stderr: &out, RootFS: HostRoot("/"),
 	})
 	if err != nil || code != 0 {
 		t.Fatalf("code %d err %v\n%s", code, err, out.String())

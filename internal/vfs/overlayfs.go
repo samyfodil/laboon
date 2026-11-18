@@ -87,7 +87,7 @@ func (f *overlayFS) Whiteouted(gp string) bool {
 		if name == "" {
 			continue
 		}
-		if present(top, dn, whPrefix+name) {
+		if present(top, dn, WhiteoutPrefix+name) {
 			return true
 		}
 		c, err := top.Lookup(dn, name)
@@ -127,14 +127,14 @@ func (f *overlayFS) Lookup(dir Node, name string) (Node, error) {
 		// the layers below, so the two marker probes are pointless on the bottom
 		// layer — nothing is beneath it. Skipping them there halves the host
 		// lstats per component on the common lower-only resolve path.
-		whited := i > 0 && present(L, dn, whPrefix+name)
+		whited := i > 0 && present(L, dn, WhiteoutPrefix+name)
 		if c, err := L.Lookup(dn, name); err == nil {
 			nodes[i] = c
 			if owner < 0 {
 				owner = i
 			}
 		}
-		if whited || (i > 0 && present(L, dn, whOpaque)) {
+		if whited || (i > 0 && present(L, dn, OpaqueMarker)) {
 			break // a whiteout of name, or an opaque dir, hides the lower layers
 		}
 	}
@@ -160,10 +160,10 @@ func (f *overlayFS) ReadDir(dir Node) ([]Dirent, error) {
 		}
 		opaque := false
 		for _, e := range ents {
-			if e.Name == whOpaque {
+			if e.Name == OpaqueMarker {
 				opaque = true
-			} else if strings.HasPrefix(e.Name, whPrefix) {
-				whited[e.Name[len(whPrefix):]] = true
+			} else if strings.HasPrefix(e.Name, WhiteoutPrefix) {
+				whited[e.Name[len(WhiteoutPrefix):]] = true
 			}
 		}
 		for _, e := range ents {
@@ -307,7 +307,7 @@ func (f *overlayFS) copyUpReg(pdir Node, name string, a Attr, src Node) (Node, e
 	// (e.g. 0400) would leave the fresh file unwritable to the unprivileged host
 	// owner, so the content copy below could not open it. recordMeta restores the
 	// floor and records any sub-floor override after.
-	tn, err := f.top().Create(pdir, name, CreateSpec{Kind: Reg, Mode: uint32(hostMode(a.Mode, false)) & 0o777})
+	tn, err := f.top().Create(pdir, name, CreateSpec{Kind: Reg, Mode: uint32(HostMode(a.Mode, false)) & 0o777})
 	if err != nil {
 		return nil, err
 	}
@@ -364,7 +364,7 @@ func (f *overlayFS) writeTop(pdir Node, name string, a Attr, data []byte) (Node,
 // recordMeta floors the top file's host mode and keeps the guest-uncarryable
 // bits (sub-floor mode, non-root owner, special kind) in the shared store.
 func (f *overlayFS) recordMeta(n Node, a Attr) {
-	floored := uint32(hostMode(a.Mode, a.Kind == Dir)) & 0o7777
+	floored := uint32(HostMode(a.Mode, a.Kind == Dir)) & 0o7777
 	n.SetAttr(AttrUpdate{Mode: &floored})
 	f.meta.Update(n.ID(), func(o *Override) {
 		if floored != a.Mode&0o7777 {
@@ -390,8 +390,8 @@ func (f *overlayFS) recordMeta(n Node, a Attr) {
 
 // unwhiteout removes a .wh.name marker from the top directory node, if present.
 func (f *overlayFS) unwhiteout(topDir Node, name string) {
-	if c, err := f.top().Lookup(topDir, whPrefix+name); err == nil {
-		f.top().Remove(topDir, whPrefix+name, c.Kind() == Dir)
+	if c, err := f.top().Lookup(topDir, WhiteoutPrefix+name); err == nil {
+		f.top().Remove(topDir, WhiteoutPrefix+name, c.Kind() == Dir)
 	}
 }
 
@@ -402,7 +402,7 @@ func (f *overlayFS) Create(dir Node, name string, spec CreateSpec) (Node, error)
 	if err != nil {
 		return nil, err
 	}
-	whited := present(f.top(), topDir, whPrefix+name)
+	whited := present(f.top(), topDir, WhiteoutPrefix+name)
 	f.unwhiteout(topDir, name)
 	p := join(d.p, name)
 	l := f.makingLock(p)
@@ -420,7 +420,7 @@ func (f *overlayFS) Create(dir Node, name string, spec CreateSpec) (Node, error)
 	if whited && spec.Kind == Dir {
 		// A directory recreated over a whiteout is opaque: the lower layer's
 		// entries at this path were removed and must stay hidden.
-		f.top().Create(c, whOpaque, CreateSpec{Kind: Reg})
+		f.top().Create(c, OpaqueMarker, CreateSpec{Kind: Reg})
 	}
 	f.recordMeta(c, Attr{Kind: spec.Kind, Mode: spec.Mode, Uid: spec.Uid, Gid: spec.Gid, Rdev: spec.Rdev})
 	l.Unlock()
@@ -504,7 +504,7 @@ func (f *overlayFS) Remove(dir Node, name string, isDir bool) error {
 		if err != nil {
 			return err
 		}
-		if _, err := f.top().Create(topDir, whPrefix+name, CreateSpec{Kind: Reg}); err != nil {
+		if _, err := f.top().Create(topDir, WhiteoutPrefix+name, CreateSpec{Kind: Reg}); err != nil {
 			return err
 		}
 	}
@@ -585,7 +585,7 @@ func (f *overlayFS) Rename(fromDir Node, from string, toDir Node, to string) err
 	// Hide the old name if a lower layer still shows it.
 	for i := 0; i < len(f.layers)-1; i++ {
 		if src.(*ovNode).nodes[i] != nil {
-			f.top().Create(fTop, whPrefix+from, CreateSpec{Kind: Reg})
+			f.top().Create(fTop, WhiteoutPrefix+from, CreateSpec{Kind: Reg})
 			break
 		}
 	}
@@ -740,17 +740,21 @@ func (n *ovNode) Stat() (Attr, error) {
 		// layers), so report 1, as Linux overlayfs does.
 		a.Nlink = 1
 	}
-	if n.owner == len(n.fs.layers)-1 { // top layer: apply the guest overrides
-		if o, ok := n.fs.meta.Get(n.ID()); ok {
-			if o.HasMode {
-				a.Mode = o.Mode
-			}
-			if o.HasOwner {
-				a.Uid, a.Gid = o.Uid, o.Gid
-			}
-			if o.Special {
-				a.Kind, a.Rdev = o.Kind, o.Rdev
-			}
+	// Apply the guest metadata overrides by the node's own inode, so the overlay is
+	// the single authority for them: a top-layer file's guest chown/chmod and a
+	// lower layer's owner/mode/special sidecar both resolve here, rather than a
+	// lower file's owner being post-processed by the sandbox above the vfs. The
+	// store is inode-keyed and each layer's node IDs are distinct, so a node only
+	// ever matches an override recorded for itself.
+	if o, ok := n.fs.meta.Get(n.ID()); ok {
+		if o.HasMode {
+			a.Mode = o.Mode
+		}
+		if o.HasOwner {
+			a.Uid, a.Gid = o.Uid, o.Gid
+		}
+		if o.Special {
+			a.Kind, a.Rdev = o.Kind, o.Rdev
 		}
 	}
 	return a, nil
@@ -763,7 +767,7 @@ func (n *ovNode) SetAttr(u AttrUpdate) error {
 		return err
 	}
 	if u.Mode != nil {
-		floored := uint32(hostMode(*u.Mode, n.kind == Dir)) & 0o7777
+		floored := uint32(HostMode(*u.Mode, n.kind == Dir)) & 0o7777
 		if err := tn.SetAttr(AttrUpdate{Mode: &floored}); err != nil {
 			return err
 		}

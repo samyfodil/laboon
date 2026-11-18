@@ -108,8 +108,8 @@ func (d *dfile) readAt(buf []byte, off int64) (int, error) {
 	if d.pipe != nil && d.pipe.io != nil {
 		return 0, lxErr(lxESPIPE)
 	}
-	if d.rf != nil {
-		return d.rf.readAt(buf, off)
+	if d.vf != nil {
+		return d.vfReadAt(buf, off)
 	}
 	n, err := d.f.ReadAt(buf, off)
 	if err == io.EOF {
@@ -127,11 +127,11 @@ func (d *dfile) writeAt(buf []byte, off int64) (int, error) {
 	if d.full {
 		return 0, lxErr(lxENOSPC)
 	}
-	if d.rf != nil {
+	if d.vf != nil {
 		if d.fx.oflags&lxOAppend != 0 {
-			return d.rf.write(buf)
+			return d.vfWrite(buf)
 		}
-		return d.rf.writeAt(buf, off)
+		return d.vfWriteAt(buf, off)
 	}
 	if d.fx.oflags&lxOAppend != 0 {
 		return d.f.Write(buf)
@@ -373,7 +373,7 @@ func (g *dguest) writeOff(addr uint64, off int64) lxErrno {
 func (g *dguest) sendfile(outFd, inFd int64, offAddr uint64, count int64) int64 {
 	in, ok := g.ft.get(int(inFd))
 	out, ok2 := g.ft.get(int(outFd))
-	if !ok || !ok2 || (in.f == nil && in.rf == nil && in.stub < 0) || in.fx.opath || out.fx.opath {
+	if !ok || !ok2 || (in.f == nil && in.vf == nil && in.stub < 0) || in.fx.opath || out.fx.opath {
 		return sErr(lxEBADF)
 	}
 	if !out.writable() || (in.fx.hasFlags && in.fx.oflags&lxOAccmod == lxOWronly) {
@@ -381,7 +381,7 @@ func (g *dguest) sendfile(outFd, inFd int64, offAddr uint64, count int64) int64 
 	}
 	// The source is a regular file (host or in-memory); the destination any
 	// writable, non-append fd.
-	if (in.rf == nil && (in.f == nil || !in.isRegular())) || out.f == nil || out.fx.oflags&lxOAppend != 0 || out.served() {
+	if (in.vf == nil && (in.f == nil || !in.isRegular())) || out.f == nil || out.fx.oflags&lxOAppend != 0 || out.served() {
 		return sErr(lxEINVAL)
 	}
 	if count < 0 {
@@ -402,8 +402,8 @@ func (g *dguest) sendfile(outFd, inFd int64, offAddr uint64, count int64) int64 
 		var err error
 		if off >= 0 {
 			n, err = in.readAt(chunk, off+total)
-		} else if in.rf != nil {
-			n, err = in.rf.read(chunk)
+		} else if in.vf != nil {
+			n, err = in.vfRead(chunk)
 		} else {
 			n, err = in.f.Read(chunk)
 			if err == io.EOF {
@@ -421,8 +421,8 @@ func (g *dguest) sendfile(outFd, inFd int64, offAddr uint64, count int64) int64 
 		}
 		w, werr := g.writeAll(out, chunk[:n], false)
 		if w < n && off < 0 { // give back what was not written
-			if in.rf != nil {
-				in.rf.seek(int64(w-n), io.SeekCurrent)
+			if in.vf != nil {
+				in.vfSeek(int64(w-n), io.SeekCurrent)
 			} else {
 				in.f.Seek(int64(w-n), io.SeekCurrent)
 			}
@@ -650,8 +650,8 @@ func (g *dguest) fallocate(fd, mode, off, n int64) int64 {
 	if d.isPipe() {
 		return sErr(lxESPIPE)
 	}
-	if d.rf != nil { // a regular file, whatever backs it
-		return d.rf.fallocate(g, d, mode, off, n)
+	if d.vf != nil { // a regular file, whatever backs it
+		return g.vfFallocate(d, mode, off, n)
 	}
 	if d.f == nil {
 		return sErr(lxEBADF)
@@ -731,8 +731,8 @@ func (g *dguest) fsync(fd int64) int64 {
 	if !ok || d.fx.opath {
 		return sErr(lxEBADF)
 	}
-	if d.rf != nil { // a regular file, whatever backs it
-		if err := d.rf.sync(); err != nil {
+	if d.vf != nil { // a regular file, whatever backs it
+		if err := d.vfSync(); err != nil {
 			return sErr(osErrno(err))
 		}
 		return 0

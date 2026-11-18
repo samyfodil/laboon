@@ -8,13 +8,14 @@ import (
 	"testing"
 
 	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
 // TestLayerTarRoundTrip builds a vfs layer, serializes it to an OCI tar and
 // reads it back, checking files, a symlink, a hardlink, a whiteout, an opaque
 // directory and a mode/owner the host file need not hold all survive.
 func TestLayerTarRoundTrip(t *testing.T) {
-	l, err := vfs.NewLayer(t.TempDir())
+	l, err := hostfs.NewLayer(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

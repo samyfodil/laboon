@@ -135,7 +135,7 @@ func programConfig(program string, o *options) (string, sandbox.Config, error) {
 	cfg.Args = append([]string{program}, o.args...)
 	cfg.Env = o.environ(defaultEnv)
 	if o.userSet {
-		root := cfg.Root
+		root, _ := sandbox.HostRootPath(cfg.RootFS)
 		if root == "" {
 			root = "/"
 		}
@@ -149,7 +149,7 @@ func programConfig(program string, o *options) (string, sandbox.Config, error) {
 }
 
 func imageRun(ctx context.Context, ref string, o *options) (string, sandbox.Config, error) {
-	if o.cfg.Root != "" {
+	if o.cfg.RootFS != nil {
 		return "", sandbox.Config{}, errors.New("WithRoot does not apply to an image")
 	}
 	pull := o.pull
@@ -181,7 +181,7 @@ func imageRun(ctx context.Context, ref string, o *options) (string, sandbox.Conf
 // unless WithDir sets one.
 func imageConfig(img *oci.Image, o *options) (sandbox.Config, error) {
 	cfg := o.cfg
-	cfg.Root = img.Root
+	cfg.RootFS = sandbox.HostRoot(img.Root)
 	if cfg.Dir == "" {
 		cfg.Dir = img.Config.WorkingDir
 	}

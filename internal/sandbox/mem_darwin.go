@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"encoding/binary"
+	"io"
 	"os"
 	"sync"
 
@@ -81,6 +82,25 @@ func (g *dguest) mmapFd(fd int64, wshared, code bool) int64 {
 	if d.gp == "/dev/zero" {
 		return kindZero << 32
 	}
+	if d.vf != nil {
+		// A non-host file (in-memory, user-defined, network): the guest never
+		// touches the real backing — the supervisor materializes the content into
+		// an unlinked temp file through the file's ReadAt and the stub maps that.
+		// A private executable mapping is still rewritten in place afterwards
+		// (lcRewrite -> libSites reads the materialized file). Only a shared
+		// writable or shared executable mapping is unsupported, so refuse those.
+		if code || wshared {
+			return sErr(lxENODEV)
+		}
+		if e := g.materializeMapf(d); e != 0 {
+			return sErr(e)
+		}
+		sfd, e := g.mp.stubFd(g, d)
+		if e != 0 {
+			return sErr(e)
+		}
+		return int64(sfd)
+	}
 	if d.f == nil || d.ev != nil || d.ep != nil {
 		return sErr(lxENODEV)
 	}
@@ -104,6 +124,62 @@ func (g *dguest) mmapFd(fd int64, wshared, code bool) int64 {
 		return sErr(e)
 	}
 	return int64(sfd)
+}
+
+// materializeMapf makes (or refreshes) d.mapf, an unlinked temp file holding a
+// non-host file's whole content read through its ReadAt, for the stub to map.
+// mmapFd carries no offset or length, so the whole file is materialized, a
+// snapshot as the mapping is; it is kept on the description and remade only if the
+// file has since grown past it (else a map past its end would fault).
+func (g *dguest) materializeMapf(d *dfile) lxErrno {
+	a, err := d.vn.Stat()
+	if err != nil {
+		return osErrno(err)
+	}
+	if d.mapf != nil {
+		if fi, e := d.mapf.Stat(); e == nil && fi.Size() >= a.Size {
+			return 0
+		}
+		d.mapf.Close()
+		d.mapf = nil
+	}
+	tf, err := os.CreateTemp("", "lc-mmap")
+	if err != nil {
+		return osErrno(err)
+	}
+	os.Remove(tf.Name()) // unlink; the fd keeps it alive
+	if a.Size > 0 {
+		if err := tf.Truncate(a.Size); err != nil {
+			tf.Close()
+			return osErrno(err)
+		}
+		if e := g.fillFile(tf, d.vf, a.Size); e != 0 {
+			tf.Close()
+			return e
+		}
+	}
+	d.mapf = tf
+	return 0
+}
+
+// fillFile copies size bytes of r into w through ReadAt; any part past the
+// content stays zero, as a file mapping's tail does.
+func (g *dguest) fillFile(w *os.File, r io.ReaderAt, size int64) lxErrno {
+	buf := g.ioBuf(int(min(size, ioChunk)))
+	for pos := int64(0); pos < size; {
+		b := buf[:min(size-pos, int64(len(buf)))]
+		n, err := r.ReadAt(b, pos)
+		if n > 0 {
+			if _, werr := w.WriteAt(b[:n], pos); werr != nil {
+				return osErrno(werr)
+			}
+			pos += int64(n)
+		}
+		if err != nil || n == 0 {
+			break
+		}
+	}
+	return 0
 }
 
 // memProc is one guest process's side of fdlink, shared by its threads.
@@ -218,12 +294,16 @@ func (m *memProc) stubFd(g *dguest, d *dfile) (int, lxErrno) {
 	}
 	nrecv := 0
 	if _, ok := m.sent[id]; !ok {
-		if err := m.send(fdOpInstall, id, d.f); err != nil {
+		f := d.f
+		if f == nil {
+			f = d.mapf // a non-host file's materialized mmap backing (mmapFd)
+		}
+		if err := m.send(fdOpInstall, id, f); err != nil {
 			return 0, osErrno(err)
 		}
 		nrecv = 1
 		fn := fileName{path: d.name()}
-		if fi, err := d.f.Stat(); err == nil {
+		if fi, err := f.Stat(); err == nil {
 			fn.dev, fn.ino = hostDevIno(fi)
 		}
 		m.names[id] = fn

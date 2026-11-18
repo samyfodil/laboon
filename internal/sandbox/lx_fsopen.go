@@ -606,14 +606,13 @@ func (g *dguest) openTmpfile(dir string, flags, mode int64) int64 {
 	return g.installD(d, flags)
 }
 
-// installVFile tracks a non-host file — an in-memory backend's (tmpfs, WithFS):
-// the guest fd is backed by the vfs.File handle vf over node, not a host file, so
-// read, write, lseek, fstat and ftruncate serve through the vfs interface (the
-// memFile in lx_procfs.go). Content never leaves the supervisor; mmap of such a
-// file is refused (ENODEV), as for a synthetic file.
+// installVFile tracks a non-host regular file (in-memory, user-defined): the
+// description is backed by the filesystem's vfs.File handle vf over node, not a
+// host fd. laboon owns the offset and serves read/write/lseek/fstat/ftruncate by
+// driving vf's ReadAt/WriteAt/Truncate and the node's Stat (regfile.go); mmap
+// copies the content in, or maps it directly if vf is an *os.File (mmap_linux.go).
 func (g *dguest) installVFile(gp string, node vfs.Node, vf vfs.File, flags int64) int64 {
-	rf := &memRF{vf: vf, vn: node, append: flags&lxOAppend != 0}
-	return g.installD(&dfile{gp: gp, stub: -1, rf: rf}, flags)
+	return g.installD(&dfile{gp: gp, stub: -1, vf: vf, vn: node}, flags)
 }
 
 // install tracks a freshly opened host file as a new description with the
@@ -625,14 +624,6 @@ func (g *dguest) install(f *os.File, gp string, flags int64) int64 {
 		return sErr(osErrno(err))
 	}
 	d := &dfile{f: f, gp: gp, isDir: fi.IsDir(), stub: -1}
-	// A regular file's content is served through the regFile interface. The host
-	// fd stays in d.f for the paths not yet migrated and for the zero-copy fast
-	// paths; a named regular file also gets its node, for fstat.
-	if fi.Mode().IsRegular() {
-		if loc, e := g.vns().Resolve(gp, false); e == nil {
-			d.rf = &hostRF{f: f, vn: loc.Node}
-		}
-	}
 	return g.installD(d, flags)
 }
 

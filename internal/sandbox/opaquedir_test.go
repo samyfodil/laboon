@@ -38,7 +38,7 @@ func TestOverlayOpaqueRecreate(t *testing.T) {
 
 	var out bytes.Buffer
 	code, err := Run(context.Background(), "/opaquedir", Config{
-		Args: []string{"/opaquedir"}, Root: lower, Upper: upper,
+		Args: []string{"/opaquedir"}, RootFS: HostRoot(lower), Upper: upper,
 		Stdout: &out, Stderr: &out,
 	})
 	if err != nil || code != 0 {

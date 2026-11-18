@@ -48,8 +48,8 @@ func TestMountSocket(t *testing.T) {
 	run := func(mounts []Mount) (int, string) {
 		var out bytes.Buffer
 		code, err := Run(context.Background(), bin, Config{
-			Args: []string{"x11sock", sockPath},
-			Root: "/", Mounts: mounts,
+			Args:   []string{"x11sock", sockPath},
+			RootFS: HostRoot("/"), Mounts: mounts,
 			Stdout: &out, Stderr: &out,
 		})
 		if err != nil {

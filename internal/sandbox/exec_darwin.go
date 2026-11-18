@@ -36,7 +36,27 @@ func (g *dguest) execve(dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 		return fail(e)
 	}
 	host, prefix, skip, gp := t.src, t.prefix, t.skip, t.gp
-	interpHost, ierr := resolveInterp(host, g.rootAbs)
+	// The dynamic linker's guest path mapped to a host path: under a
+	// host-directory root the real linker file; for a non-host root resolved and
+	// spilled through the guest fs, the same as the program (execTarget) was.
+	linkerHost := func(ip string) (string, error) {
+		if g.rootAbs != "" {
+			h := filepath.Join(g.rootAbs, filepath.Clean("/"+ip))
+			if abs, err := filepath.Abs(h); err == nil {
+				h = abs
+			}
+			if _, err := os.Stat(h); err != nil {
+				return "", err
+			}
+			return h, nil
+		}
+		s, e := g.execSource(ip, nil)
+		if e != 0 {
+			return "", fmt.Errorf("dynamic linker %q: errno %d", ip, e)
+		}
+		return string(s), nil
+	}
+	interpHost, ierr := resolveInterp(host, linkerHost)
 	if ierr != nil {
 		return fail(lxENOENT) // the ELF's dynamic linker is missing
 	}
@@ -435,6 +455,10 @@ func (g *dguest) fexecHost(f *os.File) (string, lxErrno) {
 			return "", lxEIO
 		}
 	}
+	// The clone of a spilled source (a non-host file) inherits the spill's bare
+	// 0600; it is an exec source, verified executable by dacCheck against the
+	// guest mode, so give the clone the owner-exec bit execHead expects.
+	os.Chmod(p, fi.Mode().Perm()|0o100)
 	fs.addTmp(p)
 	fs.mu.Lock()
 	if fs.run.sites == nil {

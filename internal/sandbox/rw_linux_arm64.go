@@ -60,19 +60,21 @@ const linuxSitesSalt = "linux-a64-sites-4"
 type imagePlan = imageSites
 
 func (g *dguest) imagePlan(pf *progFile, f *elf.File) imagePlan {
-	return g.analyzeImage(pf.id, func() ([]byte, error) { return pf.data, nil }, f)
+	return g.analyzeImage(pf.id, true, func() ([]byte, error) { return pf.data, nil }, f)
 }
 
-// analyzeImage finds the sites of the ELF f, whose contents data returns. A
-// file seen before is found by its identity, without reading or hashing it.
-func (g *dguest) analyzeImage(id rewrite.FileID, data func() ([]byte, error), f *elf.File) imageSites {
+// analyzeImage finds the sites of the ELF f, whose contents data returns. A host
+// file (hasID) seen before is found by its identity, without reading or hashing
+// it; a non-host file (no stable identity) is analyzed by its content, which is
+// still memoized by the content's hash.
+func (g *dguest) analyzeImage(id rewrite.FileID, hasID bool, data func() ([]byte, error), f *elf.File) imageSites {
 	base := ^uint64(0)
 	for _, p := range f.Progs {
 		if p.Type == elf.PT_LOAD {
 			base = min(base, p.Vaddr)
 		}
 	}
-	offs, err := g.cfg.Cache.OffsetsByID(linuxSitesSalt, id, func() ([]uint32, error) {
+	byContent := func() ([]uint32, error) {
 		b, err := data()
 		if err != nil {
 			return nil, err
@@ -88,7 +90,14 @@ func (g *dguest) analyzeImage(id rewrite.FileID, data func() ([]byte, error), f 
 			}
 			return out, nil
 		})
-	})
+	}
+	var offs []uint32
+	var err error
+	if hasID {
+		offs, err = g.cfg.Cache.OffsetsByID(linuxSitesSalt, id, byContent)
+	} else {
+		offs, err = byContent()
+	}
 	if err != nil {
 		// Unrewritten syscalls still meet the seccomp backstop.
 		return imageSites{}
@@ -147,16 +156,16 @@ func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *cod
 // fileCodeSites returns the sites in the n bytes at src, if src is part of an
 // executable segment of an ELF file.
 func (g *dguest) fileCodeSites(src *codeSource, n uint64) ([]int, bool) {
-	id, ok := src.identity()
-	if !ok {
+	if src == nil || src.r == nil {
 		return nil, false
 	}
-	f, err := elf.NewFile(src.f)
+	id, ok := src.identity()
+	f, err := elf.NewFile(src.r)
 	if err != nil || f.Machine != elfMachine {
 		return nil, false
 	}
-	s := g.analyzeImage(id, func() ([]byte, error) {
-		return io.ReadAll(io.NewSectionReader(src.f, 0, 1<<62))
+	s := g.analyzeImage(id, ok, func() ([]byte, error) {
+		return io.ReadAll(io.NewSectionReader(src.r, 0, 1<<62))
 	}, f)
 	var out []int
 	for _, p := range f.Progs {

@@ -27,7 +27,7 @@ func TestMountFileBind(t *testing.T) {
 	var out bytes.Buffer
 	code, err := Run(ctx, exe, Config{
 		Args:   []string{exe},
-		Root:   "/",
+		RootFS: HostRoot("/"),
 		Mounts: []Mount{{Host: host, Guest: "/laboonbind"}},
 		Stdout: &out, Stderr: &out,
 	})

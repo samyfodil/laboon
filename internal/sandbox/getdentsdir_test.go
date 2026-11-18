@@ -36,7 +36,7 @@ func TestGetdentsDirIdentity(t *testing.T) {
 	defer cancel()
 	var out bytes.Buffer
 	code, err := Run(ctx, "/"+filepath.Base(bin), Config{
-		Args: []string{"/" + filepath.Base(bin)}, Root: lower, Upper: upper,
+		Args: []string{"/" + filepath.Base(bin)}, RootFS: HostRoot(lower), Upper: upper,
 		Stdout: &out, Stderr: &out,
 	})
 	s := out.String()

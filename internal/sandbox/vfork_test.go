@@ -24,7 +24,7 @@ func TestVforkLifecycle(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 			defer cancel()
 			var out bytes.Buffer
-			code, err := Run(ctx, exe, Config{Args: []string{exe}, Root: "/", Stdout: &out, Stderr: &out})
+			code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot("/"), Stdout: &out, Stderr: &out})
 			if err != nil || code != 0 || !strings.HasSuffix(out.String(), "OK\n") {
 				t.Fatalf("code=%d err=%v out=%q", code, err, out.String())
 			}
@@ -78,7 +78,7 @@ pid = os.posix_spawn("/bin/sh", ["sh", "-c", "exit 3"], os.environ)
 print("spawn", os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
 `
 	var o bytes.Buffer
-	code, err := Run(context.Background(), "/usr/bin/python3", Config{Args: []string{"python3", "-c", script}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), "/usr/bin/python3", Config{Args: []string{"python3", "-c", script}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || o.String() != "sub-ok\nmissing-ok\nspawn 3\n" {
 		t.Fatalf("code=%d err=%v out=%q", code, err, o.String())
 	}

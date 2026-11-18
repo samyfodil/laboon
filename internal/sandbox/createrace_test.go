@@ -33,8 +33,8 @@ func TestCreateRace(t *testing.T) {
 		cfg  Config
 		prog string
 	}{
-		{"overlay", Config{Args: []string{"createrace", "/work"}, Root: lower, Upper: upper}, "/createrace"},
-		{"host", Config{Args: []string{"createrace", filepath.Join(dir, "work")}, Root: "/"}, bin},
+		{"overlay", Config{Args: []string{"createrace", "/work"}, RootFS: HostRoot(lower), Upper: upper}, "/createrace"},
+		{"host", Config{Args: []string{"createrace", filepath.Join(dir, "work")}, RootFS: HostRoot("/")}, bin},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var o bytes.Buffer

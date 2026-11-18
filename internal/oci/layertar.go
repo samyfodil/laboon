@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
 // The OCI image-layer tar conventions: a deleted path is an empty .wh.<name>
@@ -22,14 +23,14 @@ const (
 // WriteTar serializes a layer's changes as an uncompressed OCI image layer tar:
 // directories, regular files, symlinks and special nodes, with deletions as .wh.
 // whiteout entries and a fully-replaced directory as an opaque marker. It reads
-// the layer only through the abstract vfs.ChangeSet — owner, mode (including
+// the layer only through the abstract hostfs.ChangeSet — owner, mode (including
 // bits an unprivileged host file cannot hold), hardlink relationships and
 // content all come across that primitive, so the image format needs no concrete
 // layer type. Modification times are zeroed, so a layer's bytes depend only on
 // its contents and a rebuild is reproducible.
-func WriteTar(cs vfs.ChangeSet, w io.Writer) error {
+func WriteTar(cs hostfs.ChangeSet, w io.Writer) error {
 	tw := tar.NewWriter(w)
-	err := cs.Walk(func(c vfs.Change, content io.Reader) error {
+	err := cs.Walk(func(c hostfs.Change, content io.Reader) error {
 		return writeChange(tw, c, content)
 	})
 	if err != nil {
@@ -38,7 +39,7 @@ func WriteTar(cs vfs.ChangeSet, w io.Writer) error {
 	return tw.Close()
 }
 
-func writeChange(tw *tar.Writer, c vfs.Change, content io.Reader) error {
+func writeChange(tw *tar.Writer, c hostfs.Change, content io.Reader) error {
 	a := c.Attr
 	if a.Whiteout {
 		return tw.WriteHeader(&tar.Header{Name: whName(c.Path), Typeflag: tar.TypeReg})
@@ -95,7 +96,7 @@ func whName(p string) string {
 // cannot redirect a later entry's write outside it; whiteout and opaque markers
 // land on disk as the layer's own deletions, and each entry's guest owner, mode
 // and special-node kind are recorded in the layer's metadata afterward.
-func ReadTar(r io.Reader, dir string) (*vfs.Layer, error) {
+func ReadTar(r io.Reader, dir string) (*hostfs.Layer, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -192,7 +193,7 @@ func ReadTar(r io.Reader, dir string) (*vfs.Layer, error) {
 
 	// Open the extracted directory as a layer (this indexes the .wh. markers on
 	// disk), then record the metadata the host files cannot carry.
-	l, err := vfs.LayerFromDir(dir)
+	l, err := hostfs.LayerFromDir(dir)
 	if err != nil {
 		return nil, err
 	}

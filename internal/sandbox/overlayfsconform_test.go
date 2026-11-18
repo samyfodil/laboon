@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
 // TestOverlayFSConformance proves the vfs overlay backend, resolved through a
@@ -41,7 +42,7 @@ func TestOverlayFSConformance(t *testing.T) {
 
 	var out bytes.Buffer
 	code, err := Run(context.Background(), "/vfsmutate", Config{
-		Args: []string{"/vfsmutate"}, Root: lower, Upper: upper, Stdout: &out, Stderr: &out,
+		Args: []string{"/vfsmutate"}, RootFS: HostRoot(lower), Upper: upper, Stdout: &out, Stderr: &out,
 	})
 	if err != nil || code != 0 {
 		t.Fatalf("vfsmutate code %d err %v\n%s", code, err, out.String())
@@ -54,7 +55,7 @@ func TestOverlayFSConformance(t *testing.T) {
 	lo := newHostDirFS(lower, newHostFS(lower, "", ""))
 	up := newHostDirFS(upper, newHostFS(upper, "", ""))
 	ofs := vfs.NewOverlayFSWithMeta(store, lo, up)
-	vfs.LoadMetaInto(upper, store)
+	hostfs.LoadMetaInto(upper, store)
 	ns := vfs.NewNamespace(ofs)
 
 	stat := func(p string) vfs.Attr {

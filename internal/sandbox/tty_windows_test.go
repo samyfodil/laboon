@@ -193,7 +193,7 @@ func TestWindowsConsole(t *testing.T) {
 // interactive sh with the console as its stdio.
 func consoleChild(t *testing.T) {
 	cfg := Config{
-		Root:   os.Getenv("LC_CONSOLE_ROOT"),
+		RootFS: HostRoot(os.Getenv("LC_CONSOLE_ROOT")),
 		Args:   []string{"sh", "-i"},
 		Env:    []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "TERM=xterm", "PS1=C1> "},
 		Stdin:  os.Stdin,

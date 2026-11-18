@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
 // TestCopyUpModeCheckpoint guards the metadata checkpoint against the gap the old
@@ -37,7 +37,7 @@ func TestCopyUpModeCheckpoint(t *testing.T) {
 
 	var out bytes.Buffer
 	code, err := Run(context.Background(), "/copyupmode", Config{
-		Args: []string{"/copyupmode"}, Root: lower, Upper: upper,
+		Args: []string{"/copyupmode"}, RootFS: HostRoot(lower), Upper: upper,
 		Stdout: &out, Stderr: &out,
 	})
 	if err != nil || code != 0 {
@@ -45,7 +45,7 @@ func TestCopyUpModeCheckpoint(t *testing.T) {
 	}
 
 	// The captured layer: 0400 preserved though no chmod ever ran, content rewritten.
-	l, err := vfs.LayerFromDir(upper)
+	l, err := hostfs.LayerFromDir(upper)
 	if err != nil {
 		t.Fatal(err)
 	}

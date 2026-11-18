@@ -21,8 +21,11 @@ func (d *dfile) unref() {
 	d.releaseFx()
 	if d.f != nil {
 		d.f.Close()
-	} else if d.rf != nil {
-		d.rf.closeFile() // a non-host regular file's backing (memFS, WithFS); a host file is closed via d.f
+	} else if d.vf != nil {
+		d.vf.Close() // the backing of a non-host regular file (in-memory, user-defined); a host file is closed via d.f
+	}
+	if d.mapf != nil {
+		d.mapf.Close() // darwin: the unlinked temp file a non-host file's mmap was materialized into
 	}
 	if d.pathFD != nil {
 		d.pathFD.Close()

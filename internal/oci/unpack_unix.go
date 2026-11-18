@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
 // Unpack extracts a flattened image tar (whiteouts already applied) into
@@ -104,7 +105,7 @@ func Unpack(r io.Reader, dir string, maxSize int64) error {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}
-	return vfs.SaveOverrides(dir, overrides)
+	return hostfs.SaveOverrides(dir, overrides)
 }
 
 func writeFile(root *os.Root, name string, r io.Reader, mode fs.FileMode) error {

@@ -22,7 +22,7 @@ func mkDir(t *testing.T, files map[string]string) (FileSystem, string) {
 			t.Fatal(err)
 		}
 	}
-	return NewDirFS(dir), dir
+	return newTestDirFS(dir), dir
 }
 
 // TestNamespaceResolve exercises the shape end to end through one FileSystem:

@@ -78,7 +78,7 @@ func TestBTIRemapKeepsRewrittenCode(t *testing.T) {
 			}
 		}
 		var o, trace bytes.Buffer
-		code, err := Run(context.Background(), exe, Config{Args: []string{"btimain"}, Stdout: &o, Stderr: &o, Trace: &trace, Root: "/"})
+		code, err := Run(context.Background(), exe, Config{Args: []string{"btimain"}, Stdout: &o, Stderr: &o, Trace: &trace, RootFS: HostRoot("/")})
 		if err != nil || code != 0 || o.String() != "bti_add=5\n" {
 			t.Fatalf("bti=%v: code=%d err=%v out=%q", bti, code, err, o.String())
 		}

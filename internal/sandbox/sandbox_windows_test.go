@@ -66,7 +66,7 @@ func TestWindowsBusybox(t *testing.T) {
 		t.Run(strings.Join(c.args, " "), func(t *testing.T) {
 			var out, errb bytes.Buffer
 			cfg := Config{
-				Root:   root,
+				RootFS: HostRoot(root),
 				Args:   append([]string{"busybox"}, c.args...),
 				Env:    []string{"PATH=/bin"},
 				Stdin:  strings.NewReader(""),
@@ -102,7 +102,7 @@ func TestWindowsNoRewriteKilled(t *testing.T) {
 	}
 	var out, errb bytes.Buffer
 	_, err := Run(context.Background(), "/bin/busybox", Config{
-		Root:      root,
+		RootFS:    HostRoot(root),
 		Args:      []string{"busybox", "true"},
 		Env:       []string{"PATH=/bin"},
 		Stdin:     strings.NewReader(""),
@@ -201,7 +201,7 @@ func winRun(t *testing.T, root string, args ...string) (int, string, string) {
 	t.Helper()
 	var out, errb bytes.Buffer
 	cfg := Config{
-		Root:   root,
+		RootFS: HostRoot(root),
 		Args:   append([]string{"busybox"}, args...),
 		Env:    []string{"PATH=/bin"},
 		Stdin:  strings.NewReader(""),
@@ -321,7 +321,7 @@ func TestWindowsMemoryCap(t *testing.T) {
 		{48 << 20, func(n int) bool { return n > 0 && n < 48 }},
 	} {
 		var out, errb bytes.Buffer
-		cfg := Config{Root: root, Args: []string{"memcap"}, MaxBytes: c.max, Stdin: strings.NewReader(""), Stdout: &out, Stderr: &errb}
+		cfg := Config{RootFS: HostRoot(root), Args: []string{"memcap"}, MaxBytes: c.max, Stdin: strings.NewReader(""), Stdout: &out, Stderr: &errb}
 		code, err := Run(context.Background(), "/bin/memcap", cfg)
 		var n int
 		var why string
@@ -342,7 +342,7 @@ func TestWindowsMemtest(t *testing.T) {
 		t.Skip("no /bin/memtest in the rootfs (windows/m2/run.sh builds it)")
 	}
 	var out, errb bytes.Buffer
-	cfg := Config{Root: root, Args: []string{"memtest", "/tmp"}, Stdin: strings.NewReader(""), Stdout: &out, Stderr: &errb}
+	cfg := Config{RootFS: HostRoot(root), Args: []string{"memtest", "/tmp"}, Stdin: strings.NewReader(""), Stdout: &out, Stderr: &errb}
 	if testing.Verbose() && os.Getenv("LC_TRACE") != "" {
 		cfg.Trace = os.Stderr
 	}
@@ -405,7 +405,7 @@ func TestWindowsFault(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.mode, func(t *testing.T) {
 			var out, errb bytes.Buffer
-			cfg := Config{Root: root, Args: []string{"fault", c.mode}, Stdin: strings.NewReader(""), Stdout: &out, Stderr: &errb}
+			cfg := Config{RootFS: HostRoot(root), Args: []string{"fault", c.mode}, Stdin: strings.NewReader(""), Stdout: &out, Stderr: &errb}
 			if testing.Verbose() && os.Getenv("LC_TRACE") != "" {
 				cfg.Trace = os.Stderr
 			}
@@ -422,7 +422,7 @@ func winRunExe(t *testing.T, root, prog string, args ...string) (int, string, st
 	t.Helper()
 	var out, errb bytes.Buffer
 	cfg := Config{
-		Root:   root,
+		RootFS: HostRoot(root),
 		Args:   append([]string{prog}, args...),
 		Env:    []string{"PATH=/bin"},
 		Stdin:  strings.NewReader(""),
@@ -569,7 +569,7 @@ func TestWindowsLoopbackWithoutNet(t *testing.T) {
 	}{{[]string{"loopback"}, false, nil}, {[]string{"none"}, true, nil}, {[]string{"local", hostPort}, false, []string{"example.com"}}} {
 		var out bytes.Buffer
 		code, err := Run(context.Background(), "/bin/loopnet", Config{
-			Root: root, Args: append([]string{"loopnet"}, c.args...), Env: []string{"PATH=/bin"},
+			RootFS: HostRoot(root), Args: append([]string{"loopnet"}, c.args...), Env: []string{"PATH=/bin"},
 			Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out, NoNet: c.noNet,
 			Net: c.allow != nil, AllowDomains: c.allow,
 		})
@@ -630,7 +630,7 @@ func TestWindowsLoopbackSockets(t *testing.T) {
 		for _, network := range c.nets {
 			var out bytes.Buffer
 			code, err := Run(context.Background(), "/bin/"+c.prog, Config{
-				Root: root, Args: []string{c.prog}, Env: []string{"PATH=/bin"},
+				RootFS: HostRoot(root), Args: []string{c.prog}, Env: []string{"PATH=/bin"},
 				Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out, Net: network,
 			})
 			if err != nil || code != 0 || !strings.Contains(out.String(), c.prog+" fails=0") {
@@ -730,7 +730,7 @@ func TestWindowsHostPipes(t *testing.T) {
 	root := winSkipNoProg(t, "m3io")
 	run := func(stdin io.Reader, stdout, stderr io.Writer, prog string, args ...string) int {
 		t.Helper()
-		cfg := Config{Root: root, Args: append([]string{prog}, args...), Env: []string{"PATH=/bin"}, Stdin: stdin, Stdout: stdout, Stderr: stderr}
+		cfg := Config{RootFS: HostRoot(root), Args: append([]string{prog}, args...), Env: []string{"PATH=/bin"}, Stdin: stdin, Stdout: stdout, Stderr: stderr}
 		code, err := Run(context.Background(), "/bin/"+prog, cfg)
 		for _, v := range []io.Writer{stdout, stderr} {
 			if f, ok := v.(*os.File); ok {
@@ -923,7 +923,7 @@ func winRunCfg(t *testing.T, root string, mod func(*Config), prog string, args .
 	t.Helper()
 	var out, errb bytes.Buffer
 	cfg := Config{
-		Root:   root,
+		RootFS: HostRoot(root),
 		Args:   args,
 		Env:    []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root"},
 		Stdin:  strings.NewReader(""),

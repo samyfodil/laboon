@@ -22,7 +22,7 @@ func TestTmpfsDevRdev(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	var out bytes.Buffer
-	code, err := Run(ctx, exe, Config{Args: []string{exe}, Root: "/", Stdout: &out, Stderr: &out})
+	code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot("/"), Stdout: &out, Stderr: &out})
 	got := out.String()
 	if err != nil || code != 0 ||
 		!strings.Contains(got, "path-stat: ischr=1 rdev=1:3") ||

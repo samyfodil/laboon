@@ -1,6 +1,9 @@
 package laboon
 
-import "github.com/samyfodil/laboon/internal/vfs"
+import (
+	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/internal/vfs/hostfs"
+)
 
 // This file is laboon's public filesystem surface: the FileSystem interface a
 // mount is composed from, and the backends and wrappers that build one. WithFS
@@ -60,7 +63,7 @@ func NewMemFS() FileSystem { return vfs.NewMemFS() }
 // NewDirFS presents the host directory root as a FileSystem. Unlike WithMount it
 // is a plain tree with no subtree confinement or socket forwarding; use WithMount
 // for a sandboxed host bind.
-func NewDirFS(root string) FileSystem { return vfs.NewDirFS(root) }
+func NewDirFS(root string) FileSystem { return hostfs.NewDirFS(root) }
 
 // Overlay unions layers into one copy-on-write FileSystem (aufs/overlayfs style):
 // lowest layer first, the writable top layer last. A read sees the topmost layer

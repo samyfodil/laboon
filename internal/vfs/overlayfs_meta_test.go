@@ -7,7 +7,7 @@ import "testing"
 // between two hardlinks (one inode, one record) and survive a rename (the inode
 // does not change). This is what the Stack's path-keyed metadata could not do.
 func TestOverlayFSInodeMeta(t *testing.T) {
-	f := NewOverlayFS(NewDirFS(t.TempDir()), NewDirFS(t.TempDir()))
+	f := NewOverlayFS(newTestDirFS(t.TempDir()), newTestDirFS(t.TempDir()))
 	root := f.Root()
 
 	a, err := f.Create(root, "secret", CreateSpec{Kind: Reg, Mode: 0o400, Uid: 1000, Gid: 1000})
@@ -71,8 +71,8 @@ func (w *windowFS) Create(dir Node, name string, spec CreateSpec) (Node, error) 
 // mode: one would see the host's defaults (owner root), and a process that
 // found the directory made by another would be refused writing in it.
 func TestOverlayFSCreateWindow(t *testing.T) {
-	top := &windowFS{FileSystem: NewDirFS(t.TempDir()), name: "d"}
-	f := NewOverlayFS(NewDirFS(t.TempDir()), top).(*overlayFS)
+	top := &windowFS{FileSystem: newTestDirFS(t.TempDir()), name: "d"}
+	f := NewOverlayFS(newTestDirFS(t.TempDir()), top).(*overlayFS)
 	top.at = func() {
 		if l := f.makingLock("d"); l.TryRLock() {
 			l.RUnlock()

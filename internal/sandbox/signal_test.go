@@ -74,7 +74,7 @@ func TestGoSignals(t *testing.T) {
 		t.Skipf("go build unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), exe, Config{Args: []string{"gosignals", "/bin/sh"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), exe, Config{Args: []string{"gosignals", "/bin/sh"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	want := "preempt ok\nnil-deref recovered true\nnotify user defined signal 1\nexec \"child-ok\\n\" <nil>\n"
 	if err != nil || code != 0 || o.String() != want {
 		t.Fatalf("code=%d err=%v out=%q", code, err, o.String())
@@ -108,7 +108,7 @@ except KeyboardInterrupt:
     print("sigint", time.monotonic() - t0 < 2)
 `
 	var o bytes.Buffer
-	code, err := Run(context.Background(), "/usr/bin/python3", Config{Args: []string{"python3", "-c", script}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), "/usr/bin/python3", Config{Args: []string{"python3", "-c", script}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || o.String() != "alarm True\ntimeout\nrc -15\nsigint True\n" {
 		t.Fatalf("code=%d err=%v out=%q", code, err, o.String())
 	}

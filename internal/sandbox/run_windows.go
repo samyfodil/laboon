@@ -62,13 +62,13 @@ var testNoFSIslands bool
 // testUpper, when set by a test, is a writable layer kept across runs.
 var testUpper string
 
-// Run executes the Linux program at path (inside cfg.Root) and returns its
+// Run executes the Linux program at path (inside the root filesystem) and returns its
 // exit status.
 func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	if len(cfg.Args) == 0 {
 		return 0, errors.New("no argv")
 	}
-	if cfg.Root == "" {
+	if cfg.RootFS == nil {
 		return 0, errors.New("windows backend needs a root")
 	}
 	if cfg.Env == nil {
@@ -107,7 +107,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	if upper == "" {
 		upper = testUpper
 	}
-	fs, err := newDfs(cfg.Root, upper, mem, done, tmp)
+	fs, err := newDfs(cfg.RootFS, upper, mem, done, tmp)
 	if err != nil {
 		return 0, err
 	}

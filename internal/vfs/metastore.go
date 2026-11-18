@@ -1,8 +1,6 @@
 package vfs
 
 import (
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 )
@@ -88,25 +86,4 @@ func (s *MetaStore) Delete(id NodeID) {
 	delete(s.m, id)
 	s.n.Store(int32(len(s.m)))
 	s.mu.Unlock()
-}
-
-// LoadMetaInto reads a layer directory's path-keyed override sidecar and keys it
-// into the store by each path's current host inode, so a reconstructed overlay
-// (a reloaded build step, a kept upper reopened) recovers the guest metadata the
-// host files cannot hold. A dir with no sidecar loads nothing.
-func LoadMetaInto(dir string, store *MetaStore) {
-	b, err := os.ReadFile(filepath.Join(dir, vfsMetaFile))
-	if err != nil {
-		return
-	}
-	decodeMeta(b, func(p string, o Override) {
-		fi, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(p)))
-		if err != nil {
-			return
-		}
-		if id, ok := statID(fi); ok {
-			oo := o
-			store.Update(id, func(d *Override) { *d = oo })
-		}
-	})
 }

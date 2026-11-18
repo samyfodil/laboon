@@ -30,7 +30,7 @@ func TestOptionsApply(t *testing.T) {
 	})
 	want := sandbox.Config{
 		Stdin: &in, Stdout: &out, Stderr: &errw, Trace: &tr,
-		Root: "/rootfs", Dir: "/work", Cache: c, NoRewrite: true, RejectRWX: true,
+		RootFS: sandbox.HostRoot("/rootfs"), Dir: "/work", Cache: c, NoRewrite: true, RejectRWX: true,
 		Net: true, AllowDomains: []string{"a.com", "b.com"}, AllowCIDRs: []string{"10.0.0.0/8"},
 		AllowPorts: []int{443, 80}, MaxBytes: 1 << 30,
 	}
@@ -123,8 +123,9 @@ func TestImageConfig(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
-		if cfg.Root != "/img" || cfg.Dir != tc.dir || !reflect.DeepEqual(cfg.Args, tc.args) || !reflect.DeepEqual(cfg.Env, tc.env) {
-			t.Fatalf("%s: root %q dir %q args %q env %q", tc.name, cfg.Root, cfg.Dir, cfg.Args, cfg.Env)
+		root, _ := sandbox.HostRootPath(cfg.RootFS)
+		if root != "/img" || cfg.Dir != tc.dir || !reflect.DeepEqual(cfg.Args, tc.args) || !reflect.DeepEqual(cfg.Env, tc.env) {
+			t.Fatalf("%s: root %q dir %q args %q env %q", tc.name, root, cfg.Dir, cfg.Args, cfg.Env)
 		}
 	}
 	if !reflect.DeepEqual(img.Config.Env, []string{"PATH=/bin"}) {

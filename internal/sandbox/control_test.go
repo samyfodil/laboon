@@ -34,7 +34,7 @@ func TestControlSignal(t *testing.T) {
 	}
 	done := make(chan res, 1)
 	go func() {
-		code, err := Run(ctx, exe, Config{Args: []string{exe}, Root: "/", Stdout: pw, Control: ctrl})
+		code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot("/"), Stdout: pw, Control: ctrl})
 		pw.Close()
 		done <- res{code, err}
 	}()

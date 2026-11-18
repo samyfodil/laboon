@@ -44,12 +44,17 @@ type Config struct {
 	Terminal Terminal
 	// Trace, if set, receives one line per guest syscall.
 	Trace io.Writer
-	// Root is the directory the guest sees as "/", read-only. Without it the
-	// guest has no filesystem and the program path is a host path.
-	Root string
+	// RootFS is the guest's root filesystem ("/"), any vfs.FileSystem: a host
+	// directory (HostRoot, what WithRoot builds), an in-memory tree (NewMemFS), a
+	// union, a read-only or hardened wrapper, a network-backed or custom backend.
+	// Without it the guest has no filesystem and the program path is a host path.
+	// The root is always a FileSystem, so the sandbox takes no host path for it;
+	// the parts that still need a real host directory (a host image's writable
+	// upper, the darwin exec resolver) recover it from a HostRoot with HostRootPath.
+	RootFS vfs.FileSystem
 	// Dir is the guest's initial working directory ("/" if empty).
 	Dir string
-	// Upper, if set with Root, is a writable overlay layer kept after the run
+	// Upper, if set with a host-directory RootFS, is a writable overlay layer kept after the run
 	// instead of an ephemeral one: every change the guest makes to the
 	// read-only Root lands here (new and modified files, and whiteouts for
 	// deletions), so it is the filesystem diff of the run. An image builder

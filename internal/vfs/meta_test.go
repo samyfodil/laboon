@@ -15,7 +15,7 @@ func TestMetaCodec(t *testing.T) {
 		"nothing":              {}, // no flags set -> omitted
 	}
 	got := map[string]Override{}
-	decodeMeta(encodeMeta(in), func(p string, o Override) { got[p] = o })
+	DecodeMeta(EncodeMeta(in), func(p string, o Override) { got[p] = o })
 
 	if _, ok := got["nothing"]; ok {
 		t.Error("empty override should be omitted")
@@ -36,8 +36,8 @@ func TestMetaCodec(t *testing.T) {
 	}
 
 	// A truncated stream must not panic.
-	full := encodeMeta(in)
+	full := EncodeMeta(in)
 	for i := 0; i < len(full); i++ {
-		decodeMeta(full[:i], func(string, Override) {})
+		DecodeMeta(full[:i], func(string, Override) {})
 	}
 }

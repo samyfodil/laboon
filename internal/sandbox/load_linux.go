@@ -113,7 +113,7 @@ func statIdentity(st *unix.Stat_t) rewrite.FileID {
 // identity returns the identity of the file code was mapped from, if any.
 func (src *codeSource) identity() (rewrite.FileID, bool) {
 	var st unix.Stat_t
-	if src == nil || unix.Fstat(int(src.f.Fd()), &st) != nil {
+	if src == nil || src.f == nil || unix.Fstat(int(src.f.Fd()), &st) != nil {
 		return rewrite.FileID{}, false
 	}
 	return statIdentity(&st), true
@@ -446,7 +446,7 @@ func (g *dguest) mapSegments(img *image) (err error) {
 	}()
 	sfd := -1
 	if e := lxErrno(0); len(img.segs) > 0 {
-		if sfd, e = g.passFd(img.file.f); e != 0 {
+		if sfd, e = g.passFd(hostFd(img.file.f)); e != 0 {
 			sfd = -1
 		}
 	}

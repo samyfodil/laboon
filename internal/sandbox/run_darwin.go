@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/samyfodil/laboon/internal/rewrite"
+	"github.com/samyfodil/laboon/internal/vfs"
 	macstub "github.com/samyfodil/laboon/stub/macos"
 )
 
@@ -74,14 +76,20 @@ func (g *dguest) rewriteLibSites(base, length, offset uint64, d *dfile) {
 // file offset, which a linker may put at another distance from the image
 // start than its vaddr (lld's separate code segments, for one).
 func libSites(cache *rewrite.Cache, length, offset uint64, d *dfile) []uint64 {
-	if d.f == nil {
+	// A non-host file has no host fd; its content is in the materialized mapf
+	// (mmapFd) the stub mapped, so read the ELF from whichever backs the mapping.
+	ef := d.f
+	if ef == nil {
+		ef = d.mapf
+	}
+	if ef == nil {
 		return nil
 	}
-	sites, err := computeSitesFile(cache, d.f)
+	sites, err := computeSitesFile(cache, ef)
 	if err != nil {
 		return nil // not an ELF (or unreadable): nothing to rewrite
 	}
-	f, err := elf.NewFile(d.f)
+	f, err := elf.NewFile(ef)
 	if err != nil {
 		return nil
 	}
@@ -139,21 +147,36 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 		cfg.Env = []string{} // a nil env is empty, never the supervisor's own
 	}
 
-	// Resolve the guest program's host path. With Root set, it is looked up
-	// inside the rootfs; otherwise it is a host path. The stubs' Seatbelt
-	// profile admits resolved paths only, so the root's symlinks go first.
-	if cfg.Root != "" {
-		abs, err := filepath.Abs(cfg.Root)
+	// A temp dir for this run's spills and channel, created before the program is
+	// resolved so a non-host root can spill into it.
+	rtmp, err := newRunTmp()
+	if err != nil {
+		return 0, err
+	}
+	defer os.RemoveAll(rtmp)
+
+	// Resolve the guest program to a host path the stub can map. A host-directory
+	// root maps its real files (symlinks resolved first, as the Seatbelt profile
+	// admits only resolved paths); a non-host root (in-memory, custom, network) is
+	// read through its FileSystem and spilled into rtmp, so any backend is
+	// executable without the stub touching a guest path.
+	rootPath, isHost := HostRootPath(cfg.RootFS)
+	if isHost && rootPath != "" {
+		abs, err := filepath.Abs(rootPath)
 		if err != nil {
 			return 0, err
 		}
-		if cfg.Root, err = filepath.EvalSymlinks(abs); err != nil {
+		if rootPath, err = filepath.EvalSymlinks(abs); err != nil {
 			return 0, fmt.Errorf("laboon: root: %w", err)
 		}
 	}
+	res := &progResolver{root: rootPath, tmp: rtmp}
+	if !isHost && cfg.RootFS != nil {
+		res.ns = vfs.NewNamespace(cfg.RootFS) // a non-host root: resolve + spill through the FS
+	}
 	gp := path
-	guestPath := guestToHost(cfg.Root, gp)
-	if _, err := os.Stat(guestPath); err != nil {
+	guestPath, err := res.host(gp)
+	if err != nil {
 		return 0, fmt.Errorf("laboon: guest program: %w", err)
 	}
 	// Follow a #! script chain to its interpreter before the ELF load, as
@@ -189,8 +212,8 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 		}
 		cfg.Args = append(append(np, gp), rest...)
 		gp = interp
-		guestPath = guestToHost(cfg.Root, interp)
-		if _, err := os.Stat(guestPath); err != nil {
+		guestPath, err = res.host(interp)
+		if err != nil {
 			return 0, fmt.Errorf("laboon: #! interpreter %s: %w", interp, err)
 		}
 	}
@@ -198,7 +221,7 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	// A dynamically-linked guest names its interpreter in PT_INTERP (e.g.
 	// /lib/ld-musl-aarch64.so.1). Resolve it to a host path within the rootfs
 	// so the stub can load it as a second image; "" means a static executable.
-	interpHost, err := resolveInterp(guestPath, cfg.Root)
+	interpHost, err := resolveInterp(guestPath, res.host)
 	if err != nil {
 		return 0, err
 	}
@@ -210,11 +233,6 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("laboon: analyze guest: %w", err)
 	}
-	rtmp, err := newRunTmp()
-	if err != nil {
-		return 0, err
-	}
-	defer os.RemoveAll(rtmp)
 	mainSitesPath, cleanMain, err := writeSites(rtmp, mainSites)
 	if err != nil {
 		return 0, err
@@ -242,7 +260,7 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	defer os.Remove(chanFile.Name())
 	defer os.Remove(chanFile.Name() + ".sb") // the stubs' compiled Seatbelt profile
 	defer chanFile.Close()
-	if err := writeSeatbeltPaths(chanFile.Name(), cfg.Root); err != nil {
+	if err := writeSeatbeltPaths(chanFile.Name(), rootPath); err != nil {
 		return 0, err
 	}
 	defer os.Remove(chanFile.Name() + ".paths")
@@ -340,7 +358,7 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 
 	// The shared run state (filesystem + process table) outlives any one guest
 	// process, so serve does not own it. Every forked child references it.
-	fs, err := newDfs(cfg.Root, cfg.Upper, mem, done, rtmp)
+	fs, err := newDfs(cfg.RootFS, cfg.Upper, mem, done, rtmp)
 	if err != nil {
 		return 0, err
 	}
@@ -354,7 +372,7 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	// matching Linux. uutils coreutils (Ubuntu's env/sh) refuses to run when the
 	// invoked utility and the exe disagree, so this must be the interpreter.
 	exe := gp
-	if cfg.Root != "" {
+	if rootPath != "" {
 		exe = filepath.Clean("/" + gp)
 	}
 	fs.initProcfs(cmd.Process.Pid, exe, guestArgv, cfg.Env, std.files)
@@ -917,10 +935,55 @@ func headBytes(p string, n int) ([]byte, error) {
 	return b[:m], nil
 }
 
-// resolveInterp reads the guest ELF's PT_INTERP and maps the interpreter's
-// guest path to a host path inside root (the same rooted-clean+join used for
-// the program path). It returns "" for a static executable.
-func resolveInterp(elfPath, root string) (string, error) {
+// progResolver maps a guest program or interpreter path to a host path the stub
+// can map. A host-directory root (ns nil) maps its real files under root; a
+// non-host root (ns set) resolves the path through its FileSystem and, when the
+// file is not already host-backed, spills its content — read through the vfs.File,
+// never the host — into a private temp dir (tmp) the stub maps and the Seatbelt
+// profile already grants. The guest never supplies a host path either way.
+type progResolver struct {
+	root string
+	tmp  string
+	ns   *vfs.Namespace
+}
+
+func (r *progResolver) host(gp string) (string, error) {
+	if r.ns == nil {
+		hp := guestToHost(r.root, gp)
+		if _, err := os.Stat(hp); err != nil {
+			return "", err
+		}
+		return hp, nil
+	}
+	loc, err := r.ns.Resolve(gp, true)
+	if err != nil {
+		return "", err
+	}
+	f, err := loc.Node.Open(os.O_RDONLY)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if of, ok := f.(*os.File); ok {
+		return of.Name(), nil // a host-backed file: map it directly, no spill
+	}
+	tf, err := os.CreateTemp(r.tmp, "lc-prog-")
+	if err != nil {
+		return "", err
+	}
+	defer tf.Close()
+	if _, err := io.Copy(tf, io.NewSectionReader(f, 0, 1<<62)); err != nil {
+		os.Remove(tf.Name())
+		return "", err
+	}
+	return tf.Name(), nil
+}
+
+// resolveInterp reads the guest ELF's PT_INTERP and maps the interpreter's guest
+// path to a host path through hostOf (the same resolution as the program path,
+// so a non-host root's dynamic linker is spilled too). It returns "" for a
+// static executable.
+func resolveInterp(elfPath string, hostOf func(string) (string, error)) (string, error) {
 	f, err := elf.Open(elfPath)
 	if err != nil {
 		return "", fmt.Errorf("laboon: read guest ELF: %w", err)
@@ -942,16 +1005,8 @@ func resolveInterp(elfPath, root string) (string, error) {
 	if interp == "" {
 		return "", nil // static executable
 	}
-
-	host := interp
-	if root != "" {
-		rel := strings.TrimPrefix(filepath.Clean("/"+interp), "/")
-		host = filepath.Join(root, rel)
-	}
-	if abs, err := filepath.Abs(host); err == nil {
-		host = abs
-	}
-	if _, err := os.Stat(host); err != nil {
+	host, err := hostOf(interp)
+	if err != nil {
 		return "", fmt.Errorf("laboon: dynamic linker %q: %w", interp, err)
 	}
 	return host, nil

@@ -21,7 +21,7 @@ const (
 	metaSpecial = 1 << 2
 )
 
-func encodeMeta(m map[string]*Override) []byte {
+func EncodeMeta(m map[string]*Override) []byte {
 	var b []byte
 	var tmp [binary.MaxVarintLen64]byte
 	putU := func(v uint64) { b = append(b, tmp[:binary.PutUvarint(tmp[:], v)]...) }
@@ -60,10 +60,10 @@ func encodeMeta(m map[string]*Override) []byte {
 	return b
 }
 
-// decodeMeta parses the record stream, calling visit for each path. A truncated
+// DecodeMeta parses the record stream, calling visit for each path. A truncated
 // or malformed stream stops parsing without panicking (the sidecar is internal,
 // but a half-written file should not crash a reader).
-func decodeMeta(b []byte, visit func(path string, o Override)) {
+func DecodeMeta(b []byte, visit func(path string, o Override)) {
 	take := func() (uint64, bool) {
 		v, n := binary.Uvarint(b)
 		if n <= 0 {

@@ -17,9 +17,9 @@ func FileID(fi os.FileInfo) (id uint64, nlink uint64, ok bool) {
 	return st.Ino, uint64(st.Nlink), true
 }
 
-// statID returns a file's full {device, inode} identity, the key an inode-keyed
+// StatID returns a file's full {device, inode} identity, the key an inode-keyed
 // metadata table uses (two hardlinks share it; it survives a rename).
-func statID(fi os.FileInfo) (NodeID, bool) {
+func StatID(fi os.FileInfo) (NodeID, bool) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
 		return NodeID{}, false

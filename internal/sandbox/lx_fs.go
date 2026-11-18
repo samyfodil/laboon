@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
 // Confined filesystem for the macOS backend. The supervisor owns the fd table
@@ -32,11 +33,12 @@ import (
 // its status. The one mutex guards all of it — both are low-frequency.
 type dfs struct {
 	hostFS
-	rootAbs   string // cleaned absolute Config.Root (lower layer), "" if none
-	upperAbs  string // ephemeral writable upper dir, "" if no root
-	workAbs   string // private dir beside the upper layer for staging host objects
-	keepUpper bool   // upperAbs is the caller's, kept after the run
-	tmpDir    string // the run's temp directory (newRunTmp)
+	rootFS    vfs.FileSystem // Config.RootFS: the guest root as a backend, "" rootAbs — any FileSystem, no host path behind it
+	rootAbs   string         // cleaned absolute Config.Root (lower layer), "" if none
+	upperAbs  string         // ephemeral writable upper dir, "" if no root
+	workAbs   string         // private dir beside the upper layer for staging host objects
+	keepUpper bool           // upperAbs is the caller's, kept after the run
+	tmpDir    string         // the run's temp directory (newRunTmp)
 
 	mem  []byte          // shared channel region, inherited across the stub's forks
 	done <-chan struct{} // the main stub died
@@ -74,7 +76,7 @@ type dfs struct {
 	run       *runInfo // what starting another stub process needs
 	tmp       []string // temp files to delete at end of run (exec sites)
 
-	top     *vfs.Layer     // the writable upper layer: the durable metadata sidecar and whiteout markers (the overlay backend does the copy-up)
+	top     *hostfs.Layer  // the writable upper layer: the durable metadata sidecar and whiteout markers (the overlay backend does the copy-up)
 	ns      *vfs.Namespace // the shared overlay view (no pseudo mounts); a guest uses its own g.ns built from fs.overlay
 	overlay vfs.FileSystem // the overlay backend both ns and each guest's g.ns mount on /
 
@@ -104,9 +106,11 @@ type dproc struct {
 	ps     *pstate // the process (thread group) this pid belongs to
 }
 
-// newDfs sets up the overlay on root. upper, when set, is a writable layer
-// kept after the run; otherwise a fresh one is made under tmp and removed.
-func newDfs(root, upper string, mem []byte, done <-chan struct{}, tmp string) (*dfs, error) {
+// newDfs sets up the guest root, a vfs.FileSystem. A host-directory root
+// (HostRoot) runs through the confined host-overlay machinery with a writable
+// upper (upper kept after the run if set, else a fresh one under tmp); any other
+// backend (in-memory, custom) is used as the root directly, with no host path.
+func newDfs(rootFS vfs.FileSystem, upper string, mem []byte, done <-chan struct{}, tmp string) (*dfs, error) {
 	fs := &dfs{
 		mem: mem, done: done, tmpDir: tmp,
 		usedSlots: make([]bool, maxSlots),
@@ -120,17 +124,45 @@ func newDfs(root, upper string, mem []byte, done <-chan struct{}, tmp string) (*
 	fs.cond = sync.NewCond(&fs.mu)
 	fs.ov.store = vfs.NewMetaStore() // inode-keyed guest metadata, shared with the overlay backend
 	fs.usedSlots[0] = true           // slot 0 is the main process
+	// A host-directory root is a host path behind the FileSystem: it runs the
+	// confined host-overlay path below, not the generic-backend path.
+	root, isHost := HostRootPath(rootFS)
+	if isHost {
+		rootFS = nil
+	}
+	if rootFS != nil {
+		// The root is a FileSystem the embedder composed (WithRootFS / WithFS "/"):
+		// the vfs layer touches no host path for it. hostFS stays empty — the host is
+		// reached only through a backend (a writable upper or a bind), never the root.
+		fs.rootFS = rootFS
+		fs.hostFS = newHostFS("", "", "")
+		fs.buildNS()
+		return fs, nil
+	}
 	if root == "" {
 		fs.hostFS = newHostFS("", "", "")
 		fs.buildNS()
 		return fs, nil
 	}
-	abs, err := filepath.Abs(root)
-	if err != nil {
+	if err := fs.mountHostImage(root, upper); err != nil {
 		return nil, err
 	}
+	return fs, nil
+}
+
+// mountHostImage sets up a host-directory image as the guest root: the read-only
+// image as the overlay's lower layer, a writable upper (kept if upper is given,
+// else an ephemeral one under the run's temp dir), their shared metadata store,
+// and the image's owner/mode sidecar hydrated into it. It is the host-storage
+// setup the run-root uses; the generic fs routing (newDfs) only invokes it, so
+// the host paths and host I/O for the root live here, not in the routing layer.
+func (fs *dfs) mountHostImage(root, upper string) error {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
 	if abs, err = filepath.EvalSymlinks(abs); err != nil {
-		return nil, err
+		return err
 	}
 	fs.rootAbs = abs
 	dirs := []*string{&fs.upperAbs, &fs.workAbs}
@@ -139,39 +171,39 @@ func newDfs(root, upper string, mem []byte, done <-chan struct{}, tmp string) (*
 			fs.upperAbs, err = filepath.EvalSymlinks(fs.upperAbs)
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
 		fs.keepUpper = true
 		dirs = dirs[1:]
 	}
 	for _, d := range dirs {
-		t, err := os.MkdirTemp(tmp, "lc-upper-")
+		t, err := os.MkdirTemp(fs.tmpDir, "lc-upper-")
 		if err != nil {
 			fs.close()
-			return nil, err
+			return err
 		}
 		if *d, err = filepath.EvalSymlinks(t); err != nil {
 			os.RemoveAll(t)
 			fs.close()
-			return nil, err
+			return err
 		}
 	}
 	fs.hostFS = newHostFS(fs.rootAbs, fs.upperAbs, fs.workAbs)
-	// The writable upper as a vfs.Layer: it owns the on-disk metadata sidecar
+	// The writable upper as a hostfs.Layer: it owns the on-disk metadata sidecar
 	// (the durable record of the guest owner/mode/special-kind a host file cannot
 	// hold) and the whiteout markers. The overlay backend does the copy-up; this
 	// layer persists and reads back what outlives the run on a kept upper.
-	top, err := vfs.NewLayer(fs.upperAbs)
+	top, err := hostfs.NewLayer(fs.upperAbs)
 	if err != nil {
 		fs.close()
-		return nil, err
+		return err
 	}
 	fs.top = top
 	fs.buildNS()
 	// A lower carries a sidecar of the non-root owners and special mode bits its
 	// host files cannot hold; hydrate the inode table so the guest sees them. A
 	// plain rootfs has no sidecar, so this is a no-op for an ordinary run.
-	for p, o := range vfs.LoadOverrides(fs.rootAbs) {
+	for p, o := range hostfs.LoadOverrides(fs.rootAbs) {
 		if fi, err := os.Lstat(filepath.Join(fs.rootAbs, filepath.FromSlash(p))); err == nil {
 			ov := o
 			fs.ov.update(inodeKey(fi), func(m *imeta) {
@@ -184,28 +216,47 @@ func newDfs(root, upper string, mem []byte, done <-chan struct{}, tmp string) (*
 			})
 		}
 	}
-	return fs, nil
+	return nil
 }
 
 // overlayLayerHost returns the host directory backing a guest path named as a
-// layer of a guest-issued overlay mount. A container runtime extracts its layers
-// into the writable upper, so such a path resolves under upperAbs; without an
-// upper (the whole host mounted as /) it is a host path under rootAbs. The result
-// is read raw (newHostDirFS), so the layer's own files are seen directly rather
-// than through laboon's outer overlay.
-func (fs *dfs) overlayLayerHost(gp string) string {
-	h := filepath.Join(fs.rootAbs, filepath.FromSlash(gp))
+// layer of a guest-issued overlay mount, confined to the backing tree. A
+// container runtime extracts its layers into the writable upper, so such a path
+// resolves under upperAbs; without an upper (the whole host mounted as /) it is a
+// host path under rootAbs. The result is read raw (newHostDirFS), so the layer's
+// own files are seen directly rather than through laboon's outer overlay. ok is
+// false when the layer resolves outside the backing tree: a guest with
+// CAP_SYS_ADMIN could otherwise name a layer with ".." or a symlink to a host
+// path and have that mounted raw, escaping the sandbox root.
+func (fs *dfs) overlayLayerHost(gp string) (string, bool) {
+	base := fs.rootAbs
 	if fs.upperAbs != "" {
-		h = filepath.Join(fs.upperAbs, filepath.FromSlash(gp))
+		base = fs.upperAbs
 	}
+	h := filepath.Join(base, filepath.FromSlash(gp))
 	// A layer root must be fully symlink-resolved (as rootAbs/upperAbs are): a
 	// runtime names its lower layers through short symlinks (podman's overlay/l/*
 	// -> the real diff dir), and the confined backend will not follow a symlink
-	// standing in for a layer root.
+	// standing in for a layer root. The resolved root must still lie within the
+	// backing tree, or the layer is an escape and is refused.
 	if r, err := filepath.EvalSymlinks(h); err == nil {
 		h = r
 	}
-	return h
+	if !withinDir(base, h) {
+		return "", false
+	}
+	return h, true
+}
+
+// withinDir reports whether the clean absolute path p is dir or lies beneath it.
+// An empty dir is the rootless passthrough (the whole host is the tree), so
+// nothing is outside it.
+func withinDir(dir, p string) bool {
+	if dir == "" {
+		return true
+	}
+	dir, p = filepath.Clean(dir), filepath.Clean(p)
+	return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
 }
 
 // buildNS composes the guest's filesystem as a vfs Namespace: the overlay union
@@ -223,9 +274,22 @@ func (fs *dfs) buildNS() {
 	// as the writable upper (routed by path prefix), so the Namespace sees the
 	// same invalidation the live writes trigger — one cache, not a second that
 	// would go stale against the running overlay.
-	if fs.rootAbs == "" {
+	switch {
+	case fs.rootFS != nil:
+		// The root is a backend the embedder supplied, with no host path behind it:
+		// used as the root as given (a writable backend, e.g. memFS, catches writes;
+		// a read-only one makes the root read-only). A configured writable upper still
+		// unions a copy-up layer on top, exactly as for a host-path lower.
+		if fs.upperAbs == "" {
+			fs.overlay = fs.rootFS
+		} else {
+			up := newHostDirFS(fs.upperAbs, fs.hostFS)
+			up.confine = true
+			fs.overlay = vfs.NewOverlayFSWithMeta(fs.ov.store, fs.rootFS, up)
+		}
+	case fs.rootAbs == "":
 		fs.overlay = newHostDirFS("/", fs.hostFS)
-	} else {
+	default:
 		layers := []vfs.FileSystem{newHostDirFS(fs.rootAbs, fs.hostFS)}
 		if fs.upperAbs != "" {
 			up := newHostDirFS(fs.upperAbs, fs.hostFS)
@@ -617,8 +681,12 @@ func (g *dguest) rbufOf(n int) []byte {
 // own host fd of that number, which the stub serves itself on the fast path.
 type dfile struct {
 	f       *os.File
-	rf      regFile // a regular file's content, whatever filesystem backs it (host, mem, synth); the file handlers dispatch through it
-	gp      string  // guest path (resolved, rooted), for relative lookups
+	vf      vfs.File   // a non-host regular file's backing (in-memory, user-defined); nil for host and non-regular fds
+	vn      vfs.Node   // its node, for fstat and SEEK_END
+	fpos    int64      // its file offset (laboon owns it; the backing has only ReadAt/WriteAt)
+	fmu     sync.Mutex // serializes fpos across concurrent read/write on a shared description
+	mapf    *os.File   // darwin: an unlinked temp file holding a non-host file's content for the stub to map; nil until first mmap
+	gp      string     // guest path (resolved, rooted), for relative lookups
 	isDir   bool
 	stub    int        // the stub's host stdio fd this description is, or -1
 	tty     bool       // a host terminal
@@ -1276,7 +1344,7 @@ func (g *dguest) writeReg(d *dfile, bufAddr uint64, n int64) int64 {
 			}
 			break
 		}
-		m, err := d.rf.write(b)
+		m, err := d.vfWrite(b)
 		total += int64(m)
 		if err != nil {
 			if total == 0 {
@@ -1295,7 +1363,7 @@ func (g *dguest) writeReg(d *dfile, bufAddr uint64, n int64) int64 {
 func (g *dguest) writeFile(fd int64, bufAddr uint64, n int64) int64 {
 	d, e := g.file(fd)
 	if e != 0 {
-		if d2, ok := g.ft.get(int(fd)); ok && d2.rf != nil {
+		if d2, ok := g.ft.get(int(fd)); ok && d2.vf != nil {
 			if n < 0 {
 				return sErr(lxEINVAL)
 			}
@@ -1432,7 +1500,7 @@ func (g *dguest) gatherPrefix(v [][2]uint64, off int, buf []byte) int {
 func (g *dguest) read(fd int64, bufAddr uint64, n int64) int64 {
 	d, e := g.file(fd)
 	if e != 0 {
-		if d2, ok := g.ft.get(int(fd)); ok && d2.rf != nil {
+		if d2, ok := g.ft.get(int(fd)); ok && d2.vf != nil {
 			if n < 0 {
 				return sErr(lxEINVAL)
 			}
@@ -1557,10 +1625,10 @@ func (g *dguest) readFull(d *dfile, bufAddr uint64, n, off int64) int64 {
 		var m int
 		var err error
 		switch {
-		case d.rf != nil && off < 0:
-			m, err = d.rf.read(b) // a regular file: positional read through its backing
-		case d.rf != nil:
-			m, err = d.rf.readAt(b, off+total)
+		case d.vf != nil && off < 0:
+			m, err = d.vfRead(b) // a regular file: positional read through its backing
+		case d.vf != nil:
+			m, err = d.vfReadAt(b, off+total)
 		case off < 0:
 			m, err = d.f.Read(b)
 		default:
@@ -1679,8 +1747,8 @@ func (g *dguest) lseek(fd, off, whence int64) int64 {
 	if !ok || d.fx.opath {
 		return sErr(lxEBADF)
 	}
-	if d.rf != nil { // a regular file, whatever backs it
-		r, err := d.rf.seek(off, int(whence))
+	if d.vf != nil { // a regular file, whatever backs it
+		r, err := d.vfSeek(off, int(whence))
 		if err != nil {
 			return sErr(osErrno(err))
 		}
@@ -1971,10 +2039,10 @@ func (g *dguest) fdStatOf(d *dfile) (lxStat, lxErrno) {
 	if d.fx.opath {
 		return g.statGuest(d.name())
 	}
-	if d.rf != nil { // a regular file, whatever backs it
-		return d.rf.fstat(g, d)
+	if d.vf != nil { // a regular file, whatever backs it
+		return g.vfFstat(d)
 	}
-	if d.mem != nil && d.mem.vn != nil { // a memFS directory placeholder, or memFS not yet on regFile
+	if d.mem != nil && d.mem.vn != nil { // a non-host directory placeholder (its regular files go through d.vf)
 		a, err := d.mem.vn.Stat()
 		if err != nil {
 			return lxStat{}, osErrno(err)
@@ -2131,9 +2199,6 @@ func (g *dguest) statGuest(gp string) (lxStat, lxErrno) {
 	}
 	id := loc.Node.ID()
 	s := nodeStat(a, id)
-	// ovNode.Stat applies overrides only for the top layer, so re-apply a lower
-	// file's owner and special mode bits (a base image's non-root owner, a setuid
-	// or sticky bit from the sidecar) the guest must still see.
 	if m, ok := g.ov.get(ikey{id.Dev, id.Ino}); ok {
 		if m.hasOwner {
 			s.uid, s.gid = m.uid, m.gid

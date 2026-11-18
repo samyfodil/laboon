@@ -86,7 +86,7 @@ func TestRunDynamic(t *testing.T) {
 		Args:   []string{"hello", "dyn"},
 		Stdout: &stdout,
 		Stderr: &stdout,
-		Root:   "/",
+		RootFS: HostRoot("/"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestRootIsReadOnly(t *testing.T) {
 		Args:   []string{"touch", p},
 		Stdout: &stderr,
 		Stderr: &stderr,
-		Root:   "/",
+		RootFS: HostRoot("/"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestKillWhileMapping(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"killmmap"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"killmmap"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || o.String() != "wrong files 0\n" {
 		t.Fatalf("code = %d, err = %v, out = %q", code, err, o.String())
 	}
@@ -258,7 +258,7 @@ func TestKillWhileWaiting(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"killwait"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"killwait"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "killwait: 0 failures") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -274,7 +274,7 @@ func TestThreadExec(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{out}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{out}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "ALL OK") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -295,7 +295,7 @@ func TestKickRace(t *testing.T) {
 			t.Fatal(err)
 		}
 		var o bytes.Buffer
-		code, err := Run(context.Background(), out, Config{Args: []string{"kickrace", "20000", mode}, Stdin: r, Stdout: &o, Stderr: &o, Root: "/"})
+		code, err := Run(context.Background(), out, Config{Args: []string{"kickrace", "20000", mode}, Stdin: r, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 		r.Close()
 		w.Close()
 		if err != nil || code != 0 || !strings.Contains(o.String(), "kickrace: 20000 signals ok") {
@@ -312,7 +312,7 @@ func TestSigSyscall(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"sigsyscall", "20000"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"sigsyscall", "20000"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "sigsyscall: 20000 signals ok") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -329,7 +329,7 @@ func TestASLR(t *testing.T) {
 			t.Skipf("static gcc unavailable: %v\n%s", err, b)
 		}
 		var o bytes.Buffer
-		code, err := Run(context.Background(), out, Config{Args: []string{"aslr"}, Stdout: &o, Stderr: &o, Root: "/"})
+		code, err := Run(context.Background(), out, Config{Args: []string{"aslr"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 		if err != nil || code != 0 || !strings.Contains(o.String(), "aslr fails=0") {
 			t.Fatalf("%v: code = %d, err = %v, out:\n%s", mode, code, err, o.String())
 		}
@@ -344,7 +344,7 @@ func TestEpollClose(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"epollclose"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"epollclose"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "epollclose fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -359,7 +359,7 @@ func TestRseq(t *testing.T) {
 		t.Skipf("static gcc with sys/rseq.h unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"rseq"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"rseq"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "rseq fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -373,7 +373,7 @@ func TestVdso(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"vdso"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"vdso"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "vdso fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -388,7 +388,7 @@ func TestArgFault(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"argfault"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"argfault"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "argfault fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -404,7 +404,7 @@ func TestNetlinkDump(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"nldump"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"nldump"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "nldump fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -419,7 +419,7 @@ func TestVforkShare(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"vforkshare"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"vforkshare"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "vforkshare fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -452,7 +452,7 @@ func TestOwnLoopback(t *testing.T) {
 	go func() {
 		defer close(done)
 		args := []string{"vlo", port, strconv.Itoa(svc.Addr().(*net.TCPAddr).Port)}
-		code, runErr = Run(context.Background(), bin, Config{Args: args, Stdout: pw, Stderr: pw, Root: "/", Net: true})
+		code, runErr = Run(context.Background(), bin, Config{Args: args, Stdout: pw, Stderr: pw, RootFS: HostRoot("/"), Net: true})
 		pw.Close()
 	}()
 	var out strings.Builder
@@ -485,7 +485,7 @@ func TestProcSmaps(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var out bytes.Buffer
-	code, err := Run(context.Background(), bin, Config{Args: []string{"smaps"}, Stdout: &out, Stderr: &out, Root: "/"})
+	code, err := Run(context.Background(), bin, Config{Args: []string{"smaps"}, Stdout: &out, Stderr: &out, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(out.String(), "smaps fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, out.String())
 	}
@@ -510,7 +510,7 @@ func TestVnetSockets(t *testing.T) {
 		}
 		for _, network := range c.nets {
 			var out bytes.Buffer
-			code, err := Run(context.Background(), bin, Config{Args: []string{c.prog}, Stdout: &out, Stderr: &out, Root: "/", Net: network})
+			code, err := Run(context.Background(), bin, Config{Args: []string{c.prog}, Stdout: &out, Stderr: &out, RootFS: HostRoot("/"), Net: network})
 			if err != nil || code != 0 || !strings.Contains(out.String(), c.prog+" fails=0") {
 				t.Errorf("%s net=%v: code = %d, err = %v, out:\n%s", c.prog, network, code, err, out.String())
 			}
@@ -526,7 +526,7 @@ func TestJitSys(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"jitsys"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"jitsys"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "jitsys fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -541,7 +541,7 @@ func TestSharedExec(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"sharedexec"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"sharedexec"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "sharedexec fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -557,7 +557,7 @@ func TestSelfStore(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"selfstore"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"selfstore"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "selfstore fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -573,7 +573,7 @@ func TestCrossExec(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"crossexec"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"crossexec"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "crossexec fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -587,7 +587,7 @@ func TestWritevAtomic(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"writevatomic"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"writevatomic"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "writevatomic fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -603,7 +603,7 @@ func TestMmapPlace(t *testing.T) {
 	vmaValidate = true
 	defer func() { vmaValidate = false }()
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"mmapplace"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"mmapplace"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 || !strings.Contains(o.String(), "mmapplace fails=0") {
 		t.Fatalf("code = %d, err = %v, out:\n%s", code, err, o.String())
 	}
@@ -661,7 +661,7 @@ func TestExecve(t *testing.T) {
 	}
 	var o bytes.Buffer
 	code, err := Run(context.Background(), out, Config{
-		Args: []string{"execer"}, Stdout: &o, Stderr: &o, Root: "/",
+		Args: []string{"execer"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/"),
 	})
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v out=%q", code, err, o.String())
@@ -695,7 +695,7 @@ func TestForkExec(t *testing.T) {
 		t.Skip("/bin/busybox not present")
 	}
 	var o bytes.Buffer
-	code, err := Run(context.Background(), out, Config{Args: []string{"fe"}, Stdout: &o, Stderr: &o, Root: "/"})
+	code, err := Run(context.Background(), out, Config{Args: []string{"fe"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v out=%q", code, err, o.String())
 	}
@@ -1021,7 +1021,7 @@ func TestWritableOverlayAndDevices(t *testing.T) {
 	code, err := Run(context.Background(), "/bin/busybox", Config{
 		Args: []string{"sh", "-c",
 			"echo hi > /tmp/f && cat /tmp/f && echo x > /dev/null && echo devok && head -c 3 /dev/zero | wc -c"},
-		Env: []string{"PATH=/bin:/usr/bin"}, Stdout: &o, Stderr: &o, Root: "/",
+		Env: []string{"PATH=/bin:/usr/bin"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/"),
 	})
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v out=%q", code, err, o.String())
@@ -1045,7 +1045,7 @@ func TestGoProgram(t *testing.T) {
 			t.Skipf("go build unavailable: %v\n%s", err, b)
 		}
 		var o bytes.Buffer
-		code, err := Run(context.Background(), out, Config{Args: []string{"gothreads"}, Stdout: &o, Stderr: &o, Root: "/"})
+		code, err := Run(context.Background(), out, Config{Args: []string{"gothreads"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
 		if err != nil || code != 0 || !strings.Contains(o.String(), "go ok true") {
 			t.Fatalf("%s: code=%d err=%v out=%q", mode, code, err, o.String())
 		}

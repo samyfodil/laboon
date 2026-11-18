@@ -33,11 +33,17 @@ const (
 // mapFile returns the open file a file mapping of guest fd reads.
 func (g *wguest) mapFile(dg *dguest, fd uint64) (*dfile, lxErrno) {
 	d, ok := dg.ft.get(int(fd))
-	if !ok || d.f == nil || d.fx.opath {
+	if !ok || d.fx.opath {
 		return nil, lxEBADF
 	}
 	if d.fx.hasFlags && d.fx.oflags&lxOAccmod == lxOWronly {
 		return nil, lxEACCES
+	}
+	if d.vf != nil { // a non-host regular file (in-memory, user-defined, network)
+		return d, 0
+	}
+	if d.f == nil {
+		return nil, lxEBADF
 	}
 	if d.isDir || d.pipe != nil || !d.isRegular() {
 		return nil, lxENODEV
@@ -52,7 +58,7 @@ func (g *wguest) mapFill(dg *dguest, fd, off, n, addr uint64) int64 {
 	}
 	buf := make([]byte, min(n, 1<<20))
 	for done := uint64(0); done < n; {
-		k, err := d.f.ReadAt(buf[:min(uint64(len(buf)), n-done)], int64(off+done))
+		k, err := d.readAt(buf[:min(uint64(len(buf)), n-done)], int64(off+done))
 		if k > 0 {
 			if g.sp.writeMem(addr+done, buf[:k]) != nil {
 				return sErr(lxEFAULT)
@@ -87,40 +93,55 @@ func (g *wguest) mapSection(dg *dguest, fd, off, n, prot uint64) int64 {
 		if e != 0 {
 			return sErr(e)
 		}
-		page := uint32(windows.PAGE_READONLY)
-		if prot&lxProtWrite != 0 {
-			if !d.writable() {
-				return sErr(lxEACCES)
+		if d.vf != nil {
+			// A non-host file (in-memory, user-defined, network): materialize its
+			// range into an anonymous section the supervisor fills, so the guest
+			// maps that, not a real file. An executable mapping is rewritten
+			// elsewhere, so refuse it here.
+			if prot&lxProtExec != 0 {
+				return sErr(lxENODEV)
 			}
-			page = windows.PAGE_READWRITE
-		}
-		// The section reaches only as far into the file as the view does:
-		// one spanning the whole of a large sparse file is beyond the kernel
-		// (.NET maps slices of a 2 TiB memfd), and one longer than the file
-		// would grow it.
-		var fi windows.ByHandleFileInformation
-		if err = windows.GetFileInformationByHandle(windows.Handle(d.f.Fd()), &fi); err != nil {
-			return sErr(osErrno(err))
-		}
-		end := min(off+n, uint64(fi.FileSizeHigh)<<32|uint64(fi.FileSizeLow))
-		sec, err = windows.CreateFileMapping(windows.Handle(d.f.Fd()), nil, page, uint32(end>>32), uint32(end), nil)
-		if err == windows.ERROR_FILE_INVALID { // an empty file
-			dg.ch.page.args[0], dg.ch.page.args[1] = 0, 0
-			return 0
-		}
-		if err == nil {
-			if size, err = sectionSize(sec); err == nil && size <= off {
-				windows.CloseHandle(sec)
-				dg.ch.page.args[0], dg.ch.page.args[1] = 0, size
+			end := off + n
+			if sec, err = windows.CreateFileMapping(windows.InvalidHandle, nil, windows.PAGE_READWRITE, uint32(end>>32), uint32(end), nil); err == nil {
+				err = g.fillSection(sec, d, off, n)
+			}
+			key, size = sectionKeys.Add(1), end
+		} else {
+			page := uint32(windows.PAGE_READONLY)
+			if prot&lxProtWrite != 0 {
+				if !d.writable() {
+					return sErr(lxEACCES)
+				}
+				page = windows.PAGE_READWRITE
+			}
+			// The section reaches only as far into the file as the view does:
+			// one spanning the whole of a large sparse file is beyond the kernel
+			// (.NET maps slices of a 2 TiB memfd), and one longer than the file
+			// would grow it.
+			var fi windows.ByHandleFileInformation
+			if err = windows.GetFileInformationByHandle(windows.Handle(d.f.Fd()), &fi); err != nil {
+				return sErr(osErrno(err))
+			}
+			end := min(off+n, uint64(fi.FileSizeHigh)<<32|uint64(fi.FileSizeLow))
+			sec, err = windows.CreateFileMapping(windows.Handle(d.f.Fd()), nil, page, uint32(end>>32), uint32(end), nil)
+			if err == windows.ERROR_FILE_INVALID { // an empty file
+				dg.ch.page.args[0], dg.ch.page.args[1] = 0, 0
 				return 0
 			}
-			if err != nil {
-				windows.CloseHandle(sec)
+			if err == nil {
+				if size, err = sectionSize(sec); err == nil && size <= off {
+					windows.CloseHandle(sec)
+					dg.ch.page.args[0], dg.ch.page.args[1] = 0, size
+					return 0
+				}
+				if err != nil {
+					windows.CloseHandle(sec)
+				}
 			}
-		}
-		key = futexFileKey(windows.Handle(d.f.Fd()))
-		if prot&lxProtExec != 0 {
-			dg.codeKey(key) // its writes reach the stubs' shadows of its pages
+			key = futexFileKey(windows.Handle(d.f.Fd()))
+			if prot&lxProtExec != 0 {
+				dg.codeKey(key) // its writes reach the stubs' shadows of its pages
+			}
 		}
 	}
 	if err != nil {
@@ -153,17 +174,60 @@ func sectionSize(sec windows.Handle) (uint64, error) {
 	return uint64(info.size), nil
 }
 
+// fillSection fills the anonymous section sec, at the mapping's own offsets, from
+// the file through its ReadAt — the supervisor's copy into the section the guest
+// will map, so an in-memory or network file maps like a host file. Bytes past the
+// content stay zero, as the pagefile-backed section is zero to begin with.
+func (g *wguest) fillSection(sec windows.Handle, d *dfile, off, n uint64) error {
+	base, err := windows.MapViewOfFile(sec, windows.FILE_MAP_WRITE, 0, 0, uintptr(off+n))
+	if err != nil {
+		return err
+	}
+	defer windows.UnmapViewOfFile(base)
+	view := unsafe.Slice((*byte)(unsafe.Pointer(base)), off+n)
+	for done := uint64(0); done < n; {
+		k, e := d.readAt(view[off+done:off+n], int64(off+done))
+		if k > 0 {
+			done += uint64(k)
+		}
+		if e == io.EOF || k == 0 {
+			break
+		}
+		if e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// codeImage is the ELF behind d for rewriting: the host file, or a non-host
+// file (in-memory, user-defined, network) read whole through its ReaderAt. A
+// host file keeps its identity so the plan cache finds it again; a non-host
+// file has none and is analyzed by its content instead.
+func (g *wguest) codeImage(d *dfile) (imageSrc, error) {
+	if d.f != nil {
+		return imageSrc{f: d.f}, nil
+	}
+	b, err := io.ReadAll(io.NewSectionReader(d.vf, 0, 1<<62))
+	if err != nil {
+		return imageSrc{}, err
+	}
+	return imageSrc{data: b}, nil
+}
+
 // codeFill reads [off, off+n) of guest fd's file and rewrites the parts the
 // file's executable segments cover, as mapped at addr with its trampolines in
 // areas. It returns the bytes, each area's contents and where traps were
-// left; with no area, every site traps.
+// left; with no area, every site traps. The bytes flow through the supervisor
+// (d.readAt), so a non-host file's code is rewritten and mapped like a host
+// file's without the stub ever touching the backing.
 func (g *wguest) codeFill(dg *dguest, fd, off, n, addr uint64, areas []trampArea) ([]byte, [][]byte, []uint64, lxErrno) {
 	d, e := g.mapFile(dg, fd)
 	if e != 0 {
 		return nil, nil, nil, e
 	}
 	buf := make([]byte, n)
-	k, err := d.f.ReadAt(buf, int64(off))
+	k, err := d.readAt(buf, int64(off))
 	if err != nil && err != io.EOF {
 		return nil, nil, nil, osErrno(err)
 	}
@@ -171,11 +235,15 @@ func (g *wguest) codeFill(dg *dguest, fd, off, n, addr uint64, areas []trampArea
 	if g.cfg.NoRewrite {
 		return buf, nil, nil, 0
 	}
-	f, err := elf.NewFile(d.f)
+	src, serr := g.codeImage(d)
+	if serr != nil {
+		return nil, nil, nil, osErrno(serr)
+	}
+	f, err := elf.NewFile(src.reader())
 	if err != nil || f.Machine != elfMachine {
 		return nil, nil, nil, lxEACCES // code that is not ours to rewrite
 	}
-	rw, err := g.newRewriter(imageSrc{f: d.f})
+	rw, err := g.newRewriter(src)
 	if err != nil {
 		return nil, nil, nil, lxEACCES
 	}

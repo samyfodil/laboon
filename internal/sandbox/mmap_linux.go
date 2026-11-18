@@ -345,8 +345,8 @@ func (g *dguest) mmapFile(a [6]uint64) int64 {
 	if !ok {
 		return sErr(lxEBADF)
 	}
-	if m, ok := d.rf.(mmapRegFile); ok {
-		return m.mmap(g, a) // a regular file maps itself; its host fd (if any) stays inside the impl
+	if d.vf != nil {
+		return g.mmapVF(d, a) // a non-host regular file (in-memory, user-defined, network)
 	}
 	if d.ev != nil || d.ep != nil || d.sk != nil || d.f == nil {
 		return sErr(lxENODEV)
@@ -354,20 +354,79 @@ func (g *dguest) mmapFile(a [6]uint64) int64 {
 	return g.mmapHostFd(d.f, a) // a device or other host fd that is not a regular file
 }
 
-// mmapRegFile is a regFile that maps itself into the guest: hostRF with its host
-// fd, memRF with a private copy. The fd never leaves the implementation, so the
-// mmap handler does not distinguish a host-backed filesystem from any other.
-type mmapRegFile interface {
-	mmap(g *dguest, a [6]uint64) int64
+// mmapVF maps a non-host regular file (in-memory, user-defined, network-backed)
+// into the guest. The guest never touches the real backing: the supervisor reads
+// the mapped range into a memfd of its own through the file's ReadAt and has the
+// stub map that memfd. So any backing is mappable the same way — MAP_SHARED is
+// coherent through the memfd, MAP_PRIVATE is a copy-on-write of it. An executable
+// mapping is rewritten first (mmapVFExec), so a binary or shared library served
+// by such a filesystem runs like one on a host file.
+func (g *dguest) mmapVF(d *dfile, a [6]uint64) int64 {
+	if a[2]&unix.PROT_EXEC != 0 {
+		return g.mmapVFExec(d, a)
+	}
+	length := a[1]
+	mfd, err := unix.MemfdCreate("lc-mmap", unix.MFD_CLOEXEC)
+	if err != nil {
+		return sErr(osErrno(err))
+	}
+	defer unix.Close(mfd)
+	if err := unix.Ftruncate(mfd, int64(length)); err != nil {
+		return sErr(osErrno(err))
+	}
+	if e := g.fillMemfd(mfd, d.vf, int64(a[5]), int64(length)); e != 0 {
+		return sErr(e)
+	}
+	b := a
+	b[5] = 0 // the content starts at offset 0 in the memfd
+	return g.mmapShared(mfd, b)
 }
 
-func (h *hostRF) mmap(g *dguest, a [6]uint64) int64 { return g.mmapHostFd(h.f, a) }
-
-func (m *memRF) mmap(g *dguest, a [6]uint64) int64 {
-	if a[3]&unix.MAP_SHARED != 0 || a[2]&unix.PROT_EXEC != 0 {
-		return sErr(lxENODEV) // a shared or executable mapping needs a host fd (a host-backed tmpFS does this, later)
+// mmapVFExec maps an executable region of a non-host file. Executable code must
+// be rewritten before it runs (W^X), and rewriting needs private memory the
+// supervisor can edit, so — exactly as a private executable mapping of a host
+// file — the mapped range is read through the file's ReadAt into anonymous
+// memory and rewritten in place (installCode). The code source reads the ELF
+// back through the same file so the rewriter can descend it precisely. Bytes
+// past the end of the file stay zero, as the zeroed region leaves them.
+// g.mp.mu held.
+func (g *dguest) mmapVFExec(d *dfile, a [6]uint64) int64 {
+	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], int64(a[5])
+	g.dropFileCode(addr, length)
+	data := make([]byte, length)
+	if _, err := d.vf.ReadAt(data, off); err != nil && err != io.EOF {
+		return sErr(lxEIO)
 	}
-	return g.mmapMemPrivate(m, a)
+	r := g.notReserved(g.mapAt(addr, length, flags, false, func(at, fixed uint64) int64 {
+		return g.host(unix.SYS_MMAP, at, length, unix.PROT_READ|unix.PROT_WRITE, fixed|unix.MAP_PRIVATE|unix.MAP_ANONYMOUS, ^uint64(0), 0)
+	}), length)
+	if r < 0 {
+		return r
+	}
+	if res := g.installCode(uint64(r), data, prot, &codeSource{r: d.vf, off: uint64(off)}, false); res < 0 {
+		return res
+	}
+	return r
+}
+
+// fillMemfd writes length bytes of r starting at off into the memfd mfd; any
+// range past the end of the content stays zero, as a file mapping's tail does.
+func (g *dguest) fillMemfd(mfd int, r io.ReaderAt, off, length int64) lxErrno {
+	buf := g.ioBuf(int(min(length, ioChunk)))
+	for pos := int64(0); pos < length; {
+		b := buf[:min(length-pos, int64(len(buf)))]
+		n, err := r.ReadAt(b, off+pos)
+		if n > 0 {
+			if _, werr := unix.Pwrite(mfd, b[:n], pos); werr != nil {
+				return osErrno(werr)
+			}
+			pos += int64(n)
+		}
+		if err != nil || n == 0 {
+			break
+		}
+	}
+	return 0
 }
 
 // mmapHostFd maps a host file into the guest: a shared mapping is the host's own
@@ -377,7 +436,7 @@ func (m *memRF) mmap(g *dguest, a [6]uint64) int64 {
 func (g *dguest) mmapHostFd(f *os.File, a [6]uint64) int64 {
 	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], int64(a[5])
 	if flags&unix.MAP_SHARED != 0 {
-		return g.mmapShared(f, a)
+		return g.mmapShared(hostFd(f), a)
 	}
 	if flags&unix.MAP_FIXED != 0 && prot&unix.PROT_EXEC != 0 && prot&unix.PROT_WRITE == 0 &&
 		uint64(off) == uint64(off)&^(pageSize-1) && g.sameFileCode(addr, length, f, uint64(off)) {
@@ -401,54 +460,13 @@ func (g *dguest) mmapHostFd(f *os.File, a [6]uint64) int64 {
 		return r
 	}
 	if prot&unix.PROT_EXEC != 0 {
-		if res := g.installCode(uint64(r), data, prot, &codeSource{f: f, off: uint64(off)}, false); res < 0 {
+		if res := g.installCode(uint64(r), data, prot, &codeSource{r: f, f: f, off: uint64(off)}, false); res < 0 {
 			return res
 		}
 		return r
 	}
 	if err := g.writeMem(uint64(r), data); err != nil {
 		return sErr(lxEFAULT)
-	}
-	if res := g.host(unix.SYS_MPROTECT, uint64(r), alignUp(length), prot); res < 0 {
-		return res
-	}
-	return r
-}
-
-// mmapMemPrivate maps a private copy of an in-memory backend file (tmpfs,
-// WithFS): there is no host fd to map, so the bytes are read through the vfs.File
-// and copied into an anonymous mapping, as the host path does for a region it
-// cannot map directly. A shared mapping is refused by mmapFile (it needs a
-// coherent host mapping), and an executable one is not supported here (the code
-// would have to be read back for rewriting from a file that is not on the host).
-func (g *dguest) mmapMemPrivate(m *memRF, a [6]uint64) int64 {
-	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], a[5]
-	if prot&unix.PROT_EXEC != 0 {
-		return sErr(lxENODEV)
-	}
-	g.dropFileCode(addr, length)
-	r := g.notReserved(g.mapAt(addr, length, flags, false, func(at, fixed uint64) int64 {
-		return g.host(unix.SYS_MMAP, at, length, unix.PROT_READ|unix.PROT_WRITE, fixed|unix.MAP_PRIVATE|unix.MAP_ANONYMOUS, ^uint64(0), 0)
-	}), length)
-	if r < 0 {
-		return r
-	}
-	// Populate the anonymous mapping from the file in pooled chunks (zero-alloc);
-	// the region is already zero, so bytes past end of file stay zero, as a file
-	// mapping's do.
-	buf := g.ioBuf(int(min(int64(length), ioChunk)))
-	for pos := int64(0); pos < int64(length); {
-		b := buf[:min(int64(length)-pos, int64(len(buf)))]
-		k, err := m.readAt(b, int64(off)+pos)
-		if k > 0 {
-			if g.writeMem(uint64(r)+uint64(pos), b[:k]) != nil {
-				return sErr(lxEFAULT)
-			}
-			pos += int64(k)
-		}
-		if err != nil || k == 0 {
-			break
-		}
 	}
 	if res := g.host(unix.SYS_MPROTECT, uint64(r), alignUp(length), prot); res < 0 {
 		return res
@@ -467,7 +485,7 @@ const (
 )
 
 // passFd gives the stub a descriptor of f; it returns the stub's fd number.
-func (g *dguest) passFd(f *os.File) (int, lxErrno) {
+func (g *dguest) passFd(fd int) (int, lxErrno) {
 	g.run.xferMu.Lock()
 	defer g.run.xferMu.Unlock()
 	// Every stub shares the socket. A stub killed between the send and its
@@ -477,7 +495,7 @@ func (g *dguest) passFd(f *os.File) (int, lxErrno) {
 	seq := g.run.xferSeq
 	var tag [8]byte
 	put64(tag[:], seq)
-	if err := unix.Sendmsg(hostFd(g.run.xfer), tag[:], unix.UnixRights(hostFd(f)), nil, 0); err != nil {
+	if err := unix.Sendmsg(hostFd(g.run.xfer), tag[:], unix.UnixRights(fd), nil, 0); err != nil {
 		return -1, osErrno(err)
 	}
 	base := g.slot*slotSize + xferOff
@@ -517,12 +535,12 @@ func (m *memProc) stubFd(g *dguest, d *dfile) (int, lxErrno) {
 	if d.f == nil {
 		return 0, lxENODEV
 	}
-	return g.passFd(d.f)
+	return g.passFd(hostFd(d.f))
 }
 
-func (g *dguest) mmapShared(f *os.File, a [6]uint64) int64 {
+func (g *dguest) mmapShared(fd int, a [6]uint64) int64 {
 	addr, length := a[0], a[1]
-	sfd, e := g.passFd(f)
+	sfd, e := g.passFd(fd)
 	if e != 0 {
 		return sErr(e)
 	}
@@ -553,7 +571,7 @@ func (g *dguest) mmapPrivate(f *os.File, a [6]uint64) (r int64, ok bool) {
 	}
 	inFile := min(length, alignUp(uint64(st.Size))-off)
 	exec := prot&unix.PROT_EXEC != 0
-	sfd, e := g.passFd(f)
+	sfd, e := g.passFd(hostFd(f))
 	if e != 0 {
 		return 0, false
 	}
@@ -604,7 +622,7 @@ func (g *dguest) installFileCode(addr uint64, f *os.File, off, n, inFile uint64,
 			res = sErr(lxEIO)
 		}
 	}()
-	return g.installCode(addr, code, prot, &codeSource{f: f, off: off}, true)
+	return g.installCode(addr, code, prot, &codeSource{r: f, f: f, off: off}, true)
 }
 
 // The macOS stub's SysV attach requests: the Linux stub makes none, so the

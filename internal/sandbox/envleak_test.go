@@ -23,7 +23,7 @@ func TestEnvNotLeaked(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var out bytes.Buffer
-	code, err := Run(ctx, exe, Config{Args: []string{exe}, Root: "/", Stdout: &out, Stderr: &out}) // no Env
+	code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot("/"), Stdout: &out, Stderr: &out}) // no Env
 	s := out.String()
 	if err != nil || code != 0 || !strings.Contains(s, "ENVLEAK-DONE") {
 		t.Fatalf("code=%d err=%v out=%q", code, err, s)

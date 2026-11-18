@@ -22,7 +22,7 @@ func TestSockCreds(t *testing.T) {
 	var out bytes.Buffer
 	code, err := Run(context.Background(), bin, Config{
 		Args:   []string{"sockcreds"},
-		Stdout: &out, Stderr: &out, Root: "/",
+		Stdout: &out, Stderr: &out, RootFS: HostRoot("/"),
 	})
 	if err != nil || code != 0 {
 		t.Fatalf("code %d (testdata/sockcreds.c line) err %v\n%s", code, err, out.String())

@@ -15,7 +15,7 @@ func TestTmpfsGaps(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	var out bytes.Buffer
-	code, err := Run(ctx, exe, Config{Args: []string{exe}, Root: "/", Stdout: &out, Stderr: &out})
+	code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot("/"), Stdout: &out, Stderr: &out})
 	t.Logf("tmpfsgaps (code=%d err=%v):\n%s", code, err, out.String())
 	if !strings.Contains(out.String(), "TMPFSGAPS-DONE") {
 		t.Fatalf("probe did not finish")
