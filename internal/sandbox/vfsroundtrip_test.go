@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/samyfodil/laboon/oci"
-	"github.com/samyfodil/laboon/internal/vfs/hostfs"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // TestVFSRoundTrip is the overlay serialization gate: a guest writes a rich

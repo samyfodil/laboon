@@ -7,7 +7,7 @@ import (
 	"github.com/samyfodil/laboon/filesystems/memfs"
 	"github.com/samyfodil/laboon/filesystems/readonly"
 	"github.com/samyfodil/laboon/internal/vfs"
-	"github.com/samyfodil/laboon/internal/vfs/hostfs"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // This file is laboon's public filesystem surface: the FileSystem interface a

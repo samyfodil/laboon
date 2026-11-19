@@ -21,7 +21,7 @@ import (
 	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/sandbox"
-	"github.com/samyfodil/laboon/internal/vfs/hostfs"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"github.com/samyfodil/laboon/oci"
 )
 

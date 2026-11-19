@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"github.com/samyfodil/laboon/core"
-	"github.com/samyfodil/laboon/internal/vfs/hostfs"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // Unpack extracts a flattened image tar (whiteouts already applied) into

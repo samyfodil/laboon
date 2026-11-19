@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/samyfodil/laboon/core"
-	"github.com/samyfodil/laboon/internal/vfs/hostfs"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // TestLayerTarRoundTrip builds a vfs layer, serializes it to an OCI tar and

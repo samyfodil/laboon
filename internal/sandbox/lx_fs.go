@@ -18,7 +18,7 @@ import (
 	"github.com/samyfodil/laboon/filesystems/readonly"
 	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/vfs"
-	"github.com/samyfodil/laboon/internal/vfs/hostfs"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // Confined filesystem for the macOS backend. The supervisor owns the fd table

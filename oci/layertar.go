@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/samyfodil/laboon/core"
-	"github.com/samyfodil/laboon/internal/vfs/hostfs"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // The OCI image-layer tar conventions: a deleted path is an empty .wh.<name>

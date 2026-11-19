@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/samyfodil/laboon/internal/namespace"
-	"github.com/samyfodil/laboon/internal/vfs/hostfs"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // TestCopyConfinedAbsSymlink proves COPY resolves an absolute symlink in the
