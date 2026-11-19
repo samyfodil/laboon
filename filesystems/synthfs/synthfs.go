@@ -109,11 +109,22 @@ func (n *synthNode) Open(flags int) (File, error) {
 	if n.n.Content != nil {
 		data = n.n.Content()
 	}
-	return &bytesFile{data: data}, nil
+	return &bytesFile{n: n, data: data}, nil
 }
 
 // bytesFile is a read-only in-memory File for synthetic content.
-type bytesFile struct{ data []byte }
+type bytesFile struct {
+	n    *synthNode
+	data []byte
+}
+
+func (b *bytesFile) Stat() (Info, error) {
+	a, err := b.n.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return FileInfo("", a, b.n.ID()), nil
+}
 
 func (b *bytesFile) ReadAt(p []byte, off int64) (int, error) {
 	if off >= int64(len(b.data)) {

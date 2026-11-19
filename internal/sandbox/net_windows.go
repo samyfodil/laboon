@@ -150,6 +150,13 @@ func (s *dsock) inet() bool { return s.family == lxAFInet || s.family == lxAFIne
 // AF_UNIX socket, or an INET one on loopback without networking.
 func (s *dsock) local() bool { return s.family == lxAFUnix || s.loop }
 
+// sockKey is a pathname-bound AF_UNIX socket node's host file identity (volume
+// plus file id), the key the names table uses for it.
+type sockKey struct {
+	vol uint32
+	id  uint64
+}
+
 // dnet is a run's socket state: the lock and bus of every socket, the egress
 // policy, and the bound AF_UNIX names.
 type dnet struct {
@@ -158,7 +165,7 @@ type dnet struct {
 	bus   chan struct{}
 	seq   uint64
 	eg    *egress
-	names map[any]*dsock // fileKey of a socket node, or "@name" for an abstract one
+	names map[any]*dsock // sockKey of a socket node, or "@name" for an abstract one
 	ino   uint64
 	auto  uint32
 
@@ -282,7 +289,7 @@ func deadlineOf(t time.Duration) time.Time {
 
 // hostless returns a placeholder host file for an object that has none (a
 // socket, eventfd or epoll instance), so the shared code's checks for an open
-// file hold. It is the NUL device; fileStat reports a socket for "socket:".
+// file hold. It is the NUL device; hostfs.FileStat reports a socket for "socket:".
 func hostless(name string) (*os.File, lxErrno) {
 	p, err := windows.UTF16PtrFromString("NUL")
 	if err != nil {
@@ -650,11 +657,11 @@ func (g *dguest) unixKey(raw []byte, create bool) (key any, canon []byte, e lxEr
 	if fi.Mode()&os.ModeSocket == 0 {
 		return nil, nil, lxECONNREFUSED
 	}
-	st, ok := statOf(fi)
-	if !ok {
+	dev, ino := HostDevIno(fi)
+	if ino == 0 && dev == 0 {
 		return nil, nil, lxECONNREFUSED
 	}
-	return fileKey{uint32(st.dev), st.ino}, canon, 0
+	return sockKey{uint32(dev), ino}, canon, 0
 }
 
 // mkSockNode creates the socket node a bind names, as mknod would: the parent

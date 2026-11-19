@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"os"
+	"strconv"
 
 	"github.com/samyfodil/laboon/core"
 	"golang.org/x/sys/unix"
@@ -30,7 +31,7 @@ func pinPathFD(n core.Node) *os.File {
 	if err != nil {
 		return nil
 	}
-	of, ok := f.(*os.File)
+	of, ok := hostOf(f)
 	if !ok {
 		f.Close()
 		return nil
@@ -82,3 +83,6 @@ func pinExeFD(f *os.File) *os.File {
 	}
 	return os.NewFile(uintptr(fd), "exe")
 }
+
+// procFdPath is the /proc magic link that names fd of this process.
+func procFdPath(fd int) string { return "/proc/self/fd/" + strconv.Itoa(fd) }

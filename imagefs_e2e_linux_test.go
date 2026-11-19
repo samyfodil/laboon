@@ -73,7 +73,7 @@ func TestImageFSRunEndToEnd(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	code, err := Run(ctx, "/run", WithArgs("run"), WithFS("/", root), WithStdout(&out), WithStderr(&out))
+	code, err := Run(ctx, "/run", WithArgs("run"), WithMount("/", root), WithStdout(&out), WithStderr(&out))
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v out=%q", code, err, out.String())
 	}

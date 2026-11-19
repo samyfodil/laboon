@@ -1,17 +1,19 @@
 //go:build darwin || linux || windows
 
-package sandbox
+package hostfs
 
 import (
 	"os"
 	"sync/atomic"
 	"syscall"
+
+	"github.com/samyfodil/laboon/core"
 )
 
-// hostStat is a host file's attributes in Linux terms: dev and rdev are Linux
+// HostStat is a host file's attributes in Linux terms: dev and rdev are Linux
 // dev_t encodings and mode carries Linux S_IFMT type bits. Each host builds it
-// from its own stat (statOf), so the overlay never looks at a host stat type.
-type hostStat struct {
+// from its own stat (StatOf), so the overlay never looks at a host stat type.
+type HostStat struct {
 	dev, ino, rdev             uint64
 	mode, nlink, uid, gid      uint32
 	size, blocks               int64
@@ -19,21 +21,29 @@ type hostStat struct {
 	atime, mtime, ctime, btime syscall.Timespec
 }
 
+// A host file's stable identity and size, for callers outside the package (the
+// exec rewriter keys its site cache on these).
+func (s HostStat) Dev() uint64             { return s.dev }
+func (s HostStat) Ino() uint64             { return s.ino }
+func (s HostStat) Size() int64             { return s.size }
+func (s HostStat) Atime() syscall.Timespec { return s.atime }
+func (s HostStat) Mtime() syscall.Timespec { return s.mtime }
+func (s HostStat) Ctime() syscall.Timespec { return s.ctime }
+func (s HostStat) Btime() syscall.Timespec { return s.btime }
+func (s HostStat) Rdev() uint64            { return s.rdev }
+func (s HostStat) Mode() uint32            { return s.mode }
+func (s HostStat) Nlink() uint32           { return s.nlink }
+func (s HostStat) Blocks() int64           { return s.blocks }
+func (s HostStat) Blksize() uint32         { return s.blksize }
+
 // hostSeq numbers the supervisor's private host objects (work-dir names).
 var hostSeq atomic.Uint64
 
-// hostStatfs is the part of a host statfs the guest's statfs reports.
-type hostStatfs struct {
-	bsize, blocks, bfree, bavail, files, ffree uint64
-	fsid                                       [2]uint32
-	ftype                                      uint64 // the real backing filesystem's f_type (0 if unknown)
-}
-
-// hostFS is the host's file operations on overlay paths. Paths are host paths
+// HostFS is the host's file operations on overlay paths. Paths are host paths
 // the overlay already resolved: none of their components is a guest symlink,
 // and an implementation refuses to follow a host symlink below the layer roots.
 // Errors are host errors; osErrno converts them.
-type hostFS interface {
+type HostFS interface {
 	hOpen(p string, flag int, perm os.FileMode) (*os.File, error)
 	hLstat(p string) (os.FileInfo, error)
 	hReadlink(p string) (string, error)
@@ -49,6 +59,6 @@ type hostFS interface {
 	hClone(from, to string) error
 	hCloneFile(f *os.File, to string) error
 	hTruncate(p string, n int64) error
-	hStatfs(dir string) (hostStatfs, error)
+	hStatfs(dir string) (core.StatFS, error)
 	hReadDir(p string) ([]os.FileInfo, error)
 }

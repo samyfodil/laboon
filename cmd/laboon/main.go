@@ -20,6 +20,7 @@ import (
 
 	"github.com/samyfodil/laboon"
 	"github.com/samyfodil/laboon/build"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // version is the released version, set by the linker at build time (see the
@@ -184,7 +185,7 @@ func main() {
 		if !ok || host == "" || guest == "" {
 			fail(fmt.Errorf("bad -mount %q: want HOST:GUEST", m))
 		}
-		opts = append(opts, laboon.WithMount(host, guest))
+		opts = append(opts, laboon.WithMount(guest, hostfs.Dir(host)))
 	}
 	for _, kv := range envVars {
 		key, val, ok := strings.Cut(kv, "=")
@@ -193,18 +194,23 @@ func main() {
 		}
 		opts = append(opts, laboon.WithEnvVar(key, val))
 	}
+	if *x11 {
+		opts = append(opts, laboon.WithMount("/tmp/.X11-unix", hostfs.Dir("/tmp/.X11-unix")))
+		if d := os.Getenv("DISPLAY"); d != "" {
+			opts = append(opts, laboon.WithEnvVar("DISPLAY", d))
+		}
+	}
 	for _, f := range []struct {
 		on  bool
 		opt laboon.Option
 	}{
-		{*root != "", laboon.WithRoot(*root)},
+		{*root != "", laboon.WithMount("/", hostfs.Dir(*root))},
 		{*pull, laboon.WithPull()},
 		{*platform != "", laboon.WithPlatform(*platform)},
 		{*trace, laboon.WithTrace(os.Stderr)},
 		{*rejectRWX, laboon.WithRejectRWX()},
 		{*net, laboon.WithNet()},
 		{*noNet, laboon.WithNoNet()},
-		{*x11, laboon.WithX11()},
 		{*user != "", laboon.WithUser(*user)},
 		{*noRewrite, laboon.WithNoRewrite()},
 		{flagSet("entrypoint"), entrypointOpt(*entrypoint)},

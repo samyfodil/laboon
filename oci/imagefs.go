@@ -19,7 +19,7 @@ import (
 //	layers, close, _ := img.Layers()
 //	defer close()
 //	root := laboon.Overlay(append(layers, laboon.NewDiskFS(upperDir))...)
-//	laboon.Run(ctx, prog, laboon.WithFS("/", root))
+//	laboon.Run(ctx, prog, laboon.WithMount("/", root))
 //
 // close removes the staged layer tars and must be called when the layers are no
 // longer in use.

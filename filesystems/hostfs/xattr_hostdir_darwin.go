@@ -1,6 +1,6 @@
 //go:build darwin
 
-package sandbox
+package hostfs
 
 import (
 	"os"
@@ -12,7 +12,7 @@ import (
 // confined (writable, guest-mutable) layer is reached through an fd opened
 // without following a symlink, so a dir→symlink swap cannot redirect the call;
 // a read-only layer uses the path directly.
-func (f *hostDirFS) xattrOp(p string, byFd func(int) error, byPath func(string) error) error {
+func (f *HostDirFS) xattrOp(p string, byFd func(int) error, byPath func(string) error) error {
 	hp := f.hp(p)
 	if !f.confine {
 		return byPath(hp)
@@ -25,7 +25,7 @@ func (f *hostDirFS) xattrOp(p string, byFd func(int) error, byPath func(string) 
 	return byFd(int(fd.Fd()))
 }
 
-func (n *hostNode) Getxattr(name string) ([]byte, error) {
+func (n *HostNode) Getxattr(name string) ([]byte, error) {
 	val := make([]byte, xattrSizeMax)
 	var nn int
 	err := n.fs.xattrOp(n.p, func(fd int) (e error) {
@@ -43,7 +43,7 @@ func (n *hostNode) Getxattr(name string) ([]byte, error) {
 	return out, nil
 }
 
-func (n *hostNode) Listxattr() ([]byte, error) {
+func (n *HostNode) Listxattr() ([]byte, error) {
 	raw := make([]byte, 1<<16)
 	var nn int
 	err := n.fs.xattrOp(n.p, func(fd int) (e error) {
@@ -61,7 +61,7 @@ func (n *hostNode) Listxattr() ([]byte, error) {
 	return out, nil
 }
 
-func (n *hostNode) Setxattr(name string, value []byte, flags int) error {
+func (n *HostNode) Setxattr(name string, value []byte, flags int) error {
 	return n.fs.xattrOp(n.p, func(fd int) error {
 		return fsetxattr(fd, name, value, flags)
 	}, func(p string) error {
@@ -69,7 +69,7 @@ func (n *hostNode) Setxattr(name string, value []byte, flags int) error {
 	})
 }
 
-func (n *hostNode) Removexattr(name string) error {
+func (n *HostNode) Removexattr(name string) error {
 	return n.fs.xattrOp(n.p, func(fd int) error {
 		return unix.Fremovexattr(fd, name)
 	}, func(p string) error {

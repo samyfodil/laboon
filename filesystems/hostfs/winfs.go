@@ -1,6 +1,8 @@
-// Package winfs holds the conventions of a Linux root filesystem kept on
-// NTFS, shared by the image extractor (oci) and the Windows sandbox, which
-// reads it:
+package hostfs
+
+// This file holds the conventions of a Linux root filesystem kept on NTFS,
+// shared by the image extractor (oci) and the Windows host backend
+// (hostfs_windows.go), which reads it:
 //
 //   - Guest names NTFS cannot hold (\ : * ? " < > |, control characters, a
 //     trailing dot or space, DOS device names) are escaped into the
@@ -8,8 +10,11 @@
 //   - POSIX metadata NTFS has no place for (the mode with its file type, and
 //     the owner) lives in <root>.lcmeta, one Entry per line. A Linux symlink
 //     is a regular file holding its target, typed S_IFLNK there.
-//   - Directories are made case-sensitive where the volume allows it.
-package winfs
+//   - Directories are made case-sensitive where the volume allows it
+//     (winfs_windows.go).
+//
+// The logic is pure and compiles on every platform so oci (cross-platform) can
+// name MetaSuffix; it is exercised only on Windows.
 
 import (
 	"fmt"

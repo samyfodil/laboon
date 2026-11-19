@@ -1,4 +1,4 @@
-package winfs
+package hostfs
 
 import (
 	"unsafe"
@@ -24,7 +24,7 @@ func ExtPath(p string) *uint16 {
 	return u
 }
 
-func openDir(dir string, access uint32) (windows.Handle, error) {
+func caseDir(dir string, access uint32) (windows.Handle, error) {
 	return windows.CreateFile(ExtPath(dir), access,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
@@ -32,7 +32,7 @@ func openDir(dir string, access uint32) (windows.Handle, error) {
 
 // CaseSensitive reports whether lookups in dir are case-sensitive.
 func CaseSensitive(dir string) bool {
-	h, err := openDir(dir, windows.FILE_READ_ATTRIBUTES)
+	h, err := caseDir(dir, windows.FILE_READ_ATTRIBUTES)
 	if err != nil {
 		return false
 	}
@@ -48,7 +48,7 @@ func CaseSensitive(dir string) bool {
 // SetCaseSensitive makes dir case-sensitive; directories created in it later
 // inherit the flag. It reports whether the volume allowed it.
 func SetCaseSensitive(dir string) bool {
-	h, err := openDir(dir, windows.FILE_WRITE_ATTRIBUTES|windows.FILE_READ_ATTRIBUTES)
+	h, err := caseDir(dir, windows.FILE_WRITE_ATTRIBUTES|windows.FILE_READ_ATTRIBUTES)
 	if err != nil {
 		return false
 	}

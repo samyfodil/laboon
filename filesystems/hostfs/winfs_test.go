@@ -1,4 +1,4 @@
-package winfs
+package hostfs
 
 import "testing"
 

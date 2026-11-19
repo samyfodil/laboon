@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"golang.org/x/sys/unix"
 )
 
@@ -167,7 +168,7 @@ func (g *dguest) mmapFd(fd int64, wshared, code bool) int64 {
 	if d.f == nil || d.ev != nil || d.ep != nil {
 		return sErr(lxENODEV)
 	}
-	fi, err := d.f.Stat()
+	fi, err := hostfs.FileStat(d.f)
 	if err != nil {
 		return sErr(osErrno(err))
 	}
@@ -431,7 +432,7 @@ func (m *memProc) stubFd(g *dguest, d *dfile) (int, lxErrno) {
 		nrecv = 1
 		fn := fileName{path: d.name()}
 		if fi, err := f.Stat(); err == nil {
-			fn.dev, fn.ino = hostDevIno(fi)
+			fn.dev, fn.ino = HostDevIno(fi)
 		}
 		m.names[id] = fn
 	}
@@ -574,9 +575,7 @@ func init() {
 		id := stubFiles.id(d, m)
 		if _, ok := m.names[id]; !ok {
 			fn := fileName{path: d.name()}
-			if fi, err := d.f.Stat(); err == nil {
-				fn.dev, fn.ino = hostDevIno(fi)
-			}
+			fn.dev, fn.ino = d.hostDevIno()
 			m.names[id] = fn
 		}
 		return int64(id)

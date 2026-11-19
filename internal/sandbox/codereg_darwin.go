@@ -162,7 +162,7 @@ func (g *dguest) codeFile(fi os.FileInfo) {
 	if g.dfs.run == nil || g.ps.ospid <= 0 {
 		return
 	}
-	dev, ino := hostDevIno(fi)
+	dev, ino := HostDevIno(fi)
 	g.dfs.run.broker.code.mark(g.ps.ospid, [2]uint64{dev, ino})
 }
 
@@ -186,7 +186,7 @@ func (g *dguest) fileModified(f *os.File) {
 		return
 	}
 	if fi, err := f.Stat(); err == nil && fi.Mode().IsRegular() {
-		dev, ino := hostDevIno(fi)
+		dev, ino := HostDevIno(fi)
 		var body [8]byte
 		binary.LittleEndian.PutUint64(body[:], ino)
 		r.fileWritten([2]uint64{dev, ino}, body[:])

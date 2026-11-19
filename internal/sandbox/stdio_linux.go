@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"golang.org/x/sys/unix"
 )
 
@@ -47,8 +48,8 @@ func hostPtsNum(host string) (int, bool) {
 
 // ttyRdev is the Linux st_rdev of a host device node: the host's own.
 func ttyRdev(fi os.FileInfo) (uint64, bool) {
-	if st, ok := statOf(fi); ok && st.mode&unix.S_IFMT == unix.S_IFCHR {
-		return st.rdev, true
+	if st, ok := hostfs.StatOf(fi); ok && st.Mode()&unix.S_IFMT == unix.S_IFCHR {
+		return st.Rdev(), true
 	}
 	return 0, false
 }

@@ -964,7 +964,7 @@ func (r *progResolver) host(gp string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	if of, ok := f.(*os.File); ok {
+	if of, ok := hostOf(f); ok {
 		return of.Name(), nil // a host-backed file: map it directly, no spill
 	}
 	tf, err := os.CreateTemp(r.tmp, "lc-prog-")

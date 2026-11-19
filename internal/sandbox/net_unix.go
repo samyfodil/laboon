@@ -11,11 +11,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"golang.org/x/sys/unix"
 )
 
@@ -449,22 +449,11 @@ func (g *dguest) unixTarget(raw []byte) (string, []byte, lxErrno) {
 		return "", nil, e
 	}
 	if abstract {
-		// A bind-mounted socket (e.g. X11) listens on both an abstract and a
-		// filesystem name; reach the host's through the filesystem path.
-		if h, ok := g.mountedSocket(name); ok {
-			return h, canon, 0
-		}
 		return g.netState().abstractPath(g.ps.netns.Load(), name), canon, 0
 	}
 	gp, e := g.guestAbs(lxAtFdcwd, name)
 	if e != 0 {
 		return "", nil, e
-	}
-	if h, ok := g.mountedSocket(gp); ok {
-		// Reach the host socket the mount binds, as a bind-mounted directory
-		// would, whether or not it exists in the rootfs (an image has none of
-		// its own).
-		return h, canon, 0
 	}
 	// Resolve through the Namespace (symlinks, mounts, the overlay layer choice),
 	// then take the backing host path from the resolved node.
@@ -478,8 +467,9 @@ func (g *dguest) unixTarget(raw []byte) (string, []byte, lxErrno) {
 	}
 	if !upper && g.rootAbs != "" {
 		// A socket file in the read-only image is not a guest's: whatever listens
-		// there, if anything, is the host's. (X11 passthrough is handled earlier,
-		// before the rootfs lookup.)
+		// there, if anything, is the host's. A host socket the caller wants shared
+		// is mounted with hostfs.Dir (confined, so upper is true above) and reached
+		// there, never falling here.
 		return "", nil, lxECONNREFUSED
 	}
 	return host, canon, 0
@@ -492,25 +482,12 @@ func sockHostPath(n core.Node) (host string, upper, ok bool) {
 	if u, has := n.(interface{ Underlying() core.Node }); has {
 		n = u.Underlying()
 	}
-	hn, has := n.(*hostNode)
+	hn, has := n.(*hostfs.HostNode)
 	if !has {
 		return "", false, false
 	}
-	return hn.fs.hp(hn.p), hn.fs.confine, true
-}
-
-// mountedSocket maps a guest socket path to the host path a bind mount gives
-// it, so a connect reaches the host's socket there rather than being refused.
-func (g *dguest) mountedSocket(p string) (string, bool) {
-	for _, m := range g.cfg.Mounts {
-		if p == m.Guest {
-			return m.Host, true
-		}
-		if strings.HasPrefix(p, m.Guest+"/") {
-			return m.Host + p[len(m.Guest):], true
-		}
-	}
-	return "", false
+	host, upper = hn.HostPath()
+	return host, upper, true
 }
 
 // ---- bind / listen / accept / connect -------------------------------------------
@@ -661,11 +638,12 @@ func writableHostPath(n core.Node) (string, error) {
 		}
 		n = tn
 	}
-	hn, has := n.(*hostNode)
+	hn, has := n.(*hostfs.HostNode)
 	if !has {
 		return "", os.ErrInvalid
 	}
-	return hn.fs.hp(hn.p), nil
+	host, _ := hn.HostPath()
+	return host, nil
 }
 
 func (g *dguest) listen(fd int64, backlog int) int64 {

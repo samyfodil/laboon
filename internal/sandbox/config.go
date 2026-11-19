@@ -45,7 +45,7 @@ type Config struct {
 	// Trace, if set, receives one line per guest syscall.
 	Trace io.Writer
 	// RootFS is the guest's root filesystem ("/"), any core.FileSystem: a host
-	// directory (HostRoot, what WithRoot builds), an in-memory tree (NewMemFS), a
+	// directory (HostRoot, or a public hostfs.Dir mounted at "/"), an in-memory tree (NewMemFS), a
 	// union, a read-only or hardened wrapper, a network-backed or custom backend.
 	// Without it the guest has no filesystem and the program path is a host path.
 	// The root is always a FileSystem, so the sandbox takes no host path for it;
@@ -125,14 +125,12 @@ type UserID struct {
 	Groups   []uint32
 }
 
-// Mount places a filesystem into the guest at Guest. The common case is a
-// host-path bind: a Host directory is bound as files (read-write, confined), and
-// an AF_UNIX connect under Guest reaches the host socket at the matching Host
-// path. Alternatively FS supplies the filesystem directly — any core.FileSystem
-// (in-memory, a union, a hardened or read-only wrapper, a custom backend) — and
-// Host is then unused. The public WithMount builds the former, WithFS the latter.
+// Mount places a FileSystem into the guest's namespace at Guest. FS is any
+// core.FileSystem the caller composed: hostfs.Dir for a confined host-directory
+// bind (read-write, with AF_UNIX socket forwarding to the host), an in-memory
+// store, a union, a hardened or read-only wrapper, or a custom backend. The
+// public WithMount builds it.
 type Mount struct {
-	Host, Guest string
-	ReadOnly    bool            // bind read-only (EROFS on any change)
-	FS          core.FileSystem // if set, mount this filesystem at Guest instead of a host bind
+	Guest string
+	FS    core.FileSystem
 }

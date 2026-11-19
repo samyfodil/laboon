@@ -9,9 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/samyfodil/laboon/oci"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"github.com/samyfodil/laboon/internal/rewrite"
 	"github.com/samyfodil/laboon/internal/sandbox"
+	"github.com/samyfodil/laboon/oci"
 )
 
 func TestOptionsApply(t *testing.T) {
@@ -20,7 +21,7 @@ func TestOptionsApply(t *testing.T) {
 	c := rewrite.DefaultCache()
 	o := newOptions([]Option{
 		WithStdin(&in), WithStdout(&out), WithStderr(&errw),
-		WithDir("/work"), WithRoot("/rootfs"), WithTrace(&tr),
+		WithDir("/work"), WithMount("/", hostfs.Dir("/rootfs")), WithTrace(&tr),
 		WithRejectRWX(), WithMaxMemory(1 << 30),
 		WithNet(), WithAllowDomains("a.com"), WithAllowDomains("b.com"),
 		WithAllowCIDRs("10.0.0.0/8"), WithAllowPorts(443, 80),
@@ -30,10 +31,14 @@ func TestOptionsApply(t *testing.T) {
 	})
 	want := sandbox.Config{
 		Stdin: &in, Stdout: &out, Stderr: &errw, Trace: &tr,
-		RootFS: sandbox.HostRoot("/rootfs"), Dir: "/work", Cache: c, NoRewrite: true, RejectRWX: true,
+		Dir: "/work", Cache: c, NoRewrite: true, RejectRWX: true,
 		Net: true, AllowDomains: []string{"a.com", "b.com"}, AllowCIDRs: []string{"10.0.0.0/8"},
 		AllowPorts: []int{443, 80}, MaxBytes: 1 << 30,
 	}
+	if root, ok := sandbox.HostRootPath(o.cfg.RootFS); !ok || root != "/rootfs" {
+		t.Fatalf("RootFS = %v, host path %q, want /rootfs", o.cfg.RootFS, root)
+	}
+	want.RootFS = o.cfg.RootFS // a hostfs.Dir value, checked above by its host path
 	if !reflect.DeepEqual(o.cfg, want) {
 		t.Fatalf("cfg = %+v\nwant %+v", o.cfg, want)
 	}
@@ -151,8 +156,8 @@ func TestRunRejectsEntrypoint(t *testing.T) {
 }
 
 func TestRunImageRejectsRoot(t *testing.T) {
-	_, err := RunImage(context.Background(), "alpine:3.20", WithRoot(os.TempDir()))
-	if err == nil || !strings.Contains(err.Error(), "WithRoot") {
+	_, err := RunImage(context.Background(), "alpine:3.20", WithMount("/", hostfs.Dir(os.TempDir())))
+	if err == nil || !strings.Contains(err.Error(), "does not apply to an image") {
 		t.Fatalf("err = %v", err)
 	}
 }

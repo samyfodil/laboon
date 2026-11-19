@@ -9,6 +9,7 @@
 
 # Built command binaries
 /cmd/*/laboon
+/cmd/*/laboon.exe
 /cmd/*/laboond
 /cmd/*/laboon-mcp
 /cmd/*/laboon-runtime

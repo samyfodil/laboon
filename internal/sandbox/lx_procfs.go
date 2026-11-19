@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // Synthetic /proc, /sys and /dev. The rootfs carries none of them, so the
@@ -198,9 +199,11 @@ func (fs *dfs) initProcfs(stubPid int, exe string, argv, env []string, stdio [3]
 	}
 	fs.pst.boot = &procInfo{exe: exe, argv: argv, env: env, start: time.Now()}
 	if fs.upperAbs != "" {
-		shm := hostPath(fs.upperAbs, "/dev/shm")
+		shm := hostfs.HostPath(fs.upperAbs, "/dev/shm")
 		if os.MkdirAll(shm, 0o755) == nil {
-			fs.hChmod(shm, 0o1777)
+			// os.FileMode encodes the sticky bit as ModeSticky (1<<20), not the
+			// Unix 0o1000, so os.Chmod(shm, 0o1777) would silently drop it.
+			os.Chmod(shm, 0o777|os.ModeSticky)
 		}
 	}
 }
@@ -235,9 +238,7 @@ func (g *dguest) noteMmap(ret int64, length, prot, flags uint64, d *dfile) {
 	if d != nil {
 		v.path = d.gp
 		if d.f != nil {
-			if fi, err := fileStat(d.f); err == nil {
-				_, v.ino = hostDevIno(fi)
-			}
+			_, v.ino = d.hostDevIno()
 		}
 	}
 	pi := g.pi
@@ -451,7 +452,7 @@ func (g *dguest) fileInfo(d *dfile) (os.FileInfo, error) {
 			return fi, nil
 		}
 	}
-	return fileStat(d.f)
+	return hostfs.FileStat(d.f)
 }
 
 // pseudoChange answers mkdir (create) or unlink of a synthetic path, which
@@ -548,7 +549,7 @@ func (g *dguest) reopen(d *dfile, flags int64) (*dfile, lxErrno) {
 		if f, e := dupMode(h, acc); e == 0 {
 			return &dfile{f: f, stub: -1}, 0
 		}
-		if st, err := fstatOf(h); err == nil && st.mode&lxSIFMT == lxSIFCHR {
+		if st, err := hostfs.FstatOf(h); err == nil && st.Mode()&lxSIFMT == lxSIFCHR {
 			if f, err := os.OpenFile("/dev/tty", goOpenFlags(flags)&^(os.O_CREATE|os.O_TRUNC|os.O_EXCL), 0); err == nil {
 				return &dfile{f: f, stub: -1}, 0
 			}
@@ -561,7 +562,7 @@ func (g *dguest) reopen(d *dfile, flags int64) (*dfile, lxErrno) {
 		// being removed (a runtime reopens its unlinked exec fifo O_WRONLY here).
 		hf := goOpenFlags(flags)
 		if flags&lxONonblock != 0 {
-			hf |= hostONonblock
+			hf |= hostfs.HostONonblock
 		}
 		rf, e := reopenMode(d.pathFD, hf)
 		if e != 0 {
@@ -603,11 +604,11 @@ func (g *dguest) reopen(d *dfile, flags int64) (*dfile, lxErrno) {
 		}
 		return nd, 0
 	}
-	st, err := fstatOf(d.f)
+	st, err := hostfs.FstatOf(d.f)
 	if err != nil {
 		return nil, lxEBADF
 	}
-	if st.mode&lxSIFMT == lxSIFSCK {
+	if st.Mode()&lxSIFMT == lxSIFSCK {
 		return nil, lxENXIO
 	}
 	f, e := dupMode(d.f, acc)
@@ -724,7 +725,7 @@ func emptyDir() string {
 // memFile is an open non-host file: it has no host file (dfile.f is nil), so
 // generic fd code treats it as a non-host fd and read, write, lseek and fstat ask
 // memOf. It serves two kinds. A synthetic file (/proc, /sys) generates its bytes
-// on demand from a pnode (n). An in-memory backend file (tmpfs, WithFS) reads and
+// on demand from a pnode (n). An in-memory backend file (tmpfs, WithMount) reads and
 // writes real content through a core.File handle (vf) over a core.Node (vn).
 type memFile struct {
 	memory procMemIO
@@ -1033,11 +1034,11 @@ func lxRdev(fi os.FileInfo) uint64 {
 	case *pnode:
 		return s.rdev
 	}
-	if st, ok := statOf(fi); ok && fi.Mode()&os.ModeDevice != 0 {
+	if st, ok := hostfs.StatOf(fi); ok && fi.Mode()&os.ModeDevice != 0 {
 		if r, ok := ttyRdev(fi); ok {
 			return r
 		}
-		return st.rdev
+		return st.Rdev()
 	}
 	return 0
 }
@@ -1122,15 +1123,15 @@ func (fs *dfs) fdTarget(d *dfile) string {
 	if f == nil {
 		return "/dev/null"
 	}
-	st, err := fstatOf(f)
+	st, err := hostfs.FstatOf(f)
 	if err != nil {
 		return "/dev/null"
 	}
-	switch st.mode & lxSIFMT {
+	switch st.Mode() & lxSIFMT {
 	case lxSIFIFO:
-		return "pipe:[" + strconv.FormatUint(st.ino&0xffffffff, 10) + "]"
+		return "pipe:[" + strconv.FormatUint(st.Ino()&0xffffffff, 10) + "]"
 	case lxSIFSCK:
-		return "socket:[" + strconv.FormatUint(st.ino&0xffffffff, 10) + "]"
+		return "socket:[" + strconv.FormatUint(st.Ino()&0xffffffff, 10) + "]"
 	case lxSIFCHR:
 		if hostIsTTY(f) {
 			return "/dev/pts/0"

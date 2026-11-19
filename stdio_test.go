@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // stdioRoot is the root the stdio tests run busybox in: the host's own on
@@ -37,7 +39,7 @@ func stdioRoot(t testing.TB) string {
 func sh(t testing.TB, cmd string, opts ...Option) int {
 	t.Helper()
 	root := stdioRoot(t)
-	code, err := Run(context.Background(), "/bin/busybox", append([]Option{WithRoot(root), WithArgs("sh", "-c", cmd)}, opts...)...)
+	code, err := Run(context.Background(), "/bin/busybox", append([]Option{WithMount("/", hostfs.Dir(root)), WithArgs("sh", "-c", cmd)}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +109,7 @@ func stdiocheck(t testing.TB) (root, prog string) {
 // status is the source line of the first failed check.
 func TestStdioDiscardGuestView(t *testing.T) {
 	root, prog := stdiocheck(t)
-	code, err := Run(context.Background(), prog, WithRoot(root), WithDiscardStdio())
+	code, err := Run(context.Background(), prog, WithMount("/", hostfs.Dir(root)), WithDiscardStdio())
 	if err != nil || code != 0 {
 		t.Fatalf("code %d (testdata/stdiocheck.c line), err %v", code, err)
 	}
@@ -133,7 +135,7 @@ var stdioSinks = []struct {
 func BenchmarkStdioWrite(b *testing.B) {
 	root, prog := stdiocheck(b)
 	benchStdio(b, func(w io.Writer) (int, error) {
-		return Run(context.Background(), prog, WithRoot(root), WithArgs("write", "25600"), WithStdout(w))
+		return Run(context.Background(), prog, WithMount("/", hostfs.Dir(root)), WithArgs("write", "25600"), WithStdout(w))
 	})
 }
 

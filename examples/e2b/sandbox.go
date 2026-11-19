@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/samyfodil/laboon"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // DefaultImage has python3 and a shell, like E2B's default code sandbox.
@@ -67,7 +68,7 @@ func (s *Sandbox) RunCommand(ctx context.Context, name string, args ...string) (
 		laboon.WithArgs(append([]string{name}, args...)...),
 		laboon.WithStdout(&out),
 		laboon.WithStderr(&errb),
-		laboon.WithMount(wd, "/workspace"),
+		laboon.WithMount("/workspace", hostfs.Dir(wd)),
 		laboon.WithDir("/workspace"),
 	}
 	if s.Net {

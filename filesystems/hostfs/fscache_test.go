@@ -1,6 +1,6 @@
 //go:build darwin || linux
 
-package sandbox
+package hostfs
 
 import (
 	"os"
@@ -9,7 +9,7 @@ import (
 )
 
 // cacheSetup returns the cached host access over a lower and an upper layer.
-func cacheSetup(t *testing.T) (*cachedFS, string) {
+func cacheSetup(t *testing.T) (*CachedFS, string) {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir()) // the host walk refuses symlinks, as macOS's /var
 	if err != nil {
@@ -21,7 +21,7 @@ func cacheSetup(t *testing.T) (*cachedFS, string) {
 			t.Fatal(err)
 		}
 	}
-	return newHostFS(lower, upper, "").(*cachedFS), upper
+	return NewHostFS(lower, upper, "").(*CachedFS), upper
 }
 
 // TestCacheSeesMknodSocket checks a socket made with mknod in the upper layer

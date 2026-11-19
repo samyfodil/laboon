@@ -1,6 +1,6 @@
 //go:build windows
 
-package sandbox
+package hostfs
 
 import (
 	"bufio"
@@ -23,10 +23,10 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/samyfodil/laboon/filesystems/winfs"
+	"github.com/samyfodil/laboon/core"
 )
 
-// The Windows hostFS. NTFS has no POSIX modes, owners, FIFOs or usable
+// The Windows HostFS. NTFS has no POSIX modes, owners, FIFOs or usable
 // symlinks, so a side table keyed by (volume serial, file id) holds each
 // object's Linux mode, type bits included. A Linux symlink is a regular file
 // whose content is the target, typed S_IFLNK in the table; the overlay
@@ -35,7 +35,7 @@ import (
 // when the rootfs is built; an entry-less lower file is 0755, an upper one
 // gets its mode when the guest creates it.
 //
-// Guest names NTFS cannot hold are escaped (internal/winfs) and unescaped on
+// Guest names NTFS cannot hold are escaped (winfs.go) and unescaped on
 // readdir.
 //
 // Directories we create are case-sensitive (FILE_CASE_SENSITIVE_INFORMATION,
@@ -79,40 +79,40 @@ func metaDel(k fileKey) {
 	delete(winMeta.m, k)
 }
 
-type winFS struct {
+type WinFS struct {
 	rootAbs, upperAbs, workAbs string
 	lowerExact, upperExact     bool // the layer is case-insensitive: check exact names
 }
 
-// hostONonblock is the host open flag for a non-blocking open; Windows files
+// HostONonblock is the host open flag for a non-blocking open; Windows files
 // have none.
-const hostONonblock = 0
+const HostONonblock = 0
 
-// fifoRendezvous is false: Windows has no real FIFOs (a named-pipe node is
+// FifoRendezvous is false: Windows has no real FIFOs (a named-pipe node is
 // metadata only), so a FIFO open goes straight to the backend with no
 // reader/writer rendezvous.
-const fifoRendezvous = false
+const FifoRendezvous = false
 
-func newHostFS(rootAbs, upperAbs, workAbs string) hostFS {
-	fs := &winFS{rootAbs: rootAbs, upperAbs: upperAbs, workAbs: workAbs}
+func NewHostFS(rootAbs, upperAbs, workAbs string) HostFS {
+	fs := &WinFS{rootAbs: rootAbs, upperAbs: upperAbs, workAbs: workAbs}
 	for _, d := range []string{upperAbs, workAbs} {
-		if d != "" && !winfs.SetCaseSensitive(d) {
+		if d != "" && !SetCaseSensitive(d) {
 			fs.upperExact = true
 		}
 	}
 	if rootAbs != "" {
-		fs.lowerExact = !winfs.CaseSensitive(rootAbs)
+		fs.lowerExact = !CaseSensitive(rootAbs)
 		loadLowerMeta(rootAbs)
 	}
 	return fs
 }
 
-// newRawHostFS is an uncached host backend confined to root (see the linux note).
-func newRawHostFS(root string) hostFS { return &winFS{rootAbs: root} }
+// NewRawHostFS is an uncached host backend confined to root (see the linux note).
+func NewRawHostFS(root string) HostFS { return &WinFS{rootAbs: root} }
 
 const fileFlagsReparseBackup = windows.FILE_FLAG_BACKUP_SEMANTICS | windows.FILE_FLAG_OPEN_REPARSE_POINT
 
-var extPath = winfs.ExtPath
+var extPath = ExtPath
 
 func openAttr(p string, access uint32) (windows.Handle, error) {
 	return windows.CreateFile(extPath(p), access,
@@ -120,7 +120,7 @@ func openAttr(p string, access uint32) (windows.Handle, error) {
 		nil, windows.OPEN_EXISTING, fileFlagsReparseBackup, 0)
 }
 
-// loadLowerMeta reads <root>.lcmeta (internal/winfs): each entry's mode, and
+// loadLowerMeta reads <root>.lcmeta (winfs.go): each entry's mode, and
 // its owner when it is not root's.
 func loadLowerMeta(root string) {
 	winMeta.mu.Lock()
@@ -133,7 +133,7 @@ func loadLowerMeta(root string) {
 	if done {
 		return
 	}
-	f, err := os.Open(root + winfs.MetaSuffix)
+	f, err := os.Open(root + MetaSuffix)
 	if err != nil {
 		return
 	}
@@ -176,17 +176,17 @@ func scanLowerMeta(root string, f *os.File) []metaEnt {
 	dirs := map[string]map[string]uint64{}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		e, ok := winfs.ParseEntry(sc.Text())
+		e, ok := ParseEntry(sc.Text())
 		if !ok {
 			continue
 		}
 		dir, name := path.Split("/" + e.Path)
 		ids, ok := dirs[dir]
 		if !ok {
-			ids = dirIDs(hostPath(root, dir))
+			ids = dirIDs(HostPath(root, dir))
 			dirs[dir] = ids
 		}
-		if id, ok := ids[winfs.EscapeName(name)]; ok {
+		if id, ok := ids[EscapeName(name)]; ok {
 			out = append(out, metaEnt{id, e.Mode, e.Uid, e.Gid})
 		}
 	}
@@ -282,16 +282,6 @@ func dirIDs(dir string) map[string]uint64 {
 	return ids
 }
 
-// seedLowerOwners gives the overlay the owners the lower layer's .lcmeta
-// names; files without one are root's.
-func seedLowerOwners(fs *dfs) {
-	winMeta.mu.Lock()
-	defer winMeta.mu.Unlock()
-	for k, o := range winMeta.own {
-		fs.ov.update(ikey{uint64(k.vol), k.id}, func(m *imeta) { m.uid, m.gid, m.hasOwner = o[0], o[1], true })
-	}
-}
-
 func keyOf(p string) (fileKey, *windows.ByHandleFileInformation, error) {
 	h, err := openAttr(p, windows.FILE_READ_ATTRIBUTES)
 	if err != nil {
@@ -313,11 +303,11 @@ func filetimeTs(t windows.Filetime) syscall.Timespec {
 	return syscall.NsecToTimespec(t.Nanoseconds())
 }
 
-// byHandleStat is a host file's hostStat from its handle information and the
+// byHandleStat is a host file's HostStat from its handle information and the
 // side table.
-func byHandleStat(fi *windows.ByHandleFileInformation) hostStat {
+func byHandleStat(fi *windows.ByHandleFileInformation) HostStat {
 	k := handleKey(fi)
-	st := hostStat{
+	st := HostStat{
 		dev: uint64(k.vol), ino: k.id,
 		nlink: fi.NumberOfLinks, size: int64(fi.FileSizeHigh)<<32 | int64(fi.FileSizeLow),
 		blksize: 4096,
@@ -336,10 +326,10 @@ func byHandleStat(fi *windows.ByHandleFileInformation) hostStat {
 	return st
 }
 
-// winInfo is the os.FileInfo of an hLstat; Sys is its *hostStat.
+// winInfo is the os.FileInfo of an hLstat; Sys is its *HostStat.
 type winInfo struct {
 	name string
-	st   hostStat
+	st   HostStat
 }
 
 func (w *winInfo) Name() string       { return w.name }
@@ -376,29 +366,29 @@ func (w *winInfo) Mode() os.FileMode {
 	return m
 }
 
-// statOf is fi's hostStat when fi describes a host file.
-func statOf(fi os.FileInfo) (hostStat, bool) {
-	if st, ok := fi.Sys().(*hostStat); ok {
+// StatOf is fi's HostStat when fi describes a host file.
+func StatOf(fi os.FileInfo) (HostStat, bool) {
+	if st, ok := fi.Sys().(*HostStat); ok {
 		return *st, true
 	}
-	return hostStat{}, false
+	return HostStat{}, false
 }
 
-// fileStat is the os.FileInfo of the open file f.
-func fileStat(f *os.File) (os.FileInfo, error) {
+// FileStat is the os.FileInfo of the open file f.
+func FileStat(f *os.File) (os.FileInfo, error) {
 	h := windows.Handle(f.Fd())
-	name := winfs.UnescapeName(filepath.Base(f.Name()))
+	name := UnescapeName(filepath.Base(f.Name()))
 	switch t, _ := windows.GetFileType(h); t {
 	case windows.FILE_TYPE_PIPE:
-		return &winInfo{name: name, st: hostStat{mode: lxSIFIFO | 0o600, nlink: 1, blksize: 4096, ino: uint64(h)}}, nil
+		return &winInfo{name: name, st: HostStat{mode: lxSIFIFO | 0o600, nlink: 1, blksize: 4096, ino: uint64(h)}}, nil
 	case windows.FILE_TYPE_CHAR:
 		if f.Name() == "pipe:" {
-			return &winInfo{name: name, st: hostStat{mode: lxSIFIFO | 0o600, nlink: 1, blksize: 4096, ino: uint64(h)}}, nil
+			return &winInfo{name: name, st: HostStat{mode: lxSIFIFO | 0o600, nlink: 1, blksize: 4096, ino: uint64(h)}}, nil
 		}
 		if strings.HasPrefix(f.Name(), "socket:") {
-			return &winInfo{name: name, st: hostStat{mode: lxSIFSCK | 0o777, nlink: 1, blksize: 4096, ino: uint64(h)}}, nil
+			return &winInfo{name: name, st: HostStat{mode: lxSIFSCK | 0o777, nlink: 1, blksize: 4096, ino: uint64(h)}}, nil
 		}
-		return &winInfo{name: name, st: hostStat{mode: lxSIFCHR | 0o620, nlink: 1, blksize: 4096, ino: uint64(h)}}, nil
+		return &winInfo{name: name, st: HostStat{mode: lxSIFCHR | 0o620, nlink: 1, blksize: 4096, ino: uint64(h)}}, nil
 	}
 	var fi windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &fi); err != nil {
@@ -407,18 +397,18 @@ func fileStat(f *os.File) (os.FileInfo, error) {
 	return &winInfo{name: name, st: byHandleStat(&fi)}, nil
 }
 
-func fstatOf(f *os.File) (hostStat, error) {
-	fi, err := fileStat(f)
+func FstatOf(f *os.File) (HostStat, error) {
+	fi, err := FileStat(f)
 	if err != nil {
-		return hostStat{}, err
+		return HostStat{}, err
 	}
-	return *fi.Sys().(*hostStat), nil
+	return *fi.Sys().(*HostStat), nil
 }
 
 // ---- names -------------------------------------------------------------------
 
-// hostPath is the host path of resolved guest path gp under root.
-func hostPath(root, gp string) string {
+// HostPath is the host path of resolved guest path gp under root.
+func HostPath(root, gp string) string {
 	var b strings.Builder
 	b.WriteString(root)
 	for _, c := range strings.Split(gp, "/") {
@@ -426,7 +416,7 @@ func hostPath(root, gp string) string {
 			continue
 		}
 		b.WriteByte('\\')
-		b.WriteString(winfs.EscapeName(c))
+		b.WriteString(EscapeName(c))
 	}
 	if b.Len() == len(root) && !strings.HasSuffix(root, `\`) {
 		return root
@@ -434,7 +424,7 @@ func hostPath(root, gp string) string {
 	return b.String()
 }
 
-func (fs *winFS) exact(p string) bool {
+func (fs *WinFS) exact(p string) bool {
 	switch {
 	case fs.rootAbs != "" && strings.HasPrefix(p, fs.rootAbs+`\`):
 		if !fs.lowerExact {
@@ -457,9 +447,9 @@ func notExist(op, p string) error {
 	return &os.PathError{Op: op, Path: p, Err: windows.ERROR_FILE_NOT_FOUND}
 }
 
-// ---- hostFS ----------------------------------------------------------------------
+// ---- HostFS ----------------------------------------------------------------------
 
-func (fs *winFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
+func (fs *WinFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
 	if !fs.exact(p) {
 		return nil, notExist("open", p)
 	}
@@ -508,7 +498,7 @@ func (fs *winFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
 	}
 	if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		windows.CloseHandle(h)
-		return nil, &os.PathError{Op: "open", Path: p, Err: lxErr(lxELOOP)}
+		return nil, &os.PathError{Op: "open", Path: p, Err: lxELOOP}
 	}
 	if disp == windows.CREATE_NEW {
 		metaSet(handleKey(&fi), lxSIFREG|uint32(perm.Perm()))
@@ -516,7 +506,7 @@ func (fs *winFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
 	return os.NewFile(uintptr(h), p), nil
 }
 
-func (fs *winFS) hLstat(p string) (os.FileInfo, error) {
+func (fs *WinFS) hLstat(p string) (os.FileInfo, error) {
 	if !fs.exact(p) {
 		return nil, notExist("lstat", p)
 	}
@@ -525,24 +515,24 @@ func (fs *winFS) hLstat(p string) (os.FileInfo, error) {
 		return nil, err
 	}
 	if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return nil, &os.PathError{Op: "lstat", Path: p, Err: lxErr(lxELOOP)}
+		return nil, &os.PathError{Op: "lstat", Path: p, Err: lxELOOP}
 	}
-	return &winInfo{name: winfs.UnescapeName(filepath.Base(p)), st: byHandleStat(fi)}, nil
+	return &winInfo{name: UnescapeName(filepath.Base(p)), st: byHandleStat(fi)}, nil
 }
 
-func (fs *winFS) hReadlink(p string) (string, error) {
+func (fs *WinFS) hReadlink(p string) (string, error) {
 	fi, err := fs.hLstat(p)
 	if err != nil {
 		return "", err
 	}
 	if fi.Mode()&os.ModeSymlink == 0 {
-		return "", &os.PathError{Op: "readlink", Path: p, Err: lxErr(lxEINVAL)}
+		return "", &os.PathError{Op: "readlink", Path: p, Err: lxEINVAL}
 	}
 	b, err := os.ReadFile(p)
 	return string(b), err
 }
 
-func (fs *winFS) hMkdir(p string, perm uint32) error {
+func (fs *WinFS) hMkdir(p string, perm uint32) error {
 	if err := windows.CreateDirectory(extPath(p), nil); err != nil {
 		return &os.PathError{Op: "mkdir", Path: p, Err: err}
 	}
@@ -553,13 +543,13 @@ func (fs *winFS) hMkdir(p string, perm uint32) error {
 }
 
 // mkTyped creates p as a regular file holding data, typed mode in the table.
-func (fs *winFS) mkTyped(p string, mode uint32, data []byte) error {
+func (fs *WinFS) mkTyped(p string, mode uint32, data []byte) error {
 	f, err := fs.hOpen(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
 	_, werr := f.Write(data)
-	fi, serr := fileStat(f)
+	fi, serr := FileStat(f)
 	f.Close()
 	if werr == nil {
 		werr = serr
@@ -568,20 +558,20 @@ func (fs *winFS) mkTyped(p string, mode uint32, data []byte) error {
 		os.Remove(p)
 		return werr
 	}
-	st := fi.Sys().(*hostStat)
+	st := fi.Sys().(*HostStat)
 	metaSet(fileKey{uint32(st.dev), st.ino}, mode)
 	return nil
 }
 
-func (fs *winFS) hSymlink(target, p string) error {
+func (fs *WinFS) hSymlink(target, p string) error {
 	return fs.mkTyped(p, lxSIFLNK|0o777, []byte(target))
 }
 
-func (fs *winFS) hMkfifo(p string, perm uint32) error {
+func (fs *WinFS) hMkfifo(p string, perm uint32) error {
 	return fs.mkTyped(p, lxSIFIFO|perm&0o7777, nil)
 }
 
-func (fs *winFS) hMksock(p string, perm uint32) error {
+func (fs *WinFS) hMksock(p string, perm uint32) error {
 	return fs.mkTyped(p, lxSIFSCK|perm&0o7777, nil)
 }
 
@@ -619,7 +609,7 @@ func renameHandle(h windows.Handle, to string) error {
 	return windows.SetFileInformationByHandle(h, fileRenameInfoExClass, &buf[0], uint32(len(buf)))
 }
 
-func (fs *winFS) hRename(from, to string, exchange bool) error {
+func (fs *WinFS) hRename(from, to string, exchange bool) error {
 	if exchange {
 		tmp := filepath.Join(fs.workAbs, "xchg-"+strconv.FormatUint(hostSeq.Add(1), 10))
 		if err := fs.hRename(from, tmp, false); err != nil {
@@ -653,7 +643,7 @@ func (fs *winFS) hRename(from, to string, exchange bool) error {
 	return nil
 }
 
-func (fs *winFS) hUnlink(p string, dir bool) error {
+func (fs *WinFS) hUnlink(p string, dir bool) error {
 	k, fi, err := keyOf(p)
 	if err != nil {
 		return err
@@ -661,9 +651,9 @@ func (fs *winFS) hUnlink(p string, dir bool) error {
 	isDir := fi.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 	if dir != isDir {
 		if dir {
-			return &os.PathError{Op: "rmdir", Path: p, Err: lxErr(lxENOTDIR)}
+			return &os.PathError{Op: "rmdir", Path: p, Err: lxENOTDIR}
 		}
-		return &os.PathError{Op: "unlink", Path: p, Err: lxErr(lxEISDIR)}
+		return &os.PathError{Op: "unlink", Path: p, Err: lxEISDIR}
 	}
 	if dir {
 		err = windows.RemoveDirectory(extPath(p))
@@ -695,7 +685,7 @@ func deletePosix(p string) error {
 	return nil
 }
 
-func (fs *winFS) hChmod(p string, mode uint32) error {
+func (fs *WinFS) hChmod(p string, mode uint32) error {
 	k, fi, err := keyOf(p)
 	if err != nil {
 		return err
@@ -711,7 +701,7 @@ func setTimes(h windows.Handle, atime, mtime syscall.Timespec) error {
 	return windows.SetFileTime(h, nil, &a, &m)
 }
 
-func (fs *winFS) hUtimes(p string, atime, mtime syscall.Timespec) error {
+func (fs *WinFS) hUtimes(p string, atime, mtime syscall.Timespec) error {
 	h, err := openAttr(p, windows.FILE_WRITE_ATTRIBUTES)
 	if err != nil {
 		return &os.PathError{Op: "utimes", Path: p, Err: err}
@@ -720,9 +710,9 @@ func (fs *winFS) hUtimes(p string, atime, mtime syscall.Timespec) error {
 	return setTimes(h, atime, mtime)
 }
 
-// futimesOf sets the open file f's times, through its path when the handle
+// FutimesOf sets the open file f's times, through its path when the handle
 // lacks FILE_WRITE_ATTRIBUTES.
-func futimesOf(f *os.File, atime, mtime syscall.Timespec) error {
+func FutimesOf(f *os.File, atime, mtime syscall.Timespec) error {
 	if setTimes(windows.Handle(f.Fd()), atime, mtime) == nil {
 		return nil
 	}
@@ -734,16 +724,16 @@ func futimesOf(f *os.File, atime, mtime syscall.Timespec) error {
 	return setTimes(h, atime, mtime)
 }
 
-func (fs *winFS) hLink(from, to string) error {
+func (fs *WinFS) hLink(from, to string) error {
 	if err := windows.CreateHardLink(extPath(to), extPath(from), 0); err != nil {
 		return &os.LinkError{Op: "link", Old: from, New: to, Err: err}
 	}
 	return nil
 }
 
-func (fs *winFS) hClone(from, to string) error { return errors.ErrUnsupported }
+func (fs *WinFS) hClone(from, to string) error { return errors.ErrUnsupported }
 
-func (fs *winFS) hCloneFile(f *os.File, to string) error {
+func (fs *WinFS) hCloneFile(f *os.File, to string) error {
 	out, err := fs.hOpen(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
@@ -755,7 +745,7 @@ func (fs *winFS) hCloneFile(f *os.File, to string) error {
 	return err
 }
 
-func (fs *winFS) hTruncate(p string, n int64) error {
+func (fs *WinFS) hTruncate(p string, n int64) error {
 	f, err := fs.hOpen(p, os.O_WRONLY, 0)
 	if err != nil {
 		return err
@@ -764,24 +754,24 @@ func (fs *winFS) hTruncate(p string, n int64) error {
 	return f.Truncate(n)
 }
 
-func (fs *winFS) hStatfs(dir string) (hostStatfs, error) {
+func (fs *WinFS) hStatfs(dir string) (core.StatFS, error) {
 	var avail, total, free uint64
 	if err := windows.GetDiskFreeSpaceEx(extPath(dir+`\`), &avail, &total, &free); err != nil {
-		return hostStatfs{}, &os.PathError{Op: "statfs", Path: dir, Err: err}
+		return core.StatFS{}, &os.PathError{Op: "statfs", Path: dir, Err: err}
 	}
 	k, _, _ := keyOf(dir)
-	return hostStatfs{
-		bsize: 4096, blocks: total / 4096, bfree: free / 4096, bavail: avail / 4096,
-		files: 1 << 32, ffree: 1 << 31, fsid: [2]uint32{k.vol, 0},
+	return core.StatFS{
+		Bsize: 4096, Blocks: total / 4096, Bfree: free / 4096, Bavail: avail / 4096,
+		Files: 1 << 32, Ffree: 1 << 31, Fsid: [2]uint32{k.vol, 0},
 	}, nil
 }
 
-// fstatfsOf is the statfs of the filesystem holding the open file f.
-func fstatfsOf(f *os.File) (hostStatfs, error) {
-	return (&winFS{}).hStatfs(filepath.Dir(f.Name()))
+// FstatfsOf is the statfs of the filesystem holding the open file f.
+func FstatfsOf(f *os.File) (core.StatFS, error) {
+	return (&WinFS{}).hStatfs(filepath.Dir(f.Name()))
 }
 
-func (fs *winFS) hReadDir(p string) ([]os.FileInfo, error) {
+func (fs *WinFS) hReadDir(p string) ([]os.FileInfo, error) {
 	d, err := os.Open(p)
 	if err != nil {
 		return nil, err
@@ -801,8 +791,8 @@ func (fs *winFS) hReadDir(p string) ([]os.FileInfo, error) {
 	return out, nil
 }
 
-// fchmodOf sets the open file f's permission bits in the side table.
-func fchmodOf(f *os.File, mode uint32) error {
+// FchmodOf sets the open file f's permission bits in the side table.
+func FchmodOf(f *os.File, mode uint32) error {
 	var fi windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(windows.Handle(f.Fd()), &fi); err != nil {
 		return err
@@ -812,11 +802,11 @@ func fchmodOf(f *os.File, mode uint32) error {
 	return nil
 }
 
-// anonFile makes an unnamed host file in dir (named with prefix only while it
+// AnonFile makes an unnamed host file in dir (named with prefix only while it
 // is being made).
-func anonFile(dir, prefix string) (*os.File, error) {
+func AnonFile(dir, prefix string) (*os.File, error) {
 	p := filepath.Join(dir, prefix+strconv.FormatUint(hostSeq.Add(1), 10))
-	f, err := (&winFS{}).hOpen(p, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := (&WinFS{}).hOpen(p, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -829,7 +819,19 @@ func anonFile(dir, prefix string) (*os.File, error) {
 
 // modeless reports whether the host keeps no permission bits for f's object:
 // a socket, pipe or console, which fstat describes from the description.
-func modeless(f *os.File) bool {
+func Modeless(f *os.File) bool {
 	t, _ := windows.GetFileType(windows.Handle(f.Fd()))
 	return t != windows.FILE_TYPE_DISK
+}
+
+// LowerOwners returns the lower layer's non-root owners from the shared sidecar,
+// keyed by [volume, file id], for a consumer that seeds them into its own table.
+func LowerOwners() map[[2]uint64][2]uint32 {
+	winMeta.mu.Lock()
+	defer winMeta.mu.Unlock()
+	out := make(map[[2]uint64][2]uint32, len(winMeta.own))
+	for k, o := range winMeta.own {
+		out[[2]uint64{uint64(k.vol), k.id}] = o
+	}
+	return out
 }

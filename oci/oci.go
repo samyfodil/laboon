@@ -26,7 +26,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
-	"github.com/samyfodil/laboon/filesystems/winfs"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // Image is an unpacked image.
@@ -170,7 +170,7 @@ func store(dir, refFile, ref string, img v1.Image, maxSize int64) (*Image, error
 	if maxSize == 0 {
 		maxSize = 16 << 30
 	}
-	defer os.Remove(tmp + winfs.MetaSuffix)
+	defer os.Remove(tmp + hostfs.MetaSuffix)
 	if err := Unpack(flat, tmp, maxSize); err != nil {
 		return nil, fmt.Errorf("unpack %s: %w", ref, err)
 	}
@@ -183,8 +183,8 @@ func store(dir, refFile, ref string, img v1.Image, maxSize int64) (*Image, error
 	}
 	// A rootfs extracted for Windows keeps its POSIX metadata beside it; it
 	// moves first, so a rootfs never appears without it.
-	if _, err := os.Stat(tmp + winfs.MetaSuffix); err == nil {
-		if err := os.Rename(tmp+winfs.MetaSuffix, out.Root+winfs.MetaSuffix); err != nil {
+	if _, err := os.Stat(tmp + hostfs.MetaSuffix); err == nil {
+		if err := os.Rename(tmp+hostfs.MetaSuffix, out.Root+hostfs.MetaSuffix); err != nil {
 			return nil, err
 		}
 	}

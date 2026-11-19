@@ -171,21 +171,21 @@ func (d *dfile) sealCheckWrite(off int64, n int) lxErrno {
 	if !d.fx.memfd || d.fx.seals.Load() == 0 {
 		return 0
 	}
-	fi, err := fileStat(d.f)
+	_, size, err := d.hostStat()
 	if err != nil {
 		return osErrno(err)
 	}
 	end := off + int64(n)
 	if d.fx.oflags&lxOAppend != 0 {
-		end = fi.Size() + int64(n)
+		end = size + int64(n)
 	}
-	return d.checkSeals(fi.Size(), max(end, fi.Size()), true)
+	return d.checkSeals(size, max(end, size), true)
 }
 
 func (g *dguest) pread(fd int64, bufAddr uint64, n, off int64) int64 {
 	d, e := g.ioFile(fd)
 	if e != 0 {
-		// A non-host regular file (memFS, WithFS) has no host fd, so ioFile
+		// A non-host regular file (memFS, WithMount) has no host fd, so ioFile
 		// rejects it; serve its positional read through the backing, up to the
 		// end of file, like the sequential read path does.
 		if d2, ok := g.ft.get(int(fd)); ok && d2.vf != nil {
@@ -348,8 +348,8 @@ func (d *dfile) isRegular() bool {
 	if d.f == nil || d.isDir || d.fx.opath {
 		return false
 	}
-	fi, err := fileStat(d.f)
-	return err == nil && fi.Mode().IsRegular()
+	mode, _, err := d.hostStat()
+	return err == nil && mode.IsRegular()
 }
 
 func (d *dfile) isPipe() bool {
@@ -359,8 +359,8 @@ func (d *dfile) isPipe() bool {
 	if d.name() == "pipe:" {
 		return true
 	}
-	fi, err := fileStat(d.f)
-	return err == nil && fi.Mode()&os.ModeNamedPipe != 0
+	mode, _, err := d.hostStat()
+	return err == nil && mode&os.ModeNamedPipe != 0
 }
 
 func (g *dguest) readOff(addr uint64) (int64, lxErrno) {
@@ -501,9 +501,9 @@ func (g *dguest) copyFileRange(inFd int64, offInAddr uint64, outFd int64, offOut
 	if e != 0 {
 		return sErr(e)
 	}
-	ifi, err1 := fileStat(in.f)
-	ofi, err2 := fileStat(out.f)
-	if err1 == nil && err2 == nil && inodeKey(ifi) == inodeKey(ofi) && ioff < ooff+n && ooff < ioff+n {
+	idev, iino := in.hostDevIno()
+	odev, oino := out.hostDevIno()
+	if (idev != 0 || iino != 0) && idev == odev && iino == oino && ioff < ooff+n && ooff < ioff+n {
 		return sErr(lxEINVAL)
 	}
 	if e := out.sealCheckWrite(ooff, int(n)); e != 0 {
@@ -681,7 +681,7 @@ func (g *dguest) fallocate(fd, mode, off, n int64) int64 {
 // allocate extends it, KEEP_SIZE is a no-op, and a zero-range or hole (which must
 // keep the size) zeroes the range — all under the description's seals.
 func (g *dguest) fallocateHostFd(d *dfile, mode, off, n int64) int64 {
-	fi, err := fileStat(d.f)
+	_, size, err := d.hostStat()
 	if err != nil {
 		return sErr(osErrno(err))
 	}
@@ -695,12 +695,12 @@ func (g *dguest) fallocateHostFd(d *dfile, mode, off, n int64) int64 {
 		}
 		end := off + n
 		if mode&lxFallocKeepSize != 0 {
-			end = min(end, fi.Size())
+			end = min(end, size)
 		}
-		if e := d.zeroRange(off, min(end, fi.Size())); e != 0 {
+		if e := d.zeroRange(off, min(end, size)); e != 0 {
 			return sErr(e)
 		}
-		if end > fi.Size() {
+		if end > size {
 			if err := d.f.Truncate(end); err != nil {
 				return sErr(osErrno(err))
 			}
@@ -712,10 +712,10 @@ func (g *dguest) fallocateHostFd(d *dfile, mode, off, n int64) int64 {
 	default:
 		return sErr(lxEOPNOTSUPP)
 	}
-	if off+n <= fi.Size() {
+	if off+n <= size {
 		return 0
 	}
-	if e := d.checkSeals(fi.Size(), off+n, false); e != 0 {
+	if e := d.checkSeals(size, off+n, false); e != 0 {
 		return sErr(e)
 	}
 	if err := d.f.Truncate(off + n); err != nil {

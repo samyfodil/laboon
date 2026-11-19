@@ -261,12 +261,21 @@ func (n *tarNode) Open(flags int) (File, error) {
 	if n.kind != Reg {
 		return nil, syscall.EINVAL
 	}
-	return &tarFile{fs: n.fs, off: n.off, size: n.size}, nil
+	return &tarFile{n: n, fs: n.fs, off: n.off, size: n.size}, nil
 }
 
 type tarFile struct {
+	n         *tarNode
 	fs        *tarFS
 	off, size int64
+}
+
+func (h *tarFile) Stat() (Info, error) {
+	a, err := h.n.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return FileInfo("", a, h.n.ID()), nil
 }
 
 func (h *tarFile) ReadAt(p []byte, at int64) (int, error) {

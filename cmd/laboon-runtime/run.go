@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/samyfodil/laboon"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 const defaultStateRoot = "/run/laboon-runtime"
@@ -23,7 +24,7 @@ func specOptions(s *Spec, rootfs string, stdin io.Reader, stdout, stderr io.Writ
 	prog, opts := procOptions(s.Process, rootfs, stdin, stdout, stderr)
 	for _, m := range s.Mounts {
 		if m.Type == "bind" && m.Source != "" {
-			opts = append(opts, laboon.WithMount(m.Source, m.Destination))
+			opts = append(opts, laboon.WithMount(m.Destination, hostfs.Dir(m.Source)))
 		}
 	}
 	return prog, opts
@@ -34,7 +35,7 @@ func specOptions(s *Spec, rootfs string, stdin io.Reader, stdout, stderr io.Writ
 func procOptions(p *Process, rootfs string, stdin io.Reader, stdout, stderr io.Writer) (string, []laboon.Option) {
 	prog := lookPath(rootfs, p.Args[0], p.Env)
 	opts := []laboon.Option{
-		laboon.WithRoot(rootfs),
+		laboon.WithMount("/", hostfs.Dir(rootfs)),
 		laboon.WithArgs(p.Args[1:]...),
 		laboon.WithStdio(stdin, stdout, stderr),
 	}

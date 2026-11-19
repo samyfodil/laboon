@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"golang.org/x/sys/unix"
 )
 
@@ -405,14 +406,14 @@ func rootedProgram(root, prog string) (string, bool) {
 	// Resolve through the root's overlay Namespace (no upper, no pseudo mounts):
 	// it follows symlinks the way execve does, restarting an absolute target at
 	// the root. The resolved guest path maps straight back to its host path.
-	fs := &dfs{rootAbs: abs, hostFS: newHostFS(abs, "", "")}
+	fs := &dfs{rootAbs: abs, hostFS: hostfs.NewHostFS(abs, "", "")}
 	fs.ov.store = core.NewMetaStore()
 	fs.buildNS()
 	loc, err := fs.ns.Resolve(path.Clean("/"+prog), true)
 	if err != nil {
 		return "", false
 	}
-	return hostPath(abs, loc.Path), true
+	return hostfs.HostPath(abs, loc.Path), true
 }
 
 // fexecHost gives an open file a private host path the program loader can map:
@@ -427,7 +428,7 @@ func (g *dguest) fexecHost(f *os.File) (string, lxErrno) {
 	if !fi.Mode().IsRegular() {
 		return "", lxEACCES
 	}
-	dev, ino := hostDevIno(fi)
+	dev, ino := HostDevIno(fi)
 	key := sha256.Sum256(fmt.Appendf(nil, "fexec %d %d %d %d", dev, ino, fi.Size(), fi.ModTime().UnixNano()))
 	fs := g.dfs
 	fs.mu.Lock()

@@ -7,6 +7,8 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // Advisory file locks, kept by the supervisor: every guest process's host
@@ -76,7 +78,17 @@ func (g *dguest) lockKey(d *dfile) (lkey, lxErrno) {
 	if d.f == nil || d.fx.opath {
 		return lkey{}, lxEBADF
 	}
-	fi, err := fileStat(d.f)
+	if d.hf != nil { // a filesystem object: its vfs identity, kept across copy-up
+		info, err := d.hf.Stat()
+		if err != nil {
+			return lkey{}, osErrno(err)
+		}
+		id := info.ID()
+		return lkey{g.dfs, g.ov.originOf(ikey{id.Dev, id.Ino})}, 0
+	}
+	// A supervisor-owned object (memfd, device) has no vfs handle; its own
+	// descriptor's identity keys the lock.
+	fi, err := hostfs.FileStat(d.f)
 	if err != nil {
 		return lkey{}, osErrno(err)
 	}
@@ -231,11 +243,11 @@ func (g *dguest) fcntlLock(d *dfile, cmd int64, addr uint64) int64 {
 		}
 		base = p
 	case io.SeekEnd:
-		fi, err := fileStat(d.f)
+		_, size, err := d.hostStat()
 		if err != nil {
 			return sErr(osErrno(err))
 		}
-		base = fi.Size()
+		base = size
 	default:
 		return sErr(lxEINVAL)
 	}

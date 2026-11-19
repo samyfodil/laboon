@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"golang.org/x/sys/unix"
 )
 
@@ -106,7 +107,7 @@ func (g *dguest) getxattr(gp string, d *dfile, name string, buf uint64, size int
 	var val []byte
 	var err error
 	if d != nil {
-		fi, serr := d.f.Stat()
+		fi, serr := hostfs.FileStat(d.f)
 		if serr != nil {
 			return sErr(osErrno(serr))
 		}
@@ -209,7 +210,7 @@ func (g *dguest) setxattr(gp string, d *dfile, name string, valAddr uint64, size
 	}
 	user := strings.HasPrefix(name, "user.")
 	if g.fdInPlace(d) {
-		fi, serr := fileStat(d.f)
+		fi, serr := hostfs.FileStat(d.f)
 		if serr != nil {
 			return sErr(osErrno(serr))
 		}

@@ -1,6 +1,10 @@
 package core
 
-import "io"
+import (
+	"io"
+	"os"
+	"time"
+)
 
 // This file is the vfs abstraction's contract, modeled on the Linux VFS: names,
 // objects, mounts and open files are separate concerns. A FileSystem owns
@@ -29,6 +33,78 @@ type File interface {
 	io.WriterAt
 	Truncate(size int64) error
 	Close() error
+	// Stat reports the open handle's attributes — fstat on this File, not a
+	// re-resolution of any path, so it stays correct after the file is renamed or
+	// unlinked, and so identity comes from the opened object, never a pre-open
+	// lookup. The result is an Info: an os.FileInfo (so existing mode/size checks
+	// keep working) that also exposes the backend-agnostic Attr and NodeID a guest
+	// stat is built from. A host-backed File does the fstat, platform
+	// normalization and override application inside its backend; an in-memory or
+	// synthetic one builds the Info from its node with FileInfo. The sandbox
+	// answers the guest's fstat through this and never reaches past the File to a
+	// raw descriptor to interpret host metadata itself.
+	Stat() (Info, error)
+}
+
+// Info is the result of File.Stat and the single shape a guest stat is built
+// from. It is an os.FileInfo, so code that only needs mode/size/modtime is
+// unchanged, and it carries the full backend-agnostic Attr and the object's
+// NodeID (dev/ino) as typed accessors, so a consumer never type-asserts Sys or
+// reaches into a backend. Mode/Size/ModTime agree with Attr.
+type Info interface {
+	os.FileInfo
+	// Attr is the full metadata snapshot.
+	Attr() Attr
+	// ID is the identity (dev/ino) of the object this Info describes, taken from
+	// the opened object for a File.Stat.
+	ID() NodeID
+}
+
+// FileInfo builds an Info from a node's identity and attributes, so any backend
+// returns the standard shape from File.Stat without holding a host file. Sys
+// reports the Attr it was built from.
+func FileInfo(name string, a Attr, id NodeID) Info { return fileInfo{name, a, id} }
+
+type fileInfo struct {
+	name string
+	a    Attr
+	id   NodeID
+}
+
+func (f fileInfo) Name() string       { return f.name }
+func (f fileInfo) Size() int64        { return f.a.Size }
+func (f fileInfo) IsDir() bool        { return f.a.Kind == Dir }
+func (f fileInfo) ModTime() time.Time { return time.Unix(0, f.a.Mtime) }
+func (f fileInfo) Sys() any           { return f.a }
+func (f fileInfo) Attr() Attr         { return f.a }
+func (f fileInfo) ID() NodeID         { return f.id }
+
+func (f fileInfo) Mode() os.FileMode {
+	m := os.FileMode(f.a.Mode & 0o777)
+	switch f.a.Kind {
+	case Dir:
+		m |= os.ModeDir
+	case Symlink:
+		m |= os.ModeSymlink
+	case Fifo:
+		m |= os.ModeNamedPipe
+	case Socket:
+		m |= os.ModeSocket
+	case Chardev:
+		m |= os.ModeDevice | os.ModeCharDevice
+	case Blockdev:
+		m |= os.ModeDevice
+	}
+	if f.a.Mode&0o4000 != 0 {
+		m |= os.ModeSetuid
+	}
+	if f.a.Mode&0o2000 != 0 {
+		m |= os.ModeSetgid
+	}
+	if f.a.Mode&0o1000 != 0 {
+		m |= os.ModeSticky
+	}
+	return m
 }
 
 // CreateSpec describes an object to create. Kind selects the object type; the

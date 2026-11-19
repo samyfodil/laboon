@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // TestMountSocket runs testdata/x11sock.c against a host AF_UNIX listener under
@@ -59,7 +61,7 @@ func TestMountSocket(t *testing.T) {
 	}
 
 	// With the bind, the guest reaches the host socket.
-	if code, out := run([]Mount{{Host: "/tmp/.X11-unix", Guest: "/tmp/.X11-unix"}}); code != 0 {
+	if code, out := run([]Mount{{Guest: "/tmp/.X11-unix", FS: hostfs.Dir("/tmp/.X11-unix")}}); code != 0 {
 		t.Fatalf("with mount: code %d (testdata/x11sock.c line)\n%s", code, out)
 	}
 	// Without it, a host socket in the rootfs is refused.

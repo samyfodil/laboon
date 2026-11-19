@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"github.com/samyfodil/laboon/internal/namespace"
 )
 
@@ -32,7 +33,7 @@ func TestHostDirFSMountedOnRoot(t *testing.T) {
 	}
 
 	// The sandbox's platform fs, as a FileSystem mounted on /.
-	ns := namespace.NewNamespace(newHostDirFS(dir, newHostFS(dir, "", "")))
+	ns := namespace.NewNamespace(hostfs.NewHostDirFS(dir, hostfs.NewHostFS(dir, "", "")))
 
 	read := func(p string) string {
 		t.Helper()

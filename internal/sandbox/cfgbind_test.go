@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // A Config.Mounts host-directory bind must expose the host subtree at the guest
@@ -28,7 +30,7 @@ func TestMountFileBind(t *testing.T) {
 	code, err := Run(ctx, exe, Config{
 		Args:   []string{exe},
 		RootFS: HostRoot("/"),
-		Mounts: []Mount{{Host: host, Guest: "/laboonbind"}},
+		Mounts: []Mount{{Guest: "/laboonbind", FS: hostfs.Dir(host)}},
 		Stdout: &out, Stderr: &out,
 	})
 	if err != nil || code != 0 || !strings.Contains(out.String(), "BIND-FILE-OK") {

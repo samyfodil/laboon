@@ -16,7 +16,7 @@ import (
 // through the File interface rather than a host path, so it composes with the
 // host and overlay backends uniformly. It is volatile — nothing persists past
 // the process — which makes it both the backing for a guest tmpfs and the
-// in-memory backend an embedder mounts directly (WithFS). It is safe for
+// in-memory backend an embedder mounts directly (WithMount). It is safe for
 // concurrent use: one RWMutex guards the whole tree and every node's content,
 // which is ample for the small, memcpy-cheap trees it holds.
 type memFS struct {
@@ -31,7 +31,7 @@ type memFS struct {
 var memDevSeq uint64
 
 // NewMemFS makes an empty in-memory FileSystem whose root is a directory
-// (mode 0755). Mount it with WithFS, or wrap it with ReadOnly or HardenFS.
+// (mode 0755). Mount it with WithMount, or wrap it with ReadOnly or HardenFS.
 func NewMemFS() FileSystem {
 	f := &memFS{dev: atomic.AddUint64(&memDevSeq, 1)}
 	f.root = f.newNode(Dir, 0o755)
@@ -344,6 +344,14 @@ func (n *memNode) Open(flags int) (File, error) {
 // the File contract requires; the node's data slice is the shared backing store,
 // guarded by the filesystem mutex.
 type memFile struct{ n *memNode }
+
+func (h *memFile) Stat() (Info, error) {
+	a, err := h.n.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return FileInfo("", a, h.n.ID()), nil
+}
 
 func (h *memFile) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {

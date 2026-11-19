@@ -33,7 +33,7 @@ var ErrKilled = sandbox.ErrKilled
 var defaultEnv = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/"}
 
 // Run runs program and returns its exit status. The program is a host path,
-// or a path inside WithRoot's directory. A guest killed by a signal exits
+// or a path inside the root filesystem WithMount("/") gives. A guest killed by a signal exits
 // with 128 plus the signal number; cancelling ctx kills it.
 func Run(ctx context.Context, program string, opts ...Option) (int, error) {
 	prog, cfg, err := programConfig(program, newOptions(opts))
@@ -150,7 +150,7 @@ func programConfig(program string, o *options) (string, sandbox.Config, error) {
 
 func imageRun(ctx context.Context, ref string, o *options) (string, sandbox.Config, error) {
 	if o.cfg.RootFS != nil {
-		return "", sandbox.Config{}, errors.New("WithRoot does not apply to an image")
+		return "", sandbox.Config{}, errors.New("a root filesystem (WithMount \"/\") does not apply to an image")
 	}
 	pull := o.pull
 	if o.platform != "" {

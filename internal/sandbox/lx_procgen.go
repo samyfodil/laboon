@@ -829,9 +829,7 @@ func fdinfo(p *dguest, fd int) []byte {
 				flags |= lxOAppend
 			}
 		}
-		if fi, err := fileStat(d.f); err == nil {
-			_, ino = hostDevIno(fi)
-		}
+		_, ino = d.hostDevIno()
 	}
 	if d.nonblock.Load() {
 		flags |= lxONonblock
@@ -1023,7 +1021,7 @@ func (g *dguest) mapsLines(p *dguest, es []mapEnt) []string {
 	imgName := func(gp string) fileName {
 		fn := fileName{path: gp}
 		if fi, e := g.lstatGuest(gp); e == 0 { // dev/ino through the routed overlay node
-			fn.dev, fn.ino = hostDevIno(fi)
+			fn.dev, fn.ino = HostDevIno(fi)
 		}
 		return fn
 	}

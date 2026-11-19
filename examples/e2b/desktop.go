@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/samyfodil/laboon"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // DesktopImage is a prebuilt XFCE image, so the desktop boots without installing
@@ -77,7 +78,7 @@ func (d *Desktop) Run(ctx context.Context, actions []Action) ([]byte, error) {
 
 	code, rerr := laboon.RunImage(ctx, img,
 		laboon.WithEntrypoint("bash", "-c", desktopScript(w, h, boot, actions)),
-		laboon.WithMount(out, "/out"),
+		laboon.WithMount("/out", hostfs.Dir(out)),
 		laboon.WithNet(),
 		laboon.WithUser("root"),      // prebuilt desktop images often default to a non-root user
 		laboon.WithStderr(os.Stderr), // apt / session progress for the caller

@@ -142,16 +142,6 @@ func writeNonblock(f *os.File, buf []byte) (int, error) {
 	return n, werr
 }
 
-// fstatOf is the hostStat of the open file f.
-func fstatOf(f *os.File) (hostStat, error) {
-	fi, err := f.Stat()
-	if err != nil {
-		return hostStat{}, err
-	}
-	st, _ := statOf(fi)
-	return st, nil
-}
-
 // hostAccMode is f's host access mode as a Linux O_ACCMODE value, and whether
 // it is in append mode.
 func hostAccMode(f *os.File) (acc int64, appendMode bool, err error) {
@@ -196,28 +186,7 @@ func seekDataHole(f *os.File, off int64, hole bool) (int64, lxErrno) {
 	return pos, 0
 }
 
-// fileStat is the os.FileInfo of the open file f, which statOf understands.
-func fileStat(f *os.File) (os.FileInfo, error) { return f.Stat() }
-
-// fchmodOf sets the open file f's permission bits.
-func fchmodOf(f *os.File, mode uint32) error { return f.Chmod(os.FileMode(mode)) }
-
-// anonFile makes an unnamed host file in dir (named with prefix only while it
-// is being made).
-func anonFile(dir, prefix string) (*os.File, error) {
-	f, err := os.CreateTemp(dir, prefix)
-	if err != nil {
-		return nil, err
-	}
-	os.Remove(f.Name())
-	return f, nil
-}
-
 func hostPipe(uint32) (r, w *os.File, err error) { return os.Pipe() }
 
 // hostDevOpen opens the host device behind a synthetic /dev node.
 func hostDevOpen(name string, flag int) (*os.File, error) { return os.OpenFile(name, flag, 0) }
-
-// modeless reports whether the host keeps no permission bits for f's object:
-// never here, where a socket and a pipe have inodes of their own.
-func modeless(*os.File) bool { return false }

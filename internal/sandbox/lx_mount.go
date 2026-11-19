@@ -7,6 +7,7 @@ import (
 
 	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/filesystems/bind"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"github.com/samyfodil/laboon/filesystems/memfs"
 	"github.com/samyfodil/laboon/filesystems/overlayfs"
 )
@@ -139,7 +140,7 @@ func (g *dguest) mount(srcAddr, tgtAddr, fsAddr, flags, dataAddr uint64) int64 {
 // storage driver issues to assemble a container rootfs): it unions the lowerdirs
 // and the upperdir the data string names into a real copy-on-write view and
 // mounts it at target. The layers are read from their BACKING host directories
-// (newHostDirFS reads a host subtree raw), so each layer's own content -- the
+// (hostfs.NewHostDirFS reads a host subtree raw), so each layer's own content -- the
 // files a runtime extracted into it -- is seen directly, not through laboon's
 // outer overlay. lowerdir is colon-separated, highest-precedence first; overlayFS
 // takes layers lowest first with the writable top last.
@@ -155,8 +156,8 @@ func (g *dguest) mountOverlay(target, data string) int64 {
 		if !ok {
 			return sErr(lxEACCES) // a layer resolving outside the backing tree is an escape
 		}
-		lo := newHostDirFS(h, fs.hostFS)
-		lo.meta = fs.ov.store
+		lo := hostfs.NewHostDirFS(h, fs.hostFS)
+		lo.SetMeta(fs.ov.store)
 		layers = append(layers, lo)
 	}
 	if upper != "" {
@@ -164,8 +165,8 @@ func (g *dguest) mountOverlay(target, data string) int64 {
 		if !ok {
 			return sErr(lxEACCES)
 		}
-		lo := newHostDirFS(h, fs.hostFS)
-		lo.meta = fs.ov.store
+		lo := hostfs.NewHostDirFS(h, fs.hostFS)
+		lo.SetMeta(fs.ov.store)
 		layers = append(layers, lo)
 	}
 	ovl := overlayfs.OverlayFS(layers...)
@@ -385,9 +386,9 @@ func (g *dguest) mountFS(target string) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	backing := newHostDirFS(dir, fs.hostFS) // confined like the overlay's own layers
-	backing.confine = true                  // a guest-mutable tree
-	backing.meta = core.NewMetaStore()      // carry device-node kind/rdev the placeholder cannot
+	backing := hostfs.NewHostDirFS(dir, fs.hostFS) // confined like the overlay's own layers
+	backing.SetConfine(true)                       // a guest-mutable tree
+	backing.SetMeta(core.NewMetaStore())           // carry device-node kind/rdev the placeholder cannot
 	if err := g.vns().Mount(target, backing); err != nil {
 		return sErr(osErrno(err))
 	}

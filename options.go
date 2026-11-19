@@ -2,12 +2,11 @@ package laboon
 
 import (
 	"io"
-	"os"
 	"strings"
 
-	"github.com/samyfodil/laboon/oci"
 	"github.com/samyfodil/laboon/internal/rewrite"
 	"github.com/samyfodil/laboon/internal/sandbox"
+	"github.com/samyfodil/laboon/oci"
 )
 
 // An Option configures a run.
@@ -117,14 +116,6 @@ func WithDir(dir string) Option {
 	return func(o *options) { o.cfg.Dir = dir }
 }
 
-// WithRoot gives Run a host directory the guest sees as "/", read-only; the
-// program path is then inside it. Without it the program is a host path and the
-// guest has no filesystem. RunImage uses the image's root instead. It is sugar
-// for WithMount(dir, "/").
-func WithRoot(dir string) Option {
-	return WithMount(dir, "/")
-}
-
 // WithTrace logs one line per guest syscall to w.
 func WithTrace(w io.Writer) Option {
 	return func(o *options) { o.cfg.Trace = w }
@@ -156,38 +147,16 @@ func WithNoNet() Option {
 	return func(o *options) { o.cfg.NoNet = true }
 }
 
-// WithMount binds a host path into the guest at guest, as docker's -v does.
-// Binding at the guest root ("/") sets the rootfs (what WithRoot is sugar for).
-// A host directory is bound read-write and confined to its subtree, so the
-// guest reads and writes it at guest; an AF_UNIX connect at or under guest also
-// reaches the host socket at host (e.g. an X server), whether or not the bind
-// exposes it as a file.
-func WithMount(host, guest string) Option {
-	return func(o *options) {
-		if strings.TrimRight(guest, "/") == "" {
-			o.cfg.RootFS = sandbox.HostRoot(host)
-			return
-		}
-		o.cfg.Mounts = append(o.cfg.Mounts, sandbox.Mount{Host: host, Guest: guest})
-	}
-}
-
-// WithMountReadOnly binds a host directory into the guest at guest, read-only:
-// the guest reads the subtree but cannot create, delete, rename or modify
-// anything in it (EROFS), so it is safe to expose a directory a confined
-// program must not change.
-func WithMountReadOnly(host, guest string) Option {
-	return func(o *options) {
-		o.cfg.Mounts = append(o.cfg.Mounts, sandbox.Mount{Host: host, Guest: guest, ReadOnly: true})
-	}
-}
-
-// WithFS mounts fs, a FileSystem, at the guest path guest. It is the general form
-// of WithMount: where WithMount binds a host directory, WithFS mounts any backend
-// — NewMemFS for in-memory storage, NewDirFS for a host tree, Overlay for a
+// WithMount mounts fs, a FileSystem, into the guest at the path guest. Mounting
+// at the guest root ("/") sets the rootfs. fs is any backend: hostfs.Dir for a
+// confined host-directory bind (reads, writes and AF_UNIX socket forwarding to
+// the host, e.g. an X server), NewMemFS for in-memory storage, Overlay for a
 // union, any of them wrapped with ReadOnly or HardenFS, or a FileSystem you
-// implement yourself. Mounting over an existing path shadows it.
-func WithFS(guest string, fs FileSystem) Option {
+// implement. A host bind, a read-only mount and a custom store are all one
+// composition the caller builds — WithMount("/data", hostfs.Dir(dir)) binds a
+// host directory, WithMount("/ro", ReadOnly(hostfs.Dir(dir))) binds it read-only.
+// Mounting over an existing path shadows it.
+func WithMount(guest string, fs FileSystem) Option {
 	return func(o *options) {
 		if strings.TrimRight(guest, "/") == "" {
 			o.cfg.RootFS = fs // the guest root is this filesystem
@@ -196,7 +165,6 @@ func WithFS(guest string, fs FileSystem) Option {
 		o.cfg.Mounts = append(o.cfg.Mounts, sandbox.Mount{Guest: guest, FS: fs})
 	}
 }
-
 
 // Terminal and WinSize are re-exported so a caller using WithTerminal need not
 // import the sandbox package.
@@ -236,17 +204,6 @@ func WithDevice(d *sandbox.Device) Option {
 // resolved against the rootfs's /etc/passwd and /etc/group.
 func WithUser(spec string) Option {
 	return func(o *options) { o.user, o.userSet = spec, true }
-}
-
-// WithX11 is sugar for binding /tmp/.X11-unix and passing the host's DISPLAY,
-// so a GUI program displays on the host's X server.
-func WithX11() Option {
-	return func(o *options) {
-		WithMount("/tmp/.X11-unix", "/tmp/.X11-unix")(o)
-		if d := os.Getenv("DISPLAY"); d != "" {
-			o.envVars = append(o.envVars, "DISPLAY="+d)
-		}
-	}
 }
 
 // WithAllowDomains restricts egress (with WithNet) to these domains and their

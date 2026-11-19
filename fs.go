@@ -11,17 +11,17 @@ import (
 )
 
 // This file is laboon's public filesystem surface: the FileSystem interface a
-// mount is composed from, and the backends and wrappers that build one. WithFS
+// mount is composed from, and the backends and wrappers that build one. WithMount
 // mounts any of these into a guest. A FileSystem owns a tree of objects and the
 // single-component operations on them; path resolution, symlink following and
 // mount crossing happen above it, so a backend never sees a multi-component path.
 // Content is read and written through File rather than a host path, so an
 // in-memory or fully custom backend serves bytes like any other.
 
-// FileSystem is a composable filesystem backend. Mount one with WithFS.
+// FileSystem is a composable filesystem backend. Mount one with WithMount.
 // Implement it for a custom backend (an object store, a database), or use a
-// provided one: NewMemFS, NewDirFS, Overlay, and the ReadOnly and HardenFS
-// wrappers.
+// provided one: hostfs.Dir for a confined host-directory bind, NewMemFS, Overlay,
+// and the ReadOnly and HardenFS wrappers.
 type FileSystem = core.FileSystem
 
 // These are the types a custom FileSystem implements against or returns.
@@ -65,9 +65,10 @@ const (
 // directories, symlinks and hardlinks held in memory, volatile across runs.
 func NewMemFS() FileSystem { return memfs.NewMemFS() }
 
-// NewDirFS presents the host directory root as a FileSystem. Unlike WithMount it
-// is a plain tree with no subtree confinement or socket forwarding; use WithMount
-// for a sandboxed host bind.
+// NewDirFS presents the host directory root as a plain FileSystem. Unlike
+// hostfs.Dir it has no subtree confinement or AF_UNIX socket forwarding; use
+// hostfs.Dir for a sandboxed host bind, and this for a plain host tree (a build
+// context, a composition layer).
 func NewDirFS(root string) FileSystem { return hostfs.NewDirFS(root) }
 
 // NewDiskFS presents the host directory root as a faithful writable FileSystem
@@ -91,7 +92,7 @@ func Bind(fs FileSystem, root Node) FileSystem { return bind.Bind(fs, root) }
 // HardenFS wraps fs and removes capabilities with the given options, each denied
 // with EPERM:
 //
-//	laboon.WithFS("/data", laboon.HardenFS(laboon.NewMemFS(),
+//	laboon.WithMount("/data", laboon.HardenFS(laboon.NewMemFS(),
 //	    laboon.WithNoSymLink(), laboon.WithNoDevice(), laboon.WithNoSocket()))
 func HardenFS(fs FileSystem, opts ...HardenOption) FileSystem { return harden.HardenFS(fs, opts...) }
 

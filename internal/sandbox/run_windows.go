@@ -18,6 +18,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"github.com/samyfodil/laboon/internal/rewrite"
 )
 
@@ -430,15 +431,15 @@ func (s imageSrc) identity() (rewrite.FileID, bool) {
 }
 
 func fileIdentity(f *os.File) (rewrite.FileID, bool) {
-	fi, err := fileStat(f)
+	fi, err := f.Stat()
 	if err != nil {
 		return rewrite.FileID{}, false
 	}
-	st, ok := statOf(fi)
-	if !ok || st.ino == 0 {
+	st, ok := hostfs.StatOf(fi)
+	if !ok || st.Ino() == 0 {
 		return rewrite.FileID{}, false
 	}
-	return rewrite.FileID{Dev: st.dev, Ino: st.ino, Size: st.size, Mtime: tsNano(st.mtime), Ctime: tsNano(st.ctime)}, true
+	return rewrite.FileID{Dev: st.Dev(), Ino: st.Ino(), Size: st.Size(), Mtime: TsNano(st.Mtime()), Ctime: TsNano(st.Ctime())}, true
 }
 
 // initProgram reads the first program, following #! scripts to their

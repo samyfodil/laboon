@@ -13,11 +13,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/samyfodil/laboon/filesystems/winfs"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // On Windows a rootfs is laid out for the sandbox's NTFS host filesystem
-// (internal/winfs): names NTFS forbids are escaped, directories are
+// (hostfs hostfs.go): names NTFS forbids are escaped, directories are
 // case-sensitive where the volume allows it, a symlink is a file holding its
 // target, and modes, owners and file types go to <dir>.lcmeta.
 
@@ -31,7 +31,7 @@ const (
 func hostRel(name string) string {
 	parts := strings.Split(name, "/")
 	for i, p := range parts {
-		parts[i] = winfs.EscapeName(p)
+		parts[i] = hostfs.EscapeName(p)
 	}
 	return filepath.Join(parts...)
 }
@@ -39,7 +39,7 @@ func hostRel(name string) string {
 // Unpack extracts a flattened image tar (whiteouts already applied) into
 // dir, which must exist and be empty, and writes dir.lcmeta.
 func Unpack(r io.Reader, dir string, maxSize int64) error {
-	winfs.SetCaseSensitive(dir) // else lookups check exact names
+	hostfs.SetCaseSensitive(dir) // else lookups check exact names
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return err
@@ -48,7 +48,7 @@ func Unpack(r io.Reader, dir string, maxSize int64) error {
 
 	type link struct{ target, name string }
 	var links []link
-	meta := map[string]winfs.Entry{}
+	meta := map[string]hostfs.Entry{}
 	var total int64
 
 	tr := tar.NewReader(r)
@@ -72,7 +72,7 @@ func Unpack(r io.Reader, dir string, maxSize int64) error {
 		}
 		// setuid and setgid are dropped, as on Linux; the sticky bit stays.
 		perm := uint32(h.Mode) & 0o1777
-		e := winfs.Entry{Uid: uint32(h.Uid), Gid: uint32(h.Gid), Path: name}
+		e := hostfs.Entry{Uid: uint32(h.Uid), Gid: uint32(h.Gid), Path: name}
 		switch h.Typeflag {
 		case tar.TypeDir:
 			if err := root.MkdirAll(host, 0o755); err != nil {
@@ -117,7 +117,7 @@ func Unpack(r io.Reader, dir string, maxSize int64) error {
 			}
 		}
 	}
-	return writeMeta(dir+winfs.MetaSuffix, meta)
+	return writeMeta(dir+hostfs.MetaSuffix, meta)
 }
 
 func writeFile(root *os.Root, name string, r io.Reader) error {
@@ -132,7 +132,7 @@ func writeFile(root *os.Root, name string, r io.Reader) error {
 	return f.Close()
 }
 
-func writeMeta(p string, meta map[string]winfs.Entry) error {
+func writeMeta(p string, meta map[string]hostfs.Entry) error {
 	names := make([]string, 0, len(meta))
 	for n := range meta {
 		names = append(names, n)
@@ -146,16 +146,16 @@ func writeMeta(p string, meta map[string]winfs.Entry) error {
 	return os.WriteFile(p, []byte(b.String()), 0o600)
 }
 
-func readMeta(rootfs string) map[string]winfs.Entry {
-	m := map[string]winfs.Entry{}
-	f, err := os.Open(rootfs + winfs.MetaSuffix)
+func readMeta(rootfs string) map[string]hostfs.Entry {
+	m := map[string]hostfs.Entry{}
+	f, err := os.Open(rootfs + hostfs.MetaSuffix)
 	if err != nil {
 		return m
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		if e, ok := winfs.ParseEntry(sc.Text()); ok {
+		if e, ok := hostfs.ParseEntry(sc.Text()); ok {
 			m[e.Path] = e
 		}
 	}
@@ -188,7 +188,7 @@ func LookPath(rootfs, file string, env []string) (string, error) {
 // resolveMode follows guest path p through stored symlinks and returns the
 // mode of what it names. A file without an entry is 0755, as the sandbox
 // reads it.
-func resolveMode(rootfs string, meta map[string]winfs.Entry, p string) (uint32, bool) {
+func resolveMode(rootfs string, meta map[string]hostfs.Entry, p string) (uint32, bool) {
 	rest := strings.Split(strings.TrimPrefix(path.Clean(p), "/"), "/")
 	cur := ""
 	for hops := 0; len(rest) > 0; {

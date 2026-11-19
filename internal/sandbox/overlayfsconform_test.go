@@ -51,12 +51,12 @@ func TestOverlayFSConformance(t *testing.T) {
 	}
 
 	// Reopen the run's lower and kept upper as a union overlay over the REAL
-	// platform backend (hostDirFS), with the kept upper's metadata sidecar loaded
+	// platform backend (hostfs.HostDirFS), with the kept upper's metadata sidecar loaded
 	// into the shared store — the composition the live routing uses.
-	lo := newHostDirFS(lower, newHostFS(lower, "", ""))
-	up := newHostDirFS(upper, newHostFS(upper, "", ""))
+	lo := hostfs.NewHostDirFS(lower, hostfs.NewHostFS(lower, "", ""))
+	up := hostfs.NewHostDirFS(upper, hostfs.NewHostFS(upper, "", ""))
 	ofs := overlayfs.OverlayFS(lo, up)
-	hostfs.LoadMetaInto(upper, up.meta) // the upper leaf owns its metadata now
+	up.LoadMeta(upper) // the upper leaf owns its metadata now
 	ns := namespace.NewNamespace(ofs)
 
 	stat := func(p string) core.Attr {

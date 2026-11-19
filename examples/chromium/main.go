@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 
 	"github.com/samyfodil/laboon"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 func main() {
@@ -27,7 +28,7 @@ func main() {
 
 	fmt.Printf("rendering a page with headless Chromium, confined in laboon → %s\n", abs)
 	code, err := laboon.RunImage(context.Background(), "zenika/alpine-chrome",
-		laboon.WithMount(dir, "/out"),
+		laboon.WithMount("/out", hostfs.Dir(dir)),
 		laboon.WithArgs("--headless", "--no-sandbox", "--disable-gpu",
 			"--virtual-time-budget=6000", "--window-size=1024,768",
 			"--screenshot=/out/"+name,

@@ -9,20 +9,23 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"github.com/samyfodil/laboon/filesystems/overlayfs"
 	"github.com/samyfodil/laboon/internal/namespace"
 )
 
-// countFS wraps a hostFS and counts hLstat calls, to measure how many host
-// stats a path resolution costs.
+// countFS wraps a FileSystem and counts the Lookup calls a resolution makes
+// through it, a proxy for how many host stats a component-walk resolve costs
+// against the one whole-path host lstat of the direct fast path.
 type countFS struct {
-	hostFS
-	lstats atomic.Int64
+	core.FileSystem
+	lookups atomic.Int64
 }
 
-func (c *countFS) hLstat(p string) (os.FileInfo, error) {
-	c.lstats.Add(1)
-	return c.hostFS.hLstat(p)
+func (c *countFS) Lookup(dir core.Node, name string) (core.Node, error) {
+	c.lookups.Add(1)
+	return c.FileSystem.Lookup(dir, name)
 }
 
 // benchStatSetup builds a realistic deep lower tree (no upper writes) and the
@@ -49,31 +52,29 @@ func benchStatSetup(b *testing.B, depth int) (*countFS, *namespace.Namespace, st
 	if err := os.WriteFile(filepath.Join(hostdir, "leaf"), []byte("x"), 0o644); err != nil {
 		b.Fatal(err)
 	}
-	c := &countFS{hostFS: newHostFS(lower, upper, "")}
-	ns := namespace.NewNamespace(overlayfs.OverlayFS(
-		newHostDirFS(lower, c), newHostDirFS(upper, c)))
+	c := &countFS{FileSystem: overlayfs.OverlayFS(
+		hostfs.NewHostDirFS(lower, hostfs.NewHostFS(lower, upper, "")),
+		hostfs.NewHostDirFS(upper, hostfs.NewHostFS(lower, upper, "")))}
+	ns := namespace.NewNamespace(c)
 	return c, ns, gp, lower
 }
 
-// BenchmarkStatDirect is today's fast path: one whole-path host lstat.
+// BenchmarkStatDirect is the old fast path: one whole-path host lstat.
 func BenchmarkStatDirect(b *testing.B) {
-	c, _, gp, lower := benchStatSetup(b, 6)
+	_, _, gp, lower := benchStatSetup(b, 6)
 	hp := filepath.Join(lower, filepath.FromSlash(gp))
-	c.lstats.Store(0)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := c.hLstat(hp); err != nil {
+		if _, err := os.Lstat(hp); err != nil {
 			b.Fatal(err)
 		}
 	}
-	b.StopTimer()
-	b.ReportMetric(float64(c.lstats.Load())/float64(b.N), "hlstat/op")
 }
 
 // BenchmarkStatResolve is the homogeneous path: component-walk resolve + Stat.
 func BenchmarkStatResolve(b *testing.B) {
 	c, ns, gp, _ := benchStatSetup(b, 6)
-	c.lstats.Store(0)
+	c.lookups.Store(0)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		loc, err := ns.Resolve(gp, false)
@@ -85,5 +86,5 @@ func BenchmarkStatResolve(b *testing.B) {
 		}
 	}
 	b.StopTimer()
-	b.ReportMetric(float64(c.lstats.Load())/float64(b.N), "hlstat/op")
+	b.ReportMetric(float64(c.lookups.Load())/float64(b.N), "lookup/op")
 }

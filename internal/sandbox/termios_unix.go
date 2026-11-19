@@ -69,9 +69,9 @@ func (g *dguest) ttyIoctl(d *dfile, req, arg uint64) int64 {
 	if req == lxFIONREAD {
 		n, err := unix.IoctlGetInt(fd, hostFIONREAD)
 		if err != nil {
-			if fi, serr := d.f.Stat(); serr == nil && fi.Mode().IsRegular() {
+			if mode, size, serr := d.hostStat(); serr == nil && mode.IsRegular() {
 				off, _ := d.f.Seek(0, 1)
-				n, err = int(max(fi.Size()-off, 0)), nil
+				n, err = int(max(size-off, 0)), nil
 			}
 		}
 		if err != nil {

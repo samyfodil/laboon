@@ -2,7 +2,10 @@
 
 package sandbox
 
-import "github.com/samyfodil/laboon/core"
+import (
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
+)
 
 // hostRoot presents a host directory as the guest root, as a core.FileSystem, so
 // Config.RootFS is the one root input and the sandbox takes no host path for the
@@ -16,23 +19,28 @@ type hostRoot struct {
 	fs   core.FileSystem
 }
 
-// HostRoot presents the host directory path as a guest-root FileSystem. WithRoot
-// and an image root use it, so a host directory reaches the sandbox as a
-// FileSystem like any other backend.
+// HostRoot presents the host directory path as a guest-root FileSystem. An image
+// root uses it; a public hostfs.Dir mounted at "/" is the embedder equivalent.
 func HostRoot(path string) core.FileSystem { return &hostRoot{path: path} }
 
 // HostRootPath returns the host directory a root FileSystem names, if it is a
-// host-directory root; ok is false for any other backend (in-memory, custom).
+// host-directory root; ok is false for any other backend (in-memory, custom). A
+// public hostfs.Dir mounted at "/" is recognized too, so WithMount("/",
+// hostfs.Dir(dir)) gets the same host-directory root — read-only lower, ephemeral
+// writable upper, metadata sidecar — the image root does.
 func HostRootPath(fs core.FileSystem) (string, bool) {
 	if hr, ok := fs.(*hostRoot); ok {
 		return hr.path, true
+	}
+	if hd, ok := fs.(*hostfs.HostDirFS); ok {
+		return hd.RootDir(), true
 	}
 	return "", false
 }
 
 func (h *hostRoot) backend() core.FileSystem {
 	if h.fs == nil {
-		h.fs = newHostDirFS(h.path, newRawHostFS(h.path))
+		h.fs = hostfs.NewHostDirFS(h.path, hostfs.NewRawHostFS(h.path))
 	}
 	return h.fs
 }

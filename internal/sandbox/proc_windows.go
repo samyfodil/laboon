@@ -623,7 +623,7 @@ func (g *dguest) readImage(s execSrc) (imageSrc, lxErrno) {
 		}
 		defer f.Close()
 	}
-	fi, err := fileStat(f)
+	fi, err := f.Stat()
 	if err != nil {
 		return imageSrc{}, osErrno(err)
 	}

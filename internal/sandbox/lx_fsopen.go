@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // open(2) semantics over the overlay: openat/openat2 flags, O_PATH and
@@ -435,7 +436,7 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		// modify the file.
 		hf := goOpenFlags(flags) &^ (os.O_CREATE | os.O_EXCL | os.O_TRUNC)
 		if flags&lxONonblock != 0 {
-			hf |= hostONonblock
+			hf |= hostfs.HostONonblock
 		}
 		loc, err := g.vns().Resolve(gp, false)
 		if err != nil {
@@ -445,11 +446,11 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		if err != nil {
 			return sErr(osErrno(err))
 		}
-		of, ok := nf.(*os.File)
+		of, ok := hostOf(nf)
 		if !ok {
 			return g.installVFile(gp, loc.Node, nf, flags)
 		}
-		return g.install(of, gp, flags)
+		return g.install(nf, of, gp, flags)
 	}
 	if wr || flags&lxOTrunc != 0 {
 		if g.upperAbs == "" && g.rootAbs != "" {
@@ -465,14 +466,14 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		if err != nil {
 			return sErr(osErrno(err))
 		}
-		of, ok := nf.(*os.File)
+		of, ok := hostOf(nf)
 		if !ok {
 			return g.installVFile(gp, loc.Node, nf, flags)
 		}
 		if flags&lxOTrunc != 0 {
 			g.fileModified(of)
 		}
-		fd := g.install(of, gp, flags)
+		fd := g.install(nf, of, gp, flags)
 		if fd >= 0 && flags&lxOTrunc != 0 {
 			g.notify(gp, inModify, 0)
 		}
@@ -480,7 +481,7 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 	}
 	// A read-only open of a regular file (dirs, fifos, devices and writable opens
 	// are handled above). A host backend returns an *os.File; an in-memory backend
-	// (tmpfs, WithFS) returns a core.File served through the vfs interface.
+	// (tmpfs, WithMount) returns a core.File served through the vfs interface.
 	loc, err := g.vns().Resolve(gp, false)
 	if err != nil {
 		return sErr(osErrno(err))
@@ -489,8 +490,8 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	if of, ok := nf.(*os.File); ok {
-		return g.install(of, gp, flags)
+	if of, ok := hostOf(nf); ok {
+		return g.install(nf, of, gp, flags)
 	}
 	return g.installVFile(gp, loc.Node, nf, flags)
 }
@@ -569,7 +570,7 @@ func (g *dguest) createFile(gp string, flags, mode int64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	of, ok := nf.(*os.File)
+	of, ok := hostOf(nf)
 	if !ok {
 		fd := g.installVFile(gp, c, nf, flags)
 		if fd >= 0 {
@@ -577,7 +578,7 @@ func (g *dguest) createFile(gp string, flags, mode int64) int64 {
 		}
 		return fd
 	}
-	fd := g.install(of, gp, flags)
+	fd := g.install(nf, of, gp, flags)
 	if fd >= 0 {
 		g.notify(gp, inCreate, 0)
 	}
@@ -590,16 +591,16 @@ func (g *dguest) openTmpfile(dir string, flags, mode int64) int64 {
 	if flags&lxOAccmod == lxORdonly {
 		return sErr(lxEINVAL)
 	}
-	f, err := anonFile(g.dfs.tmpDir, "lc-tmpfile-")
+	f, err := hostfs.AnonFile(g.dfs.tmpDir, "lc-tmpfile-")
 	if err != nil {
 		return sErr(osErrno(err))
 	}
 	perm := g.createPerm(mode)
-	fchmodOf(f, hostPerm(perm, false))
+	hostfs.FchmodOf(f, hostPerm(perm, false))
 	d := &dfile{f: f, gp: path.Join(dir, "#tmpfile"), stub: -1}
 	d.fx.unnamed = true
 	if hostPerm(perm, false) != perm {
-		if fi, err := fileStat(f); err == nil {
+		if fi, err := f.Stat(); err == nil {
 			g.ov.update(inodeKey(fi), func(m *imeta) { m.mode, m.hasMode = perm, true })
 		}
 	}
@@ -615,15 +616,16 @@ func (g *dguest) installVFile(gp string, node core.Node, vf core.File, flags int
 	return g.installD(&dfile{gp: gp, stub: -1, vf: vf, vn: node, fs: g.dfs}, flags)
 }
 
-// install tracks a freshly opened host file as a new description with the
-// open flags' status bits, honoring O_CLOEXEC and O_NONBLOCK.
-func (g *dguest) install(f *os.File, gp string, flags int64) int64 {
-	fi, err := fileStat(f)
+// install tracks a freshly opened host file as a new description with the open
+// flags' status bits, honoring O_CLOEXEC and O_NONBLOCK. hf is the backend's vfs
+// handle (fstat goes through it); f is the borrowed data-plane descriptor.
+func (g *dguest) install(hf core.File, f *os.File, gp string, flags int64) int64 {
+	fi, err := f.Stat()
 	if err != nil {
 		f.Close()
 		return sErr(osErrno(err))
 	}
-	d := &dfile{f: f, gp: gp, isDir: fi.IsDir(), stub: -1}
+	d := &dfile{f: f, hf: hf, gp: gp, isDir: fi.IsDir(), stub: -1}
 	return g.installD(d, flags)
 }
 
@@ -658,7 +660,7 @@ func (g *dguest) memfdCreate(nameAddr uint64, flags uint32) int64 {
 	if len(name) > 249 {
 		return sErr(lxEINVAL)
 	}
-	f, err := anonFile(g.dfs.tmpDir, "lc-memfd-")
+	f, err := hostfs.AnonFile(g.dfs.tmpDir, "lc-memfd-")
 	if err != nil {
 		return sErr(osErrno(err))
 	}
@@ -666,7 +668,7 @@ func (g *dguest) memfdCreate(nameAddr uint64, flags uint32) int64 {
 	if flags&lxMfdNoexecSeal != 0 {
 		perm = 0o666
 	}
-	fchmodOf(f, perm)
+	hostfs.FchmodOf(f, perm)
 	d := &dfile{f: f, gp: "/memfd:" + name + " (deleted)", stub: -1}
 	d.fx.unnamed, d.fx.memfd = true, true
 	switch {

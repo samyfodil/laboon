@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // Overlay bookkeeping beyond the upper/lower split: the whiteout set (fs.whiteout)
@@ -34,7 +35,7 @@ type ovState struct {
 }
 
 func inodeKey(fi os.FileInfo) ikey {
-	dev, ino := hostDevIno(fi)
+	dev, ino := HostDevIno(fi)
 	return ikey{dev, ino}
 }
 
@@ -69,105 +70,18 @@ type lxStat struct {
 	atime, mtime, ctime, btime syscall.Timespec
 }
 
-// lxModeKind maps a core.Kind to the Linux S_IFMT type bits of st_mode.
-func lxModeKind(k core.Kind) uint32 {
-	switch k {
-	case core.Dir:
-		return 0x4000
-	case core.Symlink:
-		return 0xa000
-	case core.Chardev:
-		return 0x2000
-	case core.Blockdev:
-		return 0x6000
-	case core.Fifo:
-		return 0x1000
-	case core.Socket:
-		return 0xc000
-	}
-	return 0x8000 // regular
-}
-
-// nodeInfo is an os.FileInfo backed by a resolved vfs node's attributes, so the
-// internal helpers (DAC, existence and mode checks, the stat reply builder) see
-// a node resolved through the Namespace as the os.FileInfo they already consume.
-// Its Sys is a *hostStat carrying the winning layer's identity and host mode;
-// linuxStat/ownerOf apply the guest owner and sub-floor mode overrides from the
-// shared store keyed by that identity, exactly as for a real host FileInfo.
-type nodeInfo struct {
-	name string
-	st   hostStat
-}
-
-func (n *nodeInfo) Name() string       { return n.name }
-func (n *nodeInfo) Size() int64        { return n.st.size }
-func (n *nodeInfo) ModTime() time.Time { return timespecTime(n.st.mtime) }
-func (n *nodeInfo) IsDir() bool        { return n.st.mode&0o170000 == 0o040000 }
-func (n *nodeInfo) Sys() any           { return &n.st }
-
-func (n *nodeInfo) Mode() os.FileMode {
-	m := os.FileMode(n.st.mode & 0o777)
-	switch n.st.mode & 0o170000 {
-	case 0o040000:
-		m |= os.ModeDir
-	case 0o120000:
-		m |= os.ModeSymlink
-	case 0o010000:
-		m |= os.ModeNamedPipe
-	case 0o140000:
-		m |= os.ModeSocket
-	case 0o020000:
-		m |= os.ModeDevice | os.ModeCharDevice
-	case 0o060000:
-		m |= os.ModeDevice
-	}
-	if n.st.mode&0o4000 != 0 {
-		m |= os.ModeSetuid
-	}
-	if n.st.mode&0o2000 != 0 {
-		m |= os.ModeSetgid
-	}
-	if n.st.mode&0o1000 != 0 {
-		m |= os.ModeSticky
-	}
-	return m
-}
-
-// newNodeInfo builds the os.FileInfo for a node resolved through the Namespace.
-// The host mode (not the guest override) goes into the *hostStat: linuxStat and
-// ownerOf re-derive the guest owner and mode from the store, so this must carry
-// the same raw bits a host lstat of the winning layer would.
-func newNodeInfo(name string, a core.Attr, id core.NodeID) *nodeInfo {
-	st := hostStat{
-		dev: id.Dev, ino: id.Ino, rdev: a.Rdev,
-		mode:  lxModeKind(a.Kind) | a.Mode&0o7777,
-		nlink: uint32(a.Nlink),
-		size:  a.Size, blocks: a.Blocks, blksize: 4096,
-		atime: syscall.NsecToTimespec(a.Atime),
-		mtime: syscall.NsecToTimespec(a.Mtime),
-		ctime: syscall.NsecToTimespec(a.Ctime),
-		btime: syscall.NsecToTimespec(a.Btime),
-	}
-	if a.Blksize > 0 {
-		st.blksize = uint32(a.Blksize)
-	}
-	if st.nlink == 0 {
-		st.nlink = 1
-	}
-	return &nodeInfo{name: name, st: st}
-}
-
 // nodeStat builds a guest stat reply from a resolved vfs node's attributes and
-// identity, the homogeneous counterpart of linuxStat: the overlay backend has
-// already applied the MetaStore overrides (sub-floor mode, non-root owner,
-// special kind) in Node.Stat, so they are not reapplied here.
-// The guest runs as root, so uid/gid default to 0 (the host owner of an upper
-// file is the unprivileged supervisor and is never the guest's view); a non-root
-// owner is carried as a MetaStore override, applied by the caller.
+// nodeStat builds a guest stat from a node's attributes: the homogeneous
+// counterpart of linuxStat. The backend owns guest metadata — a host layer
+// applies its MetaStore overrides (sub-floor mode, non-root owner, special kind)
+// in Node.Stat and reports the guest owner (root when none, never the host file's
+// supervisor owner); an in-memory backend holds the owner on the node — so the
+// Attr already carries the guest's view and nodeStat trusts a.Uid/a.Gid directly.
 func nodeStat(a core.Attr, id core.NodeID) lxStat {
 	s := lxStat{
 		dev: id.Dev, ino: id.Ino, rdev: a.Rdev,
-		mode:  lxModeKind(a.Kind) | a.Mode&0o7777,
+		mode: core.ModeKind(a.Kind) | a.Mode&0o7777,
+		uid:  a.Uid, gid: a.Gid,
 		nlink: uint32(a.Nlink),
 		size:  a.Size, blocks: a.Blocks, blksize: 4096,
 		atime: syscall.NsecToTimespec(a.Atime),
@@ -185,11 +99,14 @@ func nodeStat(a core.Attr, id core.NodeID) lxStat {
 }
 
 func (g *dguest) linuxStat(fi os.FileInfo) lxStat {
+	if ci, ok := fi.(core.Info); ok { // a node resolved through the vfs
+		return nodeStat(ci.Attr(), ci.ID())
+	}
 	s := lxStat{blksize: 4096, nlink: 1}
-	st, ok := statOf(fi)
+	st, ok := hostfs.StatOf(fi)
 	if !ok { // a synthetic /proc, /sys or /dev node
 		s.mode = lxModeOf(fi)
-		s.dev, s.ino = hostDevIno(fi)
+		s.dev, s.ino = HostDevIno(fi)
 		s.rdev = lxRdev(fi)
 		s.size = fi.Size()
 		if fi.IsDir() {
@@ -199,22 +116,22 @@ func (g *dguest) linuxStat(fi os.FileInfo) lxStat {
 		s.atime, s.mtime, s.ctime, s.btime = t, t, t, t
 		return s
 	}
-	s.mode = st.mode
-	s.dev = st.dev
-	s.ino = st.ino
+	s.mode = st.Mode()
+	s.dev = st.Dev()
+	s.ino = st.Ino()
 	s.rdev = lxRdev(fi)
-	s.nlink = st.nlink
+	s.nlink = st.Nlink()
 	if fi.IsDir() {
 		// APFS counts every entry in a directory's links. Report 1, as Linux
 		// overlayfs does for a merged directory: "subdirectory count unknown".
 		s.nlink = 1
 	}
-	s.size = st.size
-	s.blocks = st.blocks
-	if st.blksize > 0 {
-		s.blksize = st.blksize
+	s.size = st.Size()
+	s.blocks = st.Blocks()
+	if st.Blksize() > 0 {
+		s.blksize = st.Blksize()
 	}
-	s.atime, s.mtime, s.ctime, s.btime = st.atime, st.mtime, st.ctime, st.btime
+	s.atime, s.mtime, s.ctime, s.btime = st.Atime(), st.Mtime(), st.Ctime(), st.Btime()
 	if m, ok := g.ov.get(inodeKey(fi)); ok {
 		if m.hasMode {
 			s.mode = s.mode&^0o7777 | m.mode

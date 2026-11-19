@@ -1,6 +1,6 @@
 //go:build darwin || linux
 
-package sandbox
+package hostfs
 
 import (
 	"os"
@@ -10,7 +10,7 @@ import (
 	"syscall"
 )
 
-// cachedFS remembers lookups so a path walk costs no host calls once its
+// CachedFS remembers lookups so a path walk costs no host calls once its
 // components have been seen. The lower layer is read-only, so its lstat and
 // readlink answers hold for the whole run. The upper layer changes only through
 // the supervisor; the paths found missing there are remembered until the next
@@ -18,8 +18,8 @@ import (
 // what a lookup reads of a path found there (its kind and inode, which only a
 // change to the layer's names alters). Without a root, guest paths are host
 // paths anyone may change, and nothing is cached.
-type cachedFS struct {
-	hostFS
+type CachedFS struct {
+	HostFS
 	lower, upper string   // layer roots with a trailing separator, "" if none
 	own          []string // the supervisor's writable directories, should the root hold them
 
@@ -49,8 +49,8 @@ type linkResult struct {
 // cacheMax bounds each table; a full one starts over.
 const cacheMax = 1 << 17
 
-func newCachedFS(h hostFS, rootAbs, upperAbs string) hostFS {
-	c := &cachedFS{hostFS: h}
+func newCachedFS(h HostFS, rootAbs, upperAbs string) HostFS {
+	c := &CachedFS{HostFS: h}
 	if rootAbs == "" {
 		return h
 	}
@@ -58,7 +58,7 @@ func newCachedFS(h hostFS, rootAbs, upperAbs string) hostFS {
 	if upperAbs != "" {
 		c.upper = withSep(upperAbs)
 	}
-	if d := tmpDir(); d != "" {
+	if d := os.TempDir(); d != "" {
 		c.own = append(c.own, withSep(d))
 	}
 	c.own = append(c.own, "/tmp/lcn.")
@@ -75,7 +75,7 @@ func withSep(dir string) string {
 
 // inLower reports whether p is in the read-only lower layer. A root of /
 // holds the upper layer and the supervisor's own directories too.
-func (c *cachedFS) inLower(p string) bool {
+func (c *CachedFS) inLower(p string) bool {
 	if !strings.HasPrefix(p, c.lower) || c.inUpper(p) {
 		return false
 	}
@@ -87,11 +87,11 @@ func (c *cachedFS) inLower(p string) bool {
 	return true
 }
 
-func (c *cachedFS) inUpper(p string) bool { return c.upper != "" && strings.HasPrefix(p, c.upper) }
+func (c *CachedFS) inUpper(p string) bool { return c.upper != "" && strings.HasPrefix(p, c.upper) }
 
 // missing reports whether upper path p, or a directory above it, was found
 // missing since the last change to the upper layer.
-func (c *cachedFS) missing(p string) bool {
+func (c *CachedFS) missing(p string) bool {
 	for q := p; len(q) >= len(c.upper); q = filepath.Dir(q) {
 		if c.absent[q] {
 			return true
@@ -100,7 +100,7 @@ func (c *cachedFS) missing(p string) bool {
 	return false
 }
 
-func (c *cachedFS) hLstat(p string) (os.FileInfo, error) {
+func (c *CachedFS) hLstat(p string) (os.FileInfo, error) {
 	switch {
 	case c.inLower(p):
 		c.mu.Lock()
@@ -109,7 +109,7 @@ func (c *cachedFS) hLstat(p string) (os.FileInfo, error) {
 		if ok {
 			return r.fi, r.err
 		}
-		fi, err := c.hostFS.hLstat(p)
+		fi, err := c.HostFS.hLstat(p)
 		c.mu.Lock()
 		if c.stats == nil || len(c.stats) >= cacheMax {
 			c.stats = map[string]lstatResult{}
@@ -125,7 +125,7 @@ func (c *cachedFS) hLstat(p string) (os.FileInfo, error) {
 		if gone {
 			return nil, &os.PathError{Op: "lstat", Path: p, Err: syscall.ENOENT}
 		}
-		fi, err := c.hostFS.hLstat(p)
+		fi, err := c.HostFS.hLstat(p)
 		if pe, ok := err.(*os.PathError); ok && pe.Err == syscall.ENOENT {
 			c.mu.Lock()
 			if c.gen == gen {
@@ -138,12 +138,12 @@ func (c *cachedFS) hLstat(p string) (os.FileInfo, error) {
 		}
 		return fi, err
 	}
-	return c.hostFS.hLstat(p)
+	return c.HostFS.hLstat(p)
 }
 
 // hLstatID is an lstat for a lookup, which reads only the kind and the device
 // and inode of the result.
-func (c *cachedFS) hLstatID(p string) (os.FileInfo, error) {
+func (c *CachedFS) hLstatID(p string) (os.FileInfo, error) {
 	if !c.inUpper(p) {
 		return c.hLstat(p)
 	}
@@ -168,9 +168,9 @@ func (c *cachedFS) hLstatID(p string) (os.FileInfo, error) {
 	return fi, err
 }
 
-func (c *cachedFS) hReadlink(p string) (string, error) {
+func (c *CachedFS) hReadlink(p string) (string, error) {
 	if !c.inLower(p) {
-		return c.hostFS.hReadlink(p)
+		return c.HostFS.hReadlink(p)
 	}
 	c.mu.Lock()
 	r, ok := c.links[p]
@@ -190,7 +190,7 @@ func (c *cachedFS) hReadlink(p string) (string, error) {
 	case fi.Mode()&os.ModeSymlink == 0:
 		err = &os.PathError{Op: "readlink", Path: p, Err: syscall.EINVAL}
 	default:
-		t, err = c.hostFS.hReadlink(p)
+		t, err = c.HostFS.hReadlink(p)
 	}
 	c.mu.Lock()
 	if c.links == nil || len(c.links) >= cacheMax {
@@ -203,69 +203,61 @@ func (c *cachedFS) hReadlink(p string) (string, error) {
 
 // changed forgets the upper layer's missing paths once a change to it is
 // done: something may exist there now.
-func (c *cachedFS) changed() {
+func (c *CachedFS) Changed() {
 	c.mu.Lock()
 	c.gen++
 	clear(c.absent)
 	c.mu.Unlock()
 }
 
-func (c *cachedFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
+func (c *CachedFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
 	if flag&os.O_CREATE != 0 {
-		defer c.changed()
+		defer c.Changed()
 	}
-	return c.hostFS.hOpen(p, flag, perm)
+	return c.HostFS.hOpen(p, flag, perm)
 }
 
-func (c *cachedFS) hMkdir(p string, perm uint32) error {
-	defer c.changed()
-	return c.hostFS.hMkdir(p, perm)
+func (c *CachedFS) hMkdir(p string, perm uint32) error {
+	defer c.Changed()
+	return c.HostFS.hMkdir(p, perm)
 }
 
-func (c *cachedFS) hSymlink(target, p string) error {
-	defer c.changed()
-	return c.hostFS.hSymlink(target, p)
+func (c *CachedFS) hSymlink(target, p string) error {
+	defer c.Changed()
+	return c.HostFS.hSymlink(target, p)
 }
 
-func (c *cachedFS) hMkfifo(p string, perm uint32) error {
-	defer c.changed()
-	return c.hostFS.hMkfifo(p, perm)
+func (c *CachedFS) hMkfifo(p string, perm uint32) error {
+	defer c.Changed()
+	return c.HostFS.hMkfifo(p, perm)
 }
 
-func (c *cachedFS) hMksock(p string, perm uint32) error {
-	defer c.changed()
-	return c.hostFS.hMksock(p, perm)
+func (c *CachedFS) hMksock(p string, perm uint32) error {
+	defer c.Changed()
+	return c.HostFS.hMksock(p, perm)
 }
 
-func (c *cachedFS) hRename(from, to string, exchange bool) error {
-	defer c.changed()
-	return c.hostFS.hRename(from, to, exchange)
+func (c *CachedFS) hRename(from, to string, exchange bool) error {
+	defer c.Changed()
+	return c.HostFS.hRename(from, to, exchange)
 }
 
-func (c *cachedFS) hUnlink(p string, dir bool) error {
-	defer c.changed()
-	return c.hostFS.hUnlink(p, dir)
+func (c *CachedFS) hUnlink(p string, dir bool) error {
+	defer c.Changed()
+	return c.HostFS.hUnlink(p, dir)
 }
 
-func (c *cachedFS) hLink(from, to string) error {
-	defer c.changed()
-	return c.hostFS.hLink(from, to)
+func (c *CachedFS) hLink(from, to string) error {
+	defer c.Changed()
+	return c.HostFS.hLink(from, to)
 }
 
-func (c *cachedFS) hClone(from, to string) error {
-	defer c.changed()
-	return c.hostFS.hClone(from, to)
+func (c *CachedFS) hClone(from, to string) error {
+	defer c.Changed()
+	return c.HostFS.hClone(from, to)
 }
 
-func (c *cachedFS) hCloneFile(f *os.File, to string) error {
-	defer c.changed()
-	return c.hostFS.hCloneFile(f, to)
-}
-
-// upperChanged tells the lookup cache that something outside hostFS created
-// a file in the upper layer (a unix socket's bind).
-func (fs *dfs) upperChanged() {
-	if c, ok := fs.hostFS.(*cachedFS); ok {
-		c.changed()
-	}
+func (c *CachedFS) hCloneFile(f *os.File, to string) error {
+	defer c.Changed()
+	return c.HostFS.hCloneFile(f, to)
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -69,6 +70,14 @@ var ErrNotDir = errors.New("vfs: not a directory")
 // platform's EXDEV.
 var ErrCrossDevice = errors.New("vfs: cross-device link")
 
+// Errno is a Linux errno carried through an error return, so a host backend can
+// name the exact Linux error the guest should see where no host error maps to it
+// cleanly (a Windows reparse point as ELOOP, say). The sandbox recovers the
+// number at the host-call boundary.
+type Errno int64
+
+func (e Errno) Error() string { return "linux errno " + strconv.Itoa(int(e)) }
+
 // Attr is a snapshot of a path's metadata.
 type Attr struct {
 	Kind     Kind
@@ -96,6 +105,26 @@ type Entry struct {
 }
 
 func clean(p string) string { return strings.Trim(path.Clean("/"+p), "/") }
+
+// ModeKind maps a Kind to the Linux S_IFMT type bits of st_mode, so a guest
+// stat/statx reply's mode can be assembled from a backend-agnostic Attr.
+func ModeKind(k Kind) uint32 {
+	switch k {
+	case Dir:
+		return 0x4000
+	case Symlink:
+		return 0xa000
+	case Chardev:
+		return 0x2000
+	case Blockdev:
+		return 0x6000
+	case Fifo:
+		return 0x1000
+	case Socket:
+		return 0xc000
+	}
+	return 0x8000 // regular
+}
 
 // HostMode is the host permission a layer file gets for guest bits mode, so an
 // unprivileged owner keeps read/traverse access; the exact guest mode lives in

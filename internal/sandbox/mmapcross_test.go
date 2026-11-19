@@ -19,27 +19,37 @@ import (
 	"github.com/samyfodil/laboon/filesystems/memfs"
 )
 
-// mmapGuestBin returns the testdata/mmapguest.c guest, which selects a behavior
-// by its first argument. LC_MMAP_BIN, when set, is a prebuilt guest for this
-// arch: on macOS it must be static-PIE (`gcc -static-pie`), because a non-PIE
-// ET_EXEC forces the hypervisor backend there, which copies file mappings into
-// VM RAM instead of sharing them, and a dynamic build would need a Linux loader
-// the host root lacks; the gate provides it. Otherwise, on Linux, it is built
-// with the host's gcc.
-func mmapGuestBin(t *testing.T) string {
+// guestBin returns a static guest ELF built from testdata/<name>.c, so the mmap
+// tests run on every host. On Linux it is built with the host gcc. On another OS
+// a Linux guest cannot be built locally, so it is taken from $LC_GUEST_DIR/<name>
+// — a directory of prebuilt guests for this arch that the cross-platform gate
+// stages (built `gcc -static-pie`, because on macOS a non-PIE ET_EXEC forces the
+// hypervisor backend, which copies file mappings into VM RAM instead of sharing
+// them); the test skips when that is not provided. LC_MMAP_BIN remains a legacy
+// single-guest override for mmapguest. It is built static-PIE on Linux too, so
+// one build convention serves every host.
+func guestBin(t *testing.T, name string) string {
 	t.Helper()
-	if exe := os.Getenv("LC_MMAP_BIN"); exe != "" {
-		return exe
+	if dir := os.Getenv("LC_GUEST_DIR"); dir != "" {
+		return filepath.Join(dir, name)
+	}
+	if name == "mmapguest" {
+		if exe := os.Getenv("LC_MMAP_BIN"); exe != "" {
+			return exe
+		}
 	}
 	if runtime.GOOS != "linux" {
-		t.Skip("set LC_MMAP_BIN to a static-PIE guest for this arch (testdata/mmapguest.c)")
+		t.Skipf("set LC_GUEST_DIR to a dir of static-PIE guests for this arch (testdata/%s.c)", name)
 	}
-	exe := filepath.Join(t.TempDir(), "mmapguest")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mmapguest.c").CombinedOutput(); err != nil {
+	exe := filepath.Join(t.TempDir(), name)
+	if b, err := exec.Command("gcc", "-O2", "-static-pie", "-w", "-o", exe, "../../testdata/"+name+".c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 	return exe
 }
+
+// mmapGuestBin is the multi-mode mmap guest (testdata/mmapguest.c).
+func mmapGuestBin(t *testing.T) string { return guestBin(t, "mmapguest") }
 
 // Writable MAP_SHARED of a non-host file works on every backend: cross-open
 // coherence, a mapping store visible to read() with no msync, a write() visible
@@ -271,3 +281,10 @@ func (f *wbFile) Truncate(size int64) error {
 	return nil
 }
 func (f *wbFile) Close() error { return nil }
+func (f *wbFile) Stat() (core.Info, error) {
+	a, err := f.n.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return core.FileInfo("", a, f.n.ID()), nil
+}

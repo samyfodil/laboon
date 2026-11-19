@@ -192,7 +192,11 @@ func (n *dirNode) times(u core.AttrUpdate) (time.Time, time.Time, error) {
 func (n *dirNode) Readlink() (string, error) { return os.Readlink(n.fs.hp(n.p)) }
 
 func (n *dirNode) Open(flags int) (core.File, error) {
-	return os.OpenFile(n.fs.hp(n.p), flags, 0)
+	f, err := os.OpenFile(n.fs.hp(n.p), flags, 0)
+	if err != nil {
+		return nil, err
+	}
+	return hostFile{File: f}, nil
 }
 
 func kindOf2(fi os.FileInfo) core.Kind {

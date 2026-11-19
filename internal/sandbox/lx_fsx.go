@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // checkpointMeta projects the inode-keyed side table (the live authority for the
@@ -556,7 +557,7 @@ func (g *dguest) linkUnnamed(od *dfile, np string) int64 {
 	if od.f == nil {
 		return sErr(lxEBADF)
 	}
-	fi, err := od.f.Stat()
+	mode, size, err := od.hostStat()
 	if err != nil {
 		return sErr(osErrno(err))
 	}
@@ -564,7 +565,7 @@ func (g *dguest) linkUnnamed(od *dfile, np string) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	c, err := dloc.FS.Create(dloc.Node, path.Base(np), core.CreateSpec{Kind: core.Reg, Mode: uint32(fi.Mode().Perm())})
+	c, err := dloc.FS.Create(dloc.Node, path.Base(np), core.CreateSpec{Kind: core.Reg, Mode: uint32(mode.Perm())})
 	if err != nil {
 		return sErr(osErrno(err))
 	}
@@ -572,12 +573,12 @@ func (g *dguest) linkUnnamed(od *dfile, np string) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	of, ok := w.(*os.File)
+	of, ok := hostOf(w)
 	if !ok {
 		w.Close()
 		return sErr(lxEINVAL)
 	}
-	_, cerr := io.Copy(of, io.NewSectionReader(od.f, 0, fi.Size()))
+	_, cerr := io.Copy(of, io.NewSectionReader(od.f, 0, size))
 	of.Close()
 	if cerr != nil {
 		return sErr(osErrno(cerr))
@@ -743,9 +744,8 @@ func (g *dguest) mknodat(dirfd int64, pathAddr uint64, mode uint32, dev uint64) 
 // file d) applies to, copying it up first: an open upper or unnamed file is
 // changed through its descriptor so the change follows the inode.
 type attrTarget struct {
-	f    *os.File
-	host string
-	fi   os.FileInfo
+	f  *os.File
+	fi os.FileInfo
 }
 
 // fdInPlace reports whether a metadata change on the open file d applies to its
@@ -759,26 +759,18 @@ func (g *dguest) fdInPlace(d *dfile) bool {
 
 // inPlaceTarget is the in-place target for an open file (see fdInPlace).
 func (g *dguest) inPlaceTarget(d *dfile) (attrTarget, lxErrno) {
-	fi, err := fileStat(d.f)
+	fi, err := hostfs.FileStat(d.f)
 	if err != nil {
 		return attrTarget{}, osErrno(err)
 	}
 	return attrTarget{f: d.f, fi: fi}, 0
 }
 
-func (g *dguest) chmodTarget(t attrTarget, m uint32) error {
-	if t.f != nil {
-		return fchmodOf(t.f, m)
-	}
-	if t.fi.Mode()&os.ModeSymlink != 0 {
-		return nil
-	}
-	return g.hChmod(t.host, m)
-}
-
 // setMode gives the target guest permission bits perm (and touches its ctime).
+// The target is always an open descriptor in place (fchmodat/fchownat route a
+// pathname through loc.Node.SetAttr instead), so the mode goes on the fd.
 func (g *dguest) setMode(t attrTarget, perm uint32) lxErrno {
-	if err := g.chmodTarget(t, hostPerm(perm, t.fi.IsDir())); err != nil {
+	if err := hostfs.FchmodOf(t.f, hostPerm(perm, t.fi.IsDir())); err != nil {
 		return osErrno(err)
 	}
 	k := inodeKey(t.fi)
@@ -850,7 +842,7 @@ func (g *dguest) fchmod(fd int64, mode uint32) int64 {
 		// not resolve a path. (An unnamed memfd keeps a "/memfd:" name and is
 		// handled in place below.) A host that keeps no mode for the object
 		// (a Windows socket or pipe) leaves it to the description.
-		if modeless(d.f) {
+		if hostfs.Modeless(d.f) {
 			d.fx.perm.Store(permSet | mode&0o7777)
 			return 0
 		}
@@ -1028,11 +1020,11 @@ func (g *dguest) utimensat(dirfd int64, pathAddr, timesAddr uint64, flags int64)
 		}
 		var u core.AttrUpdate
 		if !omit[0] {
-			a := tsNano(ts[0])
+			a := TsNano(ts[0])
 			u.Atime = &a
 		}
 		if !omit[1] {
-			m := tsNano(ts[1])
+			m := TsNano(ts[1])
 			u.Mtime = &m
 		}
 		if err := loc.Node.SetAttr(u); err != nil {
@@ -1045,14 +1037,14 @@ func (g *dguest) utimensat(dirfd int64, pathAddr, timesAddr uint64, flags int64)
 	if e != 0 {
 		return sErr(e)
 	}
-	st, _ := statOf(t.fi)
+	st, _ := hostfs.StatOf(t.fi)
 	if omit[0] {
-		ts[0] = st.atime
+		ts[0] = st.Atime()
 	}
 	if omit[1] {
-		ts[1] = st.mtime
+		ts[1] = st.Mtime()
 	}
-	if err := futimesOf(t.f, ts[0], ts[1]); err != nil {
+	if err := hostfs.FutimesOf(t.f, ts[0], ts[1]); err != nil {
 		return sErr(osErrno(err))
 	}
 	g.notify(gp, inAttrib, 0)
@@ -1087,7 +1079,7 @@ func (g *dguest) truncate(pathAddr uint64, length int64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	of, ok := f.(*os.File)
+	of, ok := hostOf(f)
 	if !ok {
 		f.Close()
 		return sErr(lxEINVAL)
@@ -1132,14 +1124,14 @@ func (g *dguest) ftruncate(fd int64, length int64) int64 {
 	if d.f == nil {
 		return sErr(lxEINVAL)
 	}
-	fi, err := fileStat(d.f)
+	mode, size, err := d.hostStat()
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	if !fi.Mode().IsRegular() {
+	if !mode.IsRegular() {
 		return sErr(lxEINVAL)
 	}
-	if e := d.checkSeals(fi.Size(), length, false); e != 0 {
+	if e := d.checkSeals(size, length, false); e != 0 {
 		return sErr(e)
 	}
 	if err := d.f.Truncate(length); err != nil {
@@ -1151,7 +1143,7 @@ func (g *dguest) ftruncate(fd int64, length int64) int64 {
 
 // statfs fills a Linux struct statfs (arm64: 120 bytes, 64-bit words).
 func (g *dguest) statfs(dirfd int64, pathAddr, bufAddr uint64) int64 {
-	var s hostStatfs
+	var s core.StatFS
 	var err error
 	var fsp string
 	if pathAddr == 0 {
@@ -1161,7 +1153,7 @@ func (g *dguest) statfs(dirfd int64, pathAddr, bufAddr uint64) int64 {
 		}
 		switch {
 		case d.f != nil:
-			s, err = fstatfsOf(d.f)
+			s, err = hostfs.FstatfsOf(d.f)
 			fsp = d.name()
 		case d.fx.opath:
 			fsp = d.name()
@@ -1183,13 +1175,13 @@ func (g *dguest) statfs(dirfd int64, pathAddr, bufAddr uint64) int64 {
 	}
 	var b [120]byte
 	magic := fsMagic(fsp)
-	if magic == lxOverlayfsMagic && s.ftype != 0 {
+	if magic == lxOverlayfsMagic && s.Type != 0 {
 		// A non-pseudo path reports the real backing host filesystem's type, not
 		// laboon's internal overlay: the guest sees an ordinary filesystem (ext4,
 		// xfs, btrfs, tmpfs...), so a container runtime's overlay storage driver,
 		// which refuses to stack overlay on overlayfs, proceeds as it would on a
 		// real host. Pseudo mounts keep their own magic below.
-		magic = s.ftype
+		magic = s.Type
 	}
 	if m, ok := g.dfs.dynMagic(fsp); ok {
 		// A pseudo filesystem mounted at a non-canonical path (a container
@@ -1201,16 +1193,16 @@ func (g *dguest) statfs(dirfd int64, pathAddr, bufAddr uint64) int64 {
 		magic = 0x6e736673 // NSFS_MAGIC: a persisted namespace file
 	}
 	put64(b[0:], magic)
-	put64(b[8:], s.bsize)
-	put64(b[16:], s.blocks)
-	put64(b[24:], s.bfree)
-	put64(b[32:], s.bavail)
-	put64(b[40:], s.files)
-	put64(b[48:], s.ffree)
-	put32(b[56:], s.fsid[0])
-	put32(b[60:], s.fsid[1])
+	put64(b[8:], s.Bsize)
+	put64(b[16:], s.Blocks)
+	put64(b[24:], s.Bfree)
+	put64(b[32:], s.Bavail)
+	put64(b[40:], s.Files)
+	put64(b[48:], s.Ffree)
+	put32(b[56:], s.Fsid[0])
+	put32(b[60:], s.Fsid[1])
 	put64(b[64:], 255)         // f_namelen
-	put64(b[72:], s.bsize)     // f_frsize
+	put64(b[72:], s.Bsize)     // f_frsize
 	put64(b[80:], 0x20|0x1000) // ST_VALID|ST_RELATIME
 	if err := g.writeMem(bufAddr, b[:]); err != nil {
 		return sErr(lxEFAULT)
@@ -1239,29 +1231,28 @@ func fsMagic(gp string) uint64 {
 // statfsPath reports the statfs of the filesystem backing gp through the overlay
 // backend (which answers from the layer that owns the node). A pseudo path, whose
 // synthetic filesystem has no statfs of its own, reports the guest's root fs.
-func (g *dguest) statfsPath(gp string) (hostStatfs, error) {
+func (g *dguest) statfsPath(gp string) (core.StatFS, error) {
 	// gp is already symlink-resolved by the caller (lookup for a pathname, open
 	// time for an O_PATH fd), so do not follow the last component again — an
 	// O_PATH|O_NOFOLLOW fd names the symlink itself, whose fs statfs reports.
 	loc, err := g.vns().Resolve(gp, false)
 	if err != nil {
-		return hostStatfs{}, err
+		return core.StatFS{}, err
 	}
 	sf, ok := loc.FS.(core.StatFSer)
 	if !ok {
 		if loc, err = g.vns().Resolve("/", false); err != nil {
-			return hostStatfs{}, err
+			return core.StatFS{}, err
 		}
 		if sf, ok = loc.FS.(core.StatFSer); !ok {
-			return hostStatfs{}, os.ErrInvalid
+			return core.StatFS{}, os.ErrInvalid
 		}
 	}
 	st, err := sf.StatFS(loc.Node)
 	if err != nil {
-		return hostStatfs{}, err
+		return core.StatFS{}, err
 	}
-	return hostStatfs{bsize: st.Bsize, blocks: st.Blocks, bfree: st.Bfree,
-		bavail: st.Bavail, files: st.Files, ffree: st.Ffree, fsid: st.Fsid, ftype: st.Type}, nil
+	return st, nil
 }
 
 // faccessat2 checks access as the guest's root: anything that exists is

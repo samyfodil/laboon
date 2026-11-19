@@ -1,6 +1,6 @@
 //go:build darwin
 
-package sandbox
+package hostfs
 
 import (
 	"os"
@@ -13,6 +13,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/samyfodil/laboon/core"
 	"golang.org/x/sys/unix"
 )
 
@@ -29,46 +30,46 @@ const (
 	cloneNofollowAny = 0x0008
 )
 
-// hostONonblock is the host open flag for a non-blocking open.
-const hostONonblock = unix.O_NONBLOCK
+// HostONonblock is the host open flag for a non-blocking open.
+const HostONonblock = unix.O_NONBLOCK
 
-// fifoRendezvous: this backend has real FIFOs, so FIFO opens rendezvous.
-const fifoRendezvous = true
+// FifoRendezvous: this backend has real FIFOs, so FIFO opens rendezvous.
+const FifoRendezvous = true
 
-// darwinFS is the darwin hostFS.
-type darwinFS struct{ rootAbs, workAbs string }
+// DarwinFS is the darwin HostFS.
+type DarwinFS struct{ rootAbs, workAbs string }
 
-func newHostFS(rootAbs, upperAbs, workAbs string) hostFS {
-	return newCachedFS(&darwinFS{rootAbs, workAbs}, rootAbs, upperAbs)
+func NewHostFS(rootAbs, upperAbs, workAbs string) HostFS {
+	return newCachedFS(&DarwinFS{rootAbs, workAbs}, rootAbs, upperAbs)
 }
 
-// newRawHostFS is an uncached host backend confined to root (see the linux note).
-func newRawHostFS(root string) hostFS { return &darwinFS{rootAbs: root} }
+// NewRawHostFS is an uncached host backend confined to root (see the linux note).
+func NewRawHostFS(root string) HostFS { return &DarwinFS{rootAbs: root} }
 
-// hostPath is the host path of resolved guest path gp under root.
-func hostPath(root, gp string) string { return filepath.Join(root, filepath.FromSlash(gp)) }
+// HostPath is the host path of resolved guest path gp under root.
+func HostPath(root, gp string) string { return filepath.Join(root, filepath.FromSlash(gp)) }
 
-func (fs *darwinFS) oAny() int {
+func (fs *DarwinFS) oAny() int {
 	if fs.rootAbs == "" {
 		return 0
 	}
 	return unix.O_NOFOLLOW_ANY
 }
 
-func (fs *darwinFS) atAny() int {
+func (fs *DarwinFS) atAny() int {
 	if fs.rootAbs == "" {
 		return 0
 	}
 	return atNofollowAny
 }
 
-func (fs *darwinFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
+func (fs *DarwinFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
 	return os.OpenFile(p, flag|fs.oAny(), perm)
 }
 
 // hLstat is os.Lstat that refuses a symlink in any component but the last.
-func (fs *darwinFS) hLstat(p string) (os.FileInfo, error) {
-	fi := &hostInfo{name: filepath.Base(p)}
+func (fs *DarwinFS) hLstat(p string) (os.FileInfo, error) {
+	fi := &HostInfo{name: filepath.Base(p)}
 	if err := unix.Fstatat(unix.AT_FDCWD, p, (*unix.Stat_t)(unsafe.Pointer(&fi.st)), unix.AT_SYMLINK_NOFOLLOW|fs.atAny()); err != nil {
 		return nil, &os.PathError{Op: "lstat", Path: p, Err: err}
 	}
@@ -76,12 +77,12 @@ func (fs *darwinFS) hLstat(p string) (os.FileInfo, error) {
 }
 
 // hParent opens p's parent directory for an *at call on its last component.
-func (fs *darwinFS) hParent(p string) (*os.File, string, error) {
+func (fs *DarwinFS) hParent(p string) (*os.File, string, error) {
 	d, err := os.OpenFile(filepath.Dir(p), unix.O_SEARCH|unix.O_DIRECTORY|fs.oAny(), 0)
 	return d, filepath.Base(p), err
 }
 
-func (fs *darwinFS) hReadlink(p string) (string, error) {
+func (fs *DarwinFS) hReadlink(p string) (string, error) {
 	d, base, err := fs.hParent(p)
 	if err != nil {
 		return "", err
@@ -99,7 +100,7 @@ func (fs *darwinFS) hReadlink(p string) (string, error) {
 	}
 }
 
-func (fs *darwinFS) hMkdir(p string, perm uint32) error {
+func (fs *DarwinFS) hMkdir(p string, perm uint32) error {
 	d, base, err := fs.hParent(p)
 	if err != nil {
 		return err
@@ -108,7 +109,7 @@ func (fs *darwinFS) hMkdir(p string, perm uint32) error {
 	return unix.Mkdirat(int(d.Fd()), base, perm)
 }
 
-func (fs *darwinFS) hSymlink(target, p string) error {
+func (fs *DarwinFS) hSymlink(target, p string) error {
 	d, base, err := fs.hParent(p)
 	if err != nil {
 		return err
@@ -119,7 +120,7 @@ func (fs *darwinFS) hSymlink(target, p string) error {
 
 // hMkfifo has no mkfifoat to call, so the FIFO is made in the private work dir
 // and renamed into place.
-func (fs *darwinFS) hMkfifo(p string, perm uint32) error {
+func (fs *DarwinFS) hMkfifo(p string, perm uint32) error {
 	if fs.workAbs == "" {
 		return unix.Mkfifo(p, perm)
 	}
@@ -138,7 +139,7 @@ func (fs *darwinFS) hMkfifo(p string, perm uint32) error {
 // a socket leaves the same unbound socket file: one is bound by the file's
 // name in its directory, which this thread alone enters for the bind
 // (pthread_fchdir_np), so neither sun_path's length nor a rename comes in.
-func (fs *darwinFS) hMksock(p string, perm uint32) error {
+func (fs *DarwinFS) hMksock(p string, perm uint32) error {
 	d, err := unix.Open(filepath.Dir(p), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|fs.oAny(), 0)
 	if err != nil {
 		return err
@@ -150,12 +151,26 @@ func (fs *darwinFS) hMksock(p string, perm uint32) error {
 	}
 	defer unix.Close(s)
 	name := filepath.Base(p)
+	// Enter the directory and bind by name, so neither sun_path's length nor a
+	// rename comes in. macOS has no per-thread chdir in the Go std library, so
+	// change the whole process's directory briefly on a locked, serialized thread
+	// and restore it; laboon's fs uses absolute paths and fds, not the process
+	// working directory, so this is invisible to it.
+	bindMu.Lock()
 	runtime.LockOSThread()
-	if err = threadDir(int32(d)); err == nil {
-		err = unix.Bind(s, &unix.SockaddrUnix{Name: name})
-		threadDir(-1)
+	cwd, cerr := unix.Open(".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if cerr != nil {
+		runtime.UnlockOSThread()
+		bindMu.Unlock()
+		return cerr
 	}
+	if err = unix.Fchdir(d); err == nil {
+		err = unix.Bind(s, &unix.SockaddrUnix{Name: name})
+		unix.Fchdir(cwd)
+	}
+	unix.Close(cwd)
 	runtime.UnlockOSThread()
+	bindMu.Unlock()
 	if err == unix.EADDRINUSE {
 		return unix.EEXIST
 	}
@@ -165,42 +180,10 @@ func (fs *darwinFS) hMksock(p string, perm uint32) error {
 	return unix.Fchmodat(d, name, perm, unix.AT_SYMLINK_NOFOLLOW)
 }
 
-// The libSystem call that gives one thread its own working directory.
-var (
-	threadDirOnce sync.Once
-	threadDirErr  error
-	threadFchdir  *ffiCall // pthread_fchdir_np
-	threadErrno   *ffiCall // __error
-)
+// bindMu serializes the brief process-wide fchdir a socket bind needs.
+var bindMu sync.Mutex
 
-// threadDir makes directory fd the calling thread's working directory, or
-// with -1 gives it back the process's. The caller holds the thread locked.
-func threadDir(fd int32) error {
-	threadDirOnce.Do(func() {
-		lib, err := ffiOpenLibSystem()
-		if err != nil {
-			threadDirErr = err
-			return
-		}
-		if threadFchdir, threadDirErr = ffiPrep(lib, "pthread_fchdir_np", ffiS32, ffiS32); threadDirErr != nil {
-			return
-		}
-		threadErrno, threadDirErr = ffiPrep(lib, "__error", ffiPtr)
-	})
-	if threadDirErr != nil {
-		return threadDirErr
-	}
-	var r int32
-	threadFchdir.call(unsafe.Pointer(&r), unsafe.Pointer(&fd))
-	if r == 0 {
-		return nil
-	}
-	var e *int32
-	threadErrno.call(unsafe.Pointer(&e))
-	return unix.Errno(*e)
-}
-
-func (fs *darwinFS) hRename(from, to string, exchange bool) error {
+func (fs *DarwinFS) hRename(from, to string, exchange bool) error {
 	var flags uint32
 	if exchange {
 		flags = unix.RENAME_SWAP
@@ -211,7 +194,7 @@ func (fs *darwinFS) hRename(from, to string, exchange bool) error {
 	return unix.RenameatxNp(unix.AT_FDCWD, from, unix.AT_FDCWD, to, flags)
 }
 
-func (fs *darwinFS) hUnlink(p string, dir bool) error {
+func (fs *DarwinFS) hUnlink(p string, dir bool) error {
 	fl := fs.atAny()
 	if dir {
 		fl |= unix.AT_REMOVEDIR
@@ -219,42 +202,42 @@ func (fs *darwinFS) hUnlink(p string, dir bool) error {
 	return unix.Unlinkat(unix.AT_FDCWD, p, fl)
 }
 
-func (fs *darwinFS) hChmod(p string, mode uint32) error {
+func (fs *DarwinFS) hChmod(p string, mode uint32) error {
 	return unix.Fchmodat(unix.AT_FDCWD, p, mode, unix.AT_SYMLINK_NOFOLLOW|fs.atAny())
 }
 
-func (fs *darwinFS) hUtimes(p string, atime, mtime syscall.Timespec) error {
+func (fs *DarwinFS) hUtimes(p string, atime, mtime syscall.Timespec) error {
 	ts := []unix.Timespec{unix.Timespec(atime), unix.Timespec(mtime)}
 	return unix.UtimesNanoAt(unix.AT_FDCWD, p, ts, unix.AT_SYMLINK_NOFOLLOW|fs.atAny())
 }
 
-// futimesOf sets the open file f's times. Darwin has no futimens in x/sys;
+// FutimesOf sets the open file f's times. Darwin has no futimens in x/sys;
 // futimes keeps microseconds.
-func futimesOf(f *os.File, atime, mtime syscall.Timespec) error {
+func FutimesOf(f *os.File, atime, mtime syscall.Timespec) error {
 	return unix.Futimes(hostFd(f), []unix.Timeval{
 		unix.NsecToTimeval(syscall.TimespecToNsec(atime)), unix.NsecToTimeval(syscall.TimespecToNsec(mtime))})
 }
 
-func (fs *darwinFS) hCloneFile(f *os.File, to string) error {
+func (fs *DarwinFS) hCloneFile(f *os.File, to string) error {
 	return unix.Fclonefileat(hostFd(f), unix.AT_FDCWD, to, fs.cloneFlags()&^unix.CLONE_NOFOLLOW)
 }
 
-func (fs *darwinFS) hLink(from, to string) error {
+func (fs *DarwinFS) hLink(from, to string) error {
 	return unix.Linkat(unix.AT_FDCWD, from, unix.AT_FDCWD, to, fs.atAny())
 }
 
-func (fs *darwinFS) cloneFlags() int {
+func (fs *DarwinFS) cloneFlags() int {
 	if fs.rootAbs == "" {
 		return unix.CLONE_NOFOLLOW
 	}
 	return unix.CLONE_NOFOLLOW | cloneNofollowAny
 }
 
-func (fs *darwinFS) hClone(from, to string) error {
+func (fs *DarwinFS) hClone(from, to string) error {
 	return unix.Clonefileat(unix.AT_FDCWD, from, unix.AT_FDCWD, to, fs.cloneFlags())
 }
 
-func (fs *darwinFS) hTruncate(p string, n int64) error {
+func (fs *DarwinFS) hTruncate(p string, n int64) error {
 	f, err := fs.hOpen(p, os.O_WRONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return err
@@ -263,30 +246,30 @@ func (fs *darwinFS) hTruncate(p string, n int64) error {
 	return f.Truncate(n)
 }
 
-func (fs *darwinFS) hStatfs(dir string) (hostStatfs, error) {
+func (fs *DarwinFS) hStatfs(dir string) (core.StatFS, error) {
 	d, err := fs.hOpen(dir, unix.O_SEARCH|unix.O_DIRECTORY, 0)
 	if err != nil {
-		return hostStatfs{}, err
+		return core.StatFS{}, err
 	}
 	defer d.Close()
-	return fstatfsOf(d)
+	return FstatfsOf(d)
 }
 
-// fstatfsOf is the statfs of the filesystem holding the open file f.
-func fstatfsOf(f *os.File) (hostStatfs, error) {
+// FstatfsOf is the statfs of the filesystem holding the open file f.
+func FstatfsOf(f *os.File) (core.StatFS, error) {
 	var s unix.Statfs_t
 	if err := unix.Fstatfs(hostFd(f), &s); err != nil {
-		return hostStatfs{}, err
+		return core.StatFS{}, err
 	}
-	return hostStatfs{
-		bsize: uint64(s.Bsize), blocks: s.Blocks, bfree: s.Bfree, bavail: s.Bavail,
-		files: s.Files, ffree: s.Ffree, fsid: [2]uint32{uint32(s.Fsid.Val[0]), uint32(s.Fsid.Val[1])},
+	return core.StatFS{
+		Bsize: uint64(s.Bsize), Blocks: s.Blocks, Bfree: s.Bfree, Bavail: s.Bavail,
+		Files: s.Files, Ffree: s.Ffree, Fsid: [2]uint32{uint32(s.Fsid.Val[0]), uint32(s.Fsid.Val[1])},
 	}, nil
 }
 
 // hReadDir lists a host directory: names and lstat info, the info taken with
 // hLstat (os.DirEntry.Info would re-walk the path and follow a symlink).
-func (fs *darwinFS) hReadDir(p string) ([]os.FileInfo, error) {
+func (fs *DarwinFS) hReadDir(p string) ([]os.FileInfo, error) {
 	f, err := fs.hOpen(p, os.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
 		return nil, err
@@ -306,18 +289,18 @@ func (fs *darwinFS) hReadDir(p string) ([]os.FileInfo, error) {
 	return out, nil
 }
 
-// hostInfo is the os.FileInfo of an hLstat, built like the os package's own.
-// statOf is fi's hostStat when fi describes a host file.
-func statOf(fi os.FileInfo) (hostStat, bool) {
-	if h, ok := fi.Sys().(*hostStat); ok {
+// HostInfo is the os.FileInfo of an hLstat, built like the os package's own.
+// StatOf is fi's HostStat when fi describes a host file.
+func StatOf(fi os.FileInfo) (HostStat, bool) {
+	if h, ok := fi.Sys().(*HostStat); ok {
 		return *h, true // a node-backed FileInfo (lstatGuest via the Namespace)
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
-		return hostStat{}, false
+		return HostStat{}, false
 	}
 	// Darwin's S_IFMT type bits are Linux's.
-	return hostStat{
+	return HostStat{
 		dev: darwinRdev(uint64(uint32(st.Dev))), ino: st.Ino, rdev: darwinRdev(uint64(uint32(st.Rdev))),
 		mode: uint32(st.Mode), nlink: uint32(st.Nlink), uid: st.Uid, gid: st.Gid,
 		size: st.Size, blocks: st.Blocks, blksize: uint32(st.Blksize),
@@ -325,18 +308,18 @@ func statOf(fi os.FileInfo) (hostStat, bool) {
 	}, true
 }
 
-type hostInfo struct {
+type HostInfo struct {
 	name string
 	st   syscall.Stat_t
 }
 
-func (h *hostInfo) Name() string       { return h.name }
-func (h *hostInfo) Size() int64        { return h.st.Size }
-func (h *hostInfo) ModTime() time.Time { return timespecTime(h.st.Mtimespec) }
-func (h *hostInfo) IsDir() bool        { return h.Mode().IsDir() }
-func (h *hostInfo) Sys() any           { return &h.st }
+func (h *HostInfo) Name() string       { return h.name }
+func (h *HostInfo) Size() int64        { return h.st.Size }
+func (h *HostInfo) ModTime() time.Time { return timespecTime(h.st.Mtimespec) }
+func (h *HostInfo) IsDir() bool        { return h.Mode().IsDir() }
+func (h *HostInfo) Sys() any           { return &h.st }
 
-func (h *hostInfo) Mode() os.FileMode {
+func (h *HostInfo) Mode() os.FileMode {
 	m := os.FileMode(h.st.Mode & 0o777)
 	switch h.st.Mode & syscall.S_IFMT {
 	case syscall.S_IFBLK, syscall.S_IFWHT:
@@ -362,4 +345,15 @@ func (h *hostInfo) Mode() os.FileMode {
 		m |= os.ModeSticky
 	}
 	return m
+}
+
+func darwinRdev(r uint64) uint64 {
+	if r == 0 {
+		return 0
+	}
+	return lxMakedev(r>>24&0xff, r&0xffffff)
+}
+
+func lxMakedev(major, minor uint64) uint64 {
+	return minor&0xff | (major&0xfff)<<8 | (minor&^0xff)<<12 | (major&^0xfff)<<32
 }

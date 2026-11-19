@@ -9,6 +9,7 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"github.com/samyfodil/laboon/internal/rewrite"
 )
 
@@ -49,21 +50,21 @@ func computeSitesFile(c *rewrite.Cache, f *os.File) ([]uint32, error) {
 		}
 		return computeSitesBytes(c, b)
 	}
-	fi, err := fileStat(f)
+	fi, err := hostfs.FileStat(f)
 	if err != nil {
 		return nil, err
 	}
-	st, ok := statOf(fi)
-	if !ok || st.ino == 0 {
+	st, ok := hostfs.StatOf(fi)
+	if !ok || st.Ino() == 0 {
 		return read()
 	}
 	return c.OffsetsByID(sitesSalt, rewrite.FileID{
-		Dev: st.dev, Ino: st.ino, Size: st.size,
-		Mtime: tsNano(st.mtime), Ctime: tsNano(st.ctime),
+		Dev: st.Dev(), Ino: st.Ino(), Size: st.Size(),
+		Mtime: TsNano(st.Mtime()), Ctime: TsNano(st.Ctime()),
 	}, read)
 }
 
-func tsNano(t syscall.Timespec) int64 { return int64(t.Sec)*1e9 + int64(t.Nsec) }
+func TsNano(t syscall.Timespec) int64 { return int64(t.Sec)*1e9 + int64(t.Nsec) }
 
 // sitesSalt names this analysis in cache keys. Change it whenever
 // computeSitesELF would give a different answer for the same file.

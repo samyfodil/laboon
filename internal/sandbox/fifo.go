@@ -5,6 +5,8 @@ package sandbox
 import (
 	"os"
 	"sync"
+
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // FIFOs (named pipes) block on open the way the kernel does: a read-only open
@@ -56,7 +58,7 @@ func (fs *dfs) fifo(gp string) *fifoRv {
 // lock. errRestart (a signal or teardown ended a wait) restarts the open or
 // surfaces as EINTR, as a real FIFO open interrupted by a signal does.
 func (g *dguest) openFifo(gp string, flags int64) int64 {
-	if !fifoRendezvous {
+	if !hostfs.FifoRendezvous {
 		return g.openFifoDirect(gp, flags)
 	}
 	acc := flags & lxOAccmod
@@ -118,7 +120,7 @@ func (g *dguest) openFifo(gp string, flags int64) int64 {
 // own flag, and its blocking reads and writes block in the interruptible IO
 // path (hostInterruptibleRead/Write poll the fd), not on the host open.
 func (g *dguest) openFifoHost(gp string, flags int64) (*os.File, lxErrno) {
-	hf := goOpenFlags(flags)&^(os.O_CREATE|os.O_EXCL|os.O_TRUNC) | hostONonblock
+	hf := goOpenFlags(flags)&^(os.O_CREATE|os.O_EXCL|os.O_TRUNC) | hostfs.HostONonblock
 	loc, err := g.vns().Resolve(gp, false)
 	if err != nil {
 		return nil, osErrno(err)
@@ -127,7 +129,7 @@ func (g *dguest) openFifoHost(gp string, flags int64) (*os.File, lxErrno) {
 	if err != nil {
 		return nil, osErrno(err)
 	}
-	of, ok := nf.(*os.File)
+	of, ok := hostOf(nf)
 	if !ok {
 		nf.Close()
 		return nil, lxEINVAL
@@ -141,7 +143,7 @@ func (g *dguest) openFifoHost(gp string, flags int64) (*os.File, lxErrno) {
 func (g *dguest) openFifoDirect(gp string, flags int64) int64 {
 	hf := goOpenFlags(flags) &^ (os.O_CREATE | os.O_EXCL | os.O_TRUNC)
 	if flags&lxONonblock != 0 {
-		hf |= hostONonblock
+		hf |= hostfs.HostONonblock
 	}
 	loc, err := g.vns().Resolve(gp, false)
 	if err != nil {
@@ -151,7 +153,7 @@ func (g *dguest) openFifoDirect(gp string, flags int64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	of, ok := nf.(*os.File)
+	of, ok := hostOf(nf)
 	if !ok {
 		nf.Close()
 		return sErr(lxEINVAL)

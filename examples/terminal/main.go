@@ -21,6 +21,7 @@ import (
 	"syscall"
 
 	"github.com/samyfodil/laboon"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
@@ -76,7 +77,7 @@ func main() {
 	}()
 
 	code, err := laboon.RunImage(context.Background(), image,
-		laboon.WithMountReadOnly(dir, "/work"),
+		laboon.WithMount("/work", laboon.ReadOnly(hostfs.Dir(dir))),
 		laboon.WithDir("/work"),
 		laboon.WithEnvVar("TERM", os.Getenv("TERM")),
 		laboon.WithArgs("/bin/sh"),

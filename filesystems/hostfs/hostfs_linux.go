@@ -1,4 +1,4 @@
-package sandbox
+package hostfs
 
 import (
 	"bytes"
@@ -12,6 +12,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/samyfodil/laboon/core"
 	"golang.org/x/sys/unix"
 )
 
@@ -24,38 +25,38 @@ import (
 // instead of leaving the layer through it. Without a root the guest path is
 // the host path and is followed as given.
 
-// hostONonblock is the host open flag for a non-blocking open.
-const hostONonblock = unix.O_NONBLOCK
+// HostONonblock is the host open flag for a non-blocking open.
+const HostONonblock = unix.O_NONBLOCK
 
-// fifoRendezvous: this backend has real FIFOs, so FIFO opens rendezvous.
-const fifoRendezvous = true
+// FifoRendezvous: this backend has real FIFOs, so FIFO opens rendezvous.
+const FifoRendezvous = true
 
-type linuxFS struct{ rootAbs string }
+type LinuxFS struct{ rootAbs string }
 
-func newHostFS(rootAbs, upperAbs, workAbs string) hostFS {
-	return newCachedFS(&linuxFS{rootAbs}, rootAbs, upperAbs)
+func NewHostFS(rootAbs, upperAbs, workAbs string) HostFS {
+	return newCachedFS(&LinuxFS{rootAbs}, rootAbs, upperAbs)
 }
 
-// newRawHostFS is a host backend confined to root but without the overlay cache,
+// NewRawHostFS is a host backend confined to root but without the overlay cache,
 // for a writable bind whose directory changes under us (the cache assumes an
 // immutable lower layer).
-func newRawHostFS(root string) hostFS { return &linuxFS{root} }
+func NewRawHostFS(root string) HostFS { return &LinuxFS{root} }
 
-// hostPath is the host path of resolved guest path gp under root.
-func hostPath(root, gp string) string { return filepath.Join(root, filepath.FromSlash(gp)) }
+// HostPath is the host path of resolved guest path gp under root.
+func HostPath(root, gp string) string { return filepath.Join(root, filepath.FromSlash(gp)) }
 
-func (fs *linuxFS) resolve() uint64 {
+func (fs *LinuxFS) resolve() uint64 {
 	if fs.rootAbs == "" {
 		return 0
 	}
 	return unix.RESOLVE_NO_SYMLINKS
 }
 
-func (fs *linuxFS) open2(p string, flags int, perm uint32) (int, error) {
+func (fs *LinuxFS) open2(p string, flags int, perm uint32) (int, error) {
 	return unix.Openat2(unix.AT_FDCWD, p, &unix.OpenHow{Flags: uint64(flags | unix.O_CLOEXEC), Mode: uint64(perm), Resolve: fs.resolve()})
 }
 
-func (fs *linuxFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
+func (fs *LinuxFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
 	fd, err := fs.open2(p, flag, uint32(perm.Perm()))
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: p, Err: err}
@@ -64,13 +65,13 @@ func (fs *linuxFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error)
 }
 
 // hParent opens p's parent directory for an *at call on its last component.
-func (fs *linuxFS) hParent(p string) (int, string, error) {
+func (fs *LinuxFS) hParent(p string) (int, string, error) {
 	fd, err := fs.open2(filepath.Dir(p), unix.O_PATH|unix.O_DIRECTORY, 0)
 	return fd, filepath.Base(p), err
 }
 
 // atParent runs call on p's parent directory and last component.
-func (fs *linuxFS) atParent(p string, call func(dir int, base string) error) error {
+func (fs *LinuxFS) atParent(p string, call func(dir int, base string) error) error {
 	d, base, err := fs.hParent(p)
 	if err != nil {
 		return err
@@ -79,8 +80,8 @@ func (fs *linuxFS) atParent(p string, call func(dir int, base string) error) err
 	return call(d, base)
 }
 
-func (fs *linuxFS) hLstat(p string) (os.FileInfo, error) {
-	fi := &hostInfo{name: filepath.Base(p)}
+func (fs *LinuxFS) hLstat(p string) (os.FileInfo, error) {
+	fi := &HostInfo{name: filepath.Base(p)}
 	err := fs.atParent(p, func(d int, base string) error {
 		return unix.Fstatat(d, base, (*unix.Stat_t)(unsafe.Pointer(&fi.st)), unix.AT_SYMLINK_NOFOLLOW)
 	})
@@ -90,7 +91,7 @@ func (fs *linuxFS) hLstat(p string) (os.FileInfo, error) {
 	return fi, nil
 }
 
-func (fs *linuxFS) hReadlink(p string) (string, error) {
+func (fs *LinuxFS) hReadlink(p string) (string, error) {
 	var s string
 	err := fs.atParent(p, func(d int, base string) error {
 		for n := 256; ; n *= 2 {
@@ -111,23 +112,23 @@ func (fs *linuxFS) hReadlink(p string) (string, error) {
 	return s, nil
 }
 
-func (fs *linuxFS) hMkdir(p string, perm uint32) error {
+func (fs *LinuxFS) hMkdir(p string, perm uint32) error {
 	return fs.atParent(p, func(d int, base string) error { return unix.Mkdirat(d, base, perm) })
 }
 
-func (fs *linuxFS) hSymlink(target, p string) error {
+func (fs *LinuxFS) hSymlink(target, p string) error {
 	return fs.atParent(p, func(d int, base string) error { return unix.Symlinkat(target, d, base) })
 }
 
-func (fs *linuxFS) hMkfifo(p string, perm uint32) error {
+func (fs *LinuxFS) hMkfifo(p string, perm uint32) error {
 	return fs.atParent(p, func(d int, base string) error { return unix.Mkfifoat(d, base, perm) })
 }
 
-func (fs *linuxFS) hMksock(p string, perm uint32) error {
+func (fs *LinuxFS) hMksock(p string, perm uint32) error {
 	return fs.atParent(p, func(d int, base string) error { return unix.Mknodat(d, base, unix.S_IFSOCK|perm, 0) })
 }
 
-func (fs *linuxFS) hRename(from, to string, exchange bool) error {
+func (fs *LinuxFS) hRename(from, to string, exchange bool) error {
 	var flags uint
 	if exchange {
 		flags = unix.RENAME_EXCHANGE
@@ -139,7 +140,7 @@ func (fs *linuxFS) hRename(from, to string, exchange bool) error {
 	})
 }
 
-func (fs *linuxFS) hUnlink(p string, dir bool) error {
+func (fs *LinuxFS) hUnlink(p string, dir bool) error {
 	fl := 0
 	if dir {
 		fl = unix.AT_REMOVEDIR
@@ -149,7 +150,7 @@ func (fs *linuxFS) hUnlink(p string, dir bool) error {
 
 // hChmod changes p's mode through a descriptor of p itself: Linux's fchmodat
 // cannot leave a final symlink unfollowed, and a symlink's mode is not used.
-func (fs *linuxFS) hChmod(p string, mode uint32) error {
+func (fs *LinuxFS) hChmod(p string, mode uint32) error {
 	fd, err := fs.open2(p, unix.O_PATH|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
@@ -167,19 +168,19 @@ func (fs *linuxFS) hChmod(p string, mode uint32) error {
 
 func procFdPath(fd int) string { return "/proc/self/fd/" + strconv.Itoa(fd) }
 
-func (fs *linuxFS) hUtimes(p string, atime, mtime syscall.Timespec) error {
+func (fs *LinuxFS) hUtimes(p string, atime, mtime syscall.Timespec) error {
 	ts := []unix.Timespec{unix.Timespec(atime), unix.Timespec(mtime)}
 	return fs.atParent(p, func(d int, base string) error {
 		return unix.UtimesNanoAt(d, base, ts, unix.AT_SYMLINK_NOFOLLOW)
 	})
 }
 
-// futimesOf sets the open file f's times.
-func futimesOf(f *os.File, atime, mtime syscall.Timespec) error {
+// FutimesOf sets the open file f's times.
+func FutimesOf(f *os.File, atime, mtime syscall.Timespec) error {
 	return unix.UtimesNanoAt(hostFd(f), "", []unix.Timespec{unix.Timespec(atime), unix.Timespec(mtime)}, unix.AT_EMPTY_PATH)
 }
 
-func (fs *linuxFS) hLink(from, to string) error {
+func (fs *LinuxFS) hLink(from, to string) error {
 	return fs.atParent(from, func(fd int, fbase string) error {
 		return fs.atParent(to, func(td int, tbase string) error {
 			return unix.Linkat(fd, fbase, td, tbase, 0)
@@ -189,7 +190,7 @@ func (fs *linuxFS) hLink(from, to string) error {
 
 // hClone copies from to the new file to, sharing blocks where the filesystem
 // can (FICLONE), with its mode.
-func (fs *linuxFS) hClone(from, to string) error {
+func (fs *LinuxFS) hClone(from, to string) error {
 	f, err := fs.hOpen(from, os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
@@ -198,7 +199,7 @@ func (fs *linuxFS) hClone(from, to string) error {
 	return fs.hCloneFile(f, to)
 }
 
-func (fs *linuxFS) hCloneFile(f *os.File, to string) error {
+func (fs *LinuxFS) hCloneFile(f *os.File, to string) error {
 	var st unix.Stat_t
 	if err := unix.Fstat(hostFd(f), &st); err != nil {
 		return err
@@ -218,7 +219,7 @@ func (fs *linuxFS) hCloneFile(f *os.File, to string) error {
 	return out.Close()
 }
 
-func (fs *linuxFS) hTruncate(p string, n int64) error {
+func (fs *LinuxFS) hTruncate(p string, n int64) error {
 	f, err := fs.hOpen(p, os.O_WRONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
@@ -227,25 +228,25 @@ func (fs *linuxFS) hTruncate(p string, n int64) error {
 	return f.Truncate(n)
 }
 
-func (fs *linuxFS) hStatfs(dir string) (hostStatfs, error) {
+func (fs *LinuxFS) hStatfs(dir string) (core.StatFS, error) {
 	d, err := fs.hOpen(dir, unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
-		return hostStatfs{}, err
+		return core.StatFS{}, err
 	}
 	defer d.Close()
-	return fstatfsOf(d)
+	return FstatfsOf(d)
 }
 
-// fstatfsOf is the statfs of the filesystem holding the open file f.
-func fstatfsOf(f *os.File) (hostStatfs, error) {
+// FstatfsOf is the statfs of the filesystem holding the open file f.
+func FstatfsOf(f *os.File) (core.StatFS, error) {
 	var s unix.Statfs_t
 	if err := unix.Fstatfs(hostFd(f), &s); err != nil {
-		return hostStatfs{}, err
+		return core.StatFS{}, err
 	}
-	return hostStatfs{
-		bsize: uint64(s.Bsize), blocks: s.Blocks, bfree: s.Bfree, bavail: s.Bavail,
-		files: s.Files, ffree: s.Ffree, fsid: [2]uint32{uint32(s.Fsid.Val[0]), uint32(s.Fsid.Val[1])},
-		ftype: uint64(s.Type),
+	return core.StatFS{
+		Bsize: uint64(s.Bsize), Blocks: s.Blocks, Bfree: s.Bfree, Bavail: s.Bavail,
+		Files: s.Files, Ffree: s.Ffree, Fsid: [2]uint32{uint32(s.Fsid.Val[0]), uint32(s.Fsid.Val[1])},
+		Type: uint64(s.Type),
 	}, nil
 }
 
@@ -253,7 +254,7 @@ func fstatfsOf(f *os.File) (hostStatfs, error) {
 // inode (d_ino) and type (d_type) come straight from the kernel, so there is no
 // per-entry stat. An entry whose d_type is DT_UNKNOWN (rare -- some filesystems
 // omit it) is stat'd on its own to learn its type.
-func (fs *linuxFS) hReadDir(p string) ([]os.FileInfo, error) {
+func (fs *LinuxFS) hReadDir(p string) ([]os.FileInfo, error) {
 	f, err := fs.hOpen(p, os.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
 		return nil, err
@@ -283,7 +284,7 @@ func (fs *linuxFS) hReadDir(p string) ([]os.FileInfo, error) {
 			if name == "" || name == "." || name == ".." {
 				continue
 			}
-			fi := &hostInfo{name: name}
+			fi := &HostInfo{name: name}
 			fi.st.Ino = ino
 			if m := modeFromDType(dtype); m != 0 {
 				fi.st.Mode = m
@@ -293,7 +294,7 @@ func (fs *linuxFS) hReadDir(p string) ([]os.FileInfo, error) {
 			out = append(out, fi)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].(*hostInfo).name < out[j].(*hostInfo).name })
+	sort.Slice(out, func(i, j int) bool { return out[i].(*HostInfo).name < out[j].(*HostInfo).name })
 	return out, nil
 }
 
@@ -328,16 +329,16 @@ func modeFromDType(dt byte) uint32 {
 	}
 }
 
-// statOf is fi's hostStat when fi describes a host file.
-func statOf(fi os.FileInfo) (hostStat, bool) {
-	if h, ok := fi.Sys().(*hostStat); ok {
+// StatOf is fi's HostStat when fi describes a host file.
+func StatOf(fi os.FileInfo) (HostStat, bool) {
+	if h, ok := fi.Sys().(*HostStat); ok {
 		return *h, true // a node-backed FileInfo (lstatGuest via the Namespace)
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
-		return hostStat{}, false
+		return HostStat{}, false
 	}
-	return hostStat{
+	return HostStat{
 		dev: st.Dev, ino: st.Ino, rdev: st.Rdev,
 		mode: st.Mode, nlink: uint32(st.Nlink), uid: st.Uid, gid: st.Gid,
 		size: st.Size, blocks: st.Blocks, blksize: uint32(st.Blksize),
@@ -345,19 +346,19 @@ func statOf(fi os.FileInfo) (hostStat, bool) {
 	}, true
 }
 
-// hostInfo is the os.FileInfo of an hLstat, built like the os package's own.
-type hostInfo struct {
+// HostInfo is the os.FileInfo of an hLstat, built like the os package's own.
+type HostInfo struct {
 	name string
 	st   syscall.Stat_t
 }
 
-func (h *hostInfo) Name() string       { return h.name }
-func (h *hostInfo) Size() int64        { return h.st.Size }
-func (h *hostInfo) ModTime() time.Time { return time.Unix(h.st.Mtim.Unix()) }
-func (h *hostInfo) IsDir() bool        { return h.Mode().IsDir() }
-func (h *hostInfo) Sys() any           { return &h.st }
+func (h *HostInfo) Name() string       { return h.name }
+func (h *HostInfo) Size() int64        { return h.st.Size }
+func (h *HostInfo) ModTime() time.Time { return time.Unix(h.st.Mtim.Unix()) }
+func (h *HostInfo) IsDir() bool        { return h.Mode().IsDir() }
+func (h *HostInfo) Sys() any           { return &h.st }
 
-func (h *hostInfo) Mode() os.FileMode {
+func (h *HostInfo) Mode() os.FileMode {
 	m := os.FileMode(h.st.Mode & 0o777)
 	switch h.st.Mode & syscall.S_IFMT {
 	case syscall.S_IFBLK:
