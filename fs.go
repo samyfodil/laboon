@@ -4,10 +4,10 @@ import (
 	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/filesystems/bind"
 	"github.com/samyfodil/laboon/filesystems/harden"
-	"github.com/samyfodil/laboon/filesystems/memfs"
-	"github.com/samyfodil/laboon/filesystems/readonly"
-	"github.com/samyfodil/laboon/internal/vfs"
 	"github.com/samyfodil/laboon/filesystems/hostfs"
+	"github.com/samyfodil/laboon/filesystems/memfs"
+	"github.com/samyfodil/laboon/filesystems/overlayfs"
+	"github.com/samyfodil/laboon/filesystems/readonly"
 )
 
 // This file is laboon's public filesystem surface: the FileSystem interface a
@@ -73,7 +73,7 @@ func NewDirFS(root string) FileSystem { return hostfs.NewDirFS(root) }
 // Overlay unions layers into one copy-on-write FileSystem (aufs/overlayfs style):
 // lowest layer first, the writable top layer last. A read sees the topmost layer
 // that has the file; a write goes to the top.
-func Overlay(layers ...FileSystem) FileSystem { return vfs.NewOverlayFS(layers...) }
+func Overlay(layers ...FileSystem) FileSystem { return overlayfs.OverlayFS(layers...) }
 
 // ReadOnly wraps fs so every change — create, link, remove, rename, and a
 // write-mode open — fails with EROFS, while reads pass through.
