@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 	"golang.org/x/sys/unix"
 )
 
@@ -488,8 +488,8 @@ func (g *dguest) unixTarget(raw []byte) (string, []byte, lxErrno) {
 // sockHostPath gives the host path backing a resolved node and whether it is the
 // writable top layer, for the supervisor's AF_UNIX bind/connect. A synthetic
 // (non-host-backed) node yields ok=false.
-func sockHostPath(n vfs.Node) (host string, upper, ok bool) {
-	if u, has := n.(interface{ Underlying() vfs.Node }); has {
+func sockHostPath(n core.Node) (host string, upper, ok bool) {
+	if u, has := n.(interface{ Underlying() core.Node }); has {
 		n = u.Underlying()
 	}
 	hn, has := n.(*hostNode)
@@ -636,7 +636,7 @@ func (g *dguest) unixBindPath(name string) (string, lxErrno) {
 		return "", lxEADDRINUSE
 	}
 	// Copy the parent up through the backend (so the socket lands in the writable
-	// top), and bind the new name in it; no host path is mapped outside the vfs.
+	// top), and bind the new name in it; no host path is mapped outside the core.
 	ploc, err := g.vns().Resolve(path.Dir(gp), true)
 	if err != nil {
 		return "", osErrno(err)
@@ -651,9 +651,9 @@ func (g *dguest) unixBindPath(name string) (string, lxErrno) {
 
 // writableHostPath copies the resolved node up into the writable top and returns
 // its host path, for the supervisor's AF_UNIX bind.
-func writableHostPath(n vfs.Node) (string, error) {
+func writableHostPath(n core.Node) (string, error) {
 	if w, has := n.(interface {
-		WritableUnderlying() (vfs.Node, error)
+		WritableUnderlying() (core.Node, error)
 	}); has {
 		tn, err := w.WritableUnderlying()
 		if err != nil {

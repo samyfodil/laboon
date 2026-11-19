@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 )
 
 // Synthetic /proc, /sys and /dev. The rootfs carries none of them, so the
@@ -725,7 +725,7 @@ func emptyDir() string {
 // generic fd code treats it as a non-host fd and read, write, lseek and fstat ask
 // memOf. It serves two kinds. A synthetic file (/proc, /sys) generates its bytes
 // on demand from a pnode (n). An in-memory backend file (tmpfs, WithFS) reads and
-// writes real content through a vfs.File handle (vf) over a vfs.Node (vn).
+// writes real content through a core.File handle (vf) over a core.Node (vn).
 type memFile struct {
 	memory procMemIO
 	mu     sync.Mutex
@@ -737,7 +737,7 @@ type memFile struct {
 	pos    int64
 	done   bool // data generated
 
-	vn vfs.Node // a non-host directory placeholder's node, for fstat; nil for a synthetic file
+	vn core.Node // a non-host directory placeholder's node, for fstat; nil for a synthetic file
 }
 
 func (m *memFile) accmode() uint64 {

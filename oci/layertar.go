@@ -7,7 +7,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
@@ -48,15 +48,15 @@ func writeChange(tw *tar.Writer, c hostfs.Change, content io.Reader) error {
 	switch {
 	case c.LinkTo != "":
 		hdr.Typeflag, hdr.Linkname = tar.TypeLink, c.LinkTo
-	case a.Kind == vfs.Dir:
+	case a.Kind == core.Dir:
 		hdr.Typeflag, hdr.Name = tar.TypeDir, c.Path+"/"
-	case a.Kind == vfs.Symlink:
+	case a.Kind == core.Symlink:
 		hdr.Typeflag, hdr.Linkname = tar.TypeSymlink, a.Target
-	case a.Kind == vfs.Fifo:
+	case a.Kind == core.Fifo:
 		hdr.Typeflag = tar.TypeFifo
-	case a.Kind == vfs.Blockdev:
+	case a.Kind == core.Blockdev:
 		hdr.Typeflag = tar.TypeBlock
-	case a.Kind == vfs.Chardev || a.Kind == vfs.Socket:
+	case a.Kind == core.Chardev || a.Kind == core.Socket:
 		hdr.Typeflag = tar.TypeChar
 	default:
 		hdr.Typeflag = tar.TypeReg
@@ -107,7 +107,7 @@ func ReadTar(r io.Reader, dir string) (*hostfs.Layer, error) {
 	type meta struct {
 		name            string
 		mode, uid, gid  uint32
-		kind            vfs.Kind
+		kind            core.Kind
 		special, setmod bool
 		rdev            uint64
 	}
@@ -133,7 +133,7 @@ func ReadTar(r io.Reader, dir string) (*hostfs.Layer, error) {
 		m := meta{name: name, mode: mode, uid: uid, gid: gid}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := root.MkdirAll(name, vfs.HostMode(mode, true)); err != nil {
+			if err := root.MkdirAll(name, core.HostMode(mode, true)); err != nil {
 				root.Close()
 				return nil, err
 			}
@@ -162,14 +162,14 @@ func ReadTar(r io.Reader, dir string) (*hostfs.Layer, error) {
 			m.rdev = uint64(hdr.Devminor&0xff | hdr.Devmajor<<8)
 			switch hdr.Typeflag {
 			case tar.TypeFifo:
-				m.kind = vfs.Fifo
+				m.kind = core.Fifo
 			case tar.TypeBlock:
-				m.kind = vfs.Blockdev
+				m.kind = core.Blockdev
 			default:
-				m.kind = vfs.Chardev
+				m.kind = core.Chardev
 			}
 		default: // regular file, including whiteout and opaque markers
-			f, err := root.OpenFile(name, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, vfs.HostMode(mode, false))
+			f, err := root.OpenFile(name, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, core.HostMode(mode, false))
 			if err != nil {
 				root.Close()
 				return nil, err

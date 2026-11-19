@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 )
 
 // Overlay bookkeeping beyond the upper/lower split: the whiteout set (fs.whiteout)
@@ -21,7 +21,7 @@ import (
 // the supervisor does not.
 
 type ovState struct {
-	inodeMeta       // guest modes and owners, plus the copy-up origin map (a vfs.MetaStore)
+	inodeMeta       // guest modes and owners, plus the copy-up origin map (a core.MetaStore)
 	mk        makes // paths being created, until their owner is recorded
 
 	filesMu sync.Mutex
@@ -42,7 +42,7 @@ func inodeKey(fi os.FileInfo) ikey {
 // shared MetaStore the overlay backend records into), so file locks keep one
 // identity across a copy-up.
 func (o *ovState) originOf(k ikey) ikey {
-	id := o.store.OriginOf(vfs.NodeID{Dev: k.dev, Ino: k.ino})
+	id := o.store.OriginOf(core.NodeID{Dev: k.dev, Ino: k.ino})
 	return ikey{id.Dev, id.Ino}
 }
 
@@ -69,20 +69,20 @@ type lxStat struct {
 	atime, mtime, ctime, btime syscall.Timespec
 }
 
-// lxModeKind maps a vfs.Kind to the Linux S_IFMT type bits of st_mode.
-func lxModeKind(k vfs.Kind) uint32 {
+// lxModeKind maps a core.Kind to the Linux S_IFMT type bits of st_mode.
+func lxModeKind(k core.Kind) uint32 {
 	switch k {
-	case vfs.Dir:
+	case core.Dir:
 		return 0x4000
-	case vfs.Symlink:
+	case core.Symlink:
 		return 0xa000
-	case vfs.Chardev:
+	case core.Chardev:
 		return 0x2000
-	case vfs.Blockdev:
+	case core.Blockdev:
 		return 0x6000
-	case vfs.Fifo:
+	case core.Fifo:
 		return 0x1000
-	case vfs.Socket:
+	case core.Socket:
 		return 0xc000
 	}
 	return 0x8000 // regular
@@ -137,7 +137,7 @@ func (n *nodeInfo) Mode() os.FileMode {
 // The host mode (not the guest override) goes into the *hostStat: linuxStat and
 // ownerOf re-derive the guest owner and mode from the store, so this must carry
 // the same raw bits a host lstat of the winning layer would.
-func newNodeInfo(name string, a vfs.Attr, id vfs.NodeID) *nodeInfo {
+func newNodeInfo(name string, a core.Attr, id core.NodeID) *nodeInfo {
 	st := hostStat{
 		dev: id.Dev, ino: id.Ino, rdev: a.Rdev,
 		mode:  lxModeKind(a.Kind) | a.Mode&0o7777,
@@ -164,7 +164,7 @@ func newNodeInfo(name string, a vfs.Attr, id vfs.NodeID) *nodeInfo {
 // The guest runs as root, so uid/gid default to 0 (the host owner of an upper
 // file is the unprivileged supervisor and is never the guest's view); a non-root
 // owner is carried as a MetaStore override, applied by the caller.
-func nodeStat(a vfs.Attr, id vfs.NodeID) lxStat {
+func nodeStat(a core.Attr, id core.NodeID) lxStat {
 	s := lxStat{
 		dev: id.Dev, ino: id.Ino, rdev: a.Rdev,
 		mode:  lxModeKind(a.Kind) | a.Mode&0o7777,

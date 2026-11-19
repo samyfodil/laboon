@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
@@ -25,8 +25,8 @@ func TestCopyConfinedAbsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := t.TempDir()
-	srcNS := vfs.NewNamespace(hostfs.NewDirFS(ctx))
-	dstNS := vfs.NewNamespace(hostfs.NewDirFS(dst))
+	srcNS := namespace.NewNamespace(hostfs.NewDirFS(ctx))
+	dstNS := namespace.NewNamespace(hostfs.NewDirFS(dst))
 	if err := copyThroughVFS(srcNS, "evil/hostname", dstNS, "/out", nil, nil); err != nil {
 		t.Fatalf("copy through the context symlink: %v", err)
 	}
@@ -51,8 +51,8 @@ func TestCopyRejectsParentEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := t.TempDir()
-	srcNS := vfs.NewNamespace(hostfs.NewDirFS(ctx))
-	dstNS := vfs.NewNamespace(hostfs.NewDirFS(dst))
+	srcNS := namespace.NewNamespace(hostfs.NewDirFS(ctx))
+	dstNS := namespace.NewNamespace(hostfs.NewDirFS(dst))
 	if err := copyThroughVFS(srcNS, "../secret.txt", dstNS, "/out", nil, nil); err == nil {
 		t.Fatal("COPY ../secret.txt escaped the context: want an error, got nil")
 	}
@@ -77,8 +77,8 @@ func TestCopyPreservesSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := t.TempDir()
-	srcNS := vfs.NewNamespace(hostfs.NewDirFS(ctx))
-	dstNS := vfs.NewNamespace(hostfs.NewDirFS(dst))
+	srcNS := namespace.NewNamespace(hostfs.NewDirFS(ctx))
+	dstNS := namespace.NewNamespace(hostfs.NewDirFS(dst))
 	if err := copyThroughVFS(srcNS, "tree", dstNS, "/tree", nil, nil); err != nil {
 		t.Fatalf("copy tree: %v", err)
 	}

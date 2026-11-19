@@ -5,16 +5,16 @@ package sandbox
 import (
 	"testing"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/filesystems/memfs"
 )
 
-// The guest root is always a vfs.FileSystem. A plain backend (in-memory, custom)
+// The guest root is always a core.FileSystem. A plain backend (in-memory, custom)
 // is the root directly, with no host path; a host directory arrives wrapped in a
 // HostRoot carrier, which the sandbox unwraps to run its confined host-overlay
 // machinery. This checks both paths wire up as intended.
 func TestRootFSWiring(t *testing.T) {
 	// A memFS root: no host path, and the namespace roots at it directly.
-	mem := vfs.NewMemFS()
+	mem := memfs.NewMemFS()
 	if _, ok := HostRootPath(mem); ok {
 		t.Fatalf("a memFS is not a host root")
 	}

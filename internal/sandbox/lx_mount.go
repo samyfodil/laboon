@@ -5,6 +5,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/bind"
+	"github.com/samyfodil/laboon/filesystems/memfs"
 	"github.com/samyfodil/laboon/internal/vfs"
 )
 
@@ -28,7 +31,7 @@ const (
 // namespace's last process exits (0 is the root namespace, kept for the run).
 type dynMount struct {
 	at  string
-	mfs vfs.FileSystem
+	mfs core.FileSystem
 	ns  int
 }
 
@@ -69,7 +72,7 @@ func (g *dguest) pivotRoot(newAddr uint64) int64 {
 
 // mount serves a guest mount(2). laboon has a single mount namespace, so a
 // propagation-type change is a no-op and a remount of unmodelled flags is
-// accepted. A new filesystem is added to the vfs Namespace as a vfs.FileSystem,
+// accepted. A new filesystem is added to the vfs Namespace as a core.FileSystem,
 // so paths under it resolve through the same confined chokepoint; it is never a
 // direct host path. Binding a path and the non-tmpfs filesystems are not yet
 // supported.
@@ -146,7 +149,7 @@ func (g *dguest) mountOverlay(target, data string) int64 {
 		return sErr(lxEINVAL)
 	}
 	fs := g.dfs
-	var layers []vfs.FileSystem
+	var layers []core.FileSystem
 	for i := len(lower) - 1; i >= 0; i-- { // reverse: leftmost lower is highest precedence
 		h, ok := fs.overlayLayerHost(lower[i])
 		if !ok {
@@ -210,20 +213,20 @@ func (fs *dfs) dynMagic(gp string) (uint64, bool) {
 }
 
 // mountMem services `mount -t tmpfs|ramfs` with a real in-memory filesystem
-// (vfs.NewMemFS) at target: volatile and separate from the rootfs, as the kernel
+// (memfs.NewMemFS) at target: volatile and separate from the rootfs, as the kernel
 // tmpfs is. A mode= option, if given, sets the root directory's permission bits.
 func (g *dguest) mountMem(target, data string) int64 {
 	if sharedMemMount(target) {
 		// The POSIX shared-memory area must be host-backed so a MAP_SHARED mapping
 		// works (shared-memory programs — postgres, Chromium — rely on it); a pure
-		// in-memory backend has no host fd to map. A host-backed file's vfs.File is
+		// in-memory backend has no host fd to map. A host-backed file's core.File is
 		// an *os.File, so mmap maps it directly, MAP_SHARED included, no extra code.
 		return g.mountFS(target)
 	}
-	mfs := vfs.NewMemFS()
+	mfs := memfs.NewMemFS()
 	if mode := tmpfsMode(data); mode != 0 {
 		m := mode
-		mfs.Root().SetAttr(vfs.AttrUpdate{Mode: &m})
+		mfs.Root().SetAttr(core.AttrUpdate{Mode: &m})
 	}
 	if err := g.vns().Mount(target, mfs); err != nil {
 		return sErr(osErrno(err))
@@ -260,7 +263,7 @@ func tmpfsMode(data string) uint32 {
 // container runtime remounts these inside the container after pivot_root; the
 // pseudo content is generated per reading guest, so the single shared instance
 // still reports each reader's own view.
-func (g *dguest) mountPseudo(target string, mfs vfs.FileSystem) int64 {
+func (g *dguest) mountPseudo(target string, mfs core.FileSystem) int64 {
 	if err := g.vns().Mount(target, mfs); err != nil {
 		return sErr(osErrno(err))
 	}
@@ -272,7 +275,7 @@ func (g *dguest) mountPseudo(target string, mfs vfs.FileSystem) int64 {
 // mount namespace, and bumps the generation so every guest rebuilds its view to
 // include it. Tagging is what lets dropMntnsMounts tear it down when the
 // container that made it exits.
-func (g *dguest) addDynMount(at string, mfs vfs.FileSystem) {
+func (g *dguest) addDynMount(at string, mfs core.FileSystem) {
 	fs := g.dfs
 	fs.dynMu.Lock()
 	fs.dynMounts = append(fs.dynMounts, dynMount{at: at, mfs: mfs, ns: g.ps.mntns})
@@ -348,7 +351,7 @@ func (g *dguest) umount2(tgtAddr uint64) int64 {
 }
 
 // mountBind binds the subtree at source onto target: target then resolves to
-// source's node through a vfs.Bind filesystem in the Namespace, so it stays on
+// source's node through a bind.Bind filesystem in the Namespace, so it stays on
 // the same confined backend and chokepoint. MS_REC is treated as a plain bind
 // — submounts under source are not replicated (a single-namespace limitation).
 func (g *dguest) mountBind(srcAddr uint64, target string) int64 {
@@ -360,7 +363,7 @@ func (g *dguest) mountBind(srcAddr uint64, target string) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	bind := vfs.Bind(loc.FS, loc.Node)
+	bind := bind.Bind(loc.FS, loc.Node)
 	if err := g.vns().Mount(target, bind); err != nil {
 		return sErr(osErrno(err))
 	}
@@ -370,7 +373,7 @@ func (g *dguest) mountBind(srcAddr uint64, target string) int64 {
 
 // mountFS mounts a fresh writable filesystem at target, backed by a confined
 // host layer under the run's temp dir (cleaned when the run ends). It is a
-// vfs.FileSystem in the Namespace, so every path under it resolves through the
+// core.FileSystem in the Namespace, so every path under it resolves through the
 // same chokepoint and confined backend as the rest of the guest's view.
 func (g *dguest) mountFS(target string) int64 {
 	fs := g.dfs
@@ -380,7 +383,7 @@ func (g *dguest) mountFS(target string) int64 {
 	}
 	backing := newHostDirFS(dir, fs.hostFS) // confined like the overlay's own layers
 	backing.confine = true                  // a guest-mutable tree
-	backing.meta = vfs.NewMetaStore()       // carry device-node kind/rdev the placeholder cannot
+	backing.meta = core.NewMetaStore()      // carry device-node kind/rdev the placeholder cannot
 	if err := g.vns().Mount(target, backing); err != nil {
 		return sErr(osErrno(err))
 	}

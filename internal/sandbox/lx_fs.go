@@ -14,6 +14,9 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/readonly"
+	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/vfs"
 	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
@@ -33,12 +36,12 @@ import (
 // its status. The one mutex guards all of it — both are low-frequency.
 type dfs struct {
 	hostFS
-	rootFS    vfs.FileSystem // Config.RootFS: the guest root as a backend, "" rootAbs — any FileSystem, no host path behind it
-	rootAbs   string         // cleaned absolute Config.Root (lower layer), "" if none
-	upperAbs  string         // ephemeral writable upper dir, "" if no root
-	workAbs   string         // private dir beside the upper layer for staging host objects
-	keepUpper bool           // upperAbs is the caller's, kept after the run
-	tmpDir    string         // the run's temp directory (newRunTmp)
+	rootFS    core.FileSystem // Config.RootFS: the guest root as a backend, "" rootAbs — any FileSystem, no host path behind it
+	rootAbs   string          // cleaned absolute Config.Root (lower layer), "" if none
+	upperAbs  string          // ephemeral writable upper dir, "" if no root
+	workAbs   string          // private dir beside the upper layer for staging host objects
+	keepUpper bool            // upperAbs is the caller's, kept after the run
+	tmpDir    string          // the run's temp directory (newRunTmp)
 
 	mem  []byte          // shared channel region, inherited across the stub's forks
 	done <-chan struct{} // the main stub died
@@ -64,9 +67,9 @@ type dfs struct {
 	nsBindMu sync.Mutex       // guards nsBinds
 	nsBinds  map[string]int32 // namespace bind-mount path -> pinned network namespace
 
-	shMu    sync.Mutex                // guards shared
-	shared  map[vfs.NodeID]*shBacking // the one MAP_SHARED backing per non-host file, keyed by vnode (sharedback.go)
-	sharedN atomic.Int64              // number of live backings; zero makes every read/write skip the lookup
+	shMu    sync.Mutex                 // guards shared
+	shared  map[core.NodeID]*shBacking // the one MAP_SHARED backing per non-host file, keyed by vnode (sharedback.go)
+	sharedN atomic.Int64               // number of live backings; zero makes every read/write skip the lookup
 
 	usedSlots []bool
 	hops      hopTable              // each stub process's host-op entry (Linux)
@@ -80,9 +83,9 @@ type dfs struct {
 	run       *runInfo // what starting another stub process needs
 	tmp       []string // temp files to delete at end of run (exec sites)
 
-	top     *hostfs.Layer  // the writable upper layer: the durable metadata sidecar and whiteout markers (the overlay backend does the copy-up)
-	ns      *vfs.Namespace // the shared overlay view (no pseudo mounts); a guest uses its own g.ns built from fs.overlay
-	overlay vfs.FileSystem // the overlay backend both ns and each guest's g.ns mount on /
+	top     *hostfs.Layer        // the writable upper layer: the durable metadata sidecar and whiteout markers (the overlay backend does the copy-up)
+	ns      *namespace.Namespace // the shared overlay view (no pseudo mounts); a guest uses its own g.ns built from fs.overlay
+	overlay core.FileSystem      // the overlay backend both ns and each guest's g.ns mount on /
 
 	term    termState
 	pst     procState // /proc, /sys, /dev
@@ -110,11 +113,11 @@ type dproc struct {
 	ps     *pstate // the process (thread group) this pid belongs to
 }
 
-// newDfs sets up the guest root, a vfs.FileSystem. A host-directory root
+// newDfs sets up the guest root, a core.FileSystem. A host-directory root
 // (HostRoot) runs through the confined host-overlay machinery with a writable
 // upper (upper kept after the run if set, else a fresh one under tmp); any other
 // backend (in-memory, custom) is used as the root directly, with no host path.
-func newDfs(rootFS vfs.FileSystem, upper string, mem []byte, done <-chan struct{}, tmp string) (*dfs, error) {
+func newDfs(rootFS core.FileSystem, upper string, mem []byte, done <-chan struct{}, tmp string) (*dfs, error) {
 	fs := &dfs{
 		mem: mem, done: done, tmpDir: tmp,
 		usedSlots: make([]bool, maxSlots),
@@ -126,8 +129,8 @@ func newDfs(rootFS vfs.FileSystem, upper string, mem []byte, done <-chan struct{
 		pt:        map[int]*pstate{},
 	}
 	fs.cond = sync.NewCond(&fs.mu)
-	fs.ov.store = vfs.NewMetaStore() // inode-keyed guest metadata, shared with the overlay backend
-	fs.usedSlots[0] = true           // slot 0 is the main process
+	fs.ov.store = core.NewMetaStore() // inode-keyed guest metadata, shared with the overlay backend
+	fs.usedSlots[0] = true            // slot 0 is the main process
 	// A host-directory root is a host path behind the FileSystem: it runs the
 	// confined host-overlay path below, not the generic-backend path.
 	root, isHost := HostRootPath(rootFS)
@@ -294,7 +297,7 @@ func (fs *dfs) buildNS() {
 	case fs.rootAbs == "":
 		fs.overlay = newHostDirFS("/", fs.hostFS)
 	default:
-		layers := []vfs.FileSystem{newHostDirFS(fs.rootAbs, fs.hostFS)}
+		layers := []core.FileSystem{newHostDirFS(fs.rootAbs, fs.hostFS)}
 		if fs.upperAbs != "" {
 			up := newHostDirFS(fs.upperAbs, fs.hostFS)
 			up.confine = true // the writable, guest-mutable layer
@@ -302,7 +305,7 @@ func (fs *dfs) buildNS() {
 		}
 		fs.overlay = vfs.NewOverlayFSWithMeta(fs.ov.store, layers...)
 	}
-	fs.ns = vfs.NewNamespace(fs.overlay)
+	fs.ns = namespace.NewNamespace(fs.overlay)
 }
 
 // vns returns this guest's namespace view, built on first use: the shared root
@@ -310,7 +313,7 @@ func (fs *dfs) buildNS() {
 // guest's own /proc, /sys and /dev mounts. Each guest (thread) builds its own so
 // the per-reader /proc (self, thread-self, the pid-namespace listing) is correct.
 // It is never nil for a live guest: buildNS always runs during newDfs.
-func (g *dguest) vns() *vfs.Namespace {
+func (g *dguest) vns() *namespace.Namespace {
 	gen := g.dfs.dynGen.Load()
 	if (g.pns == nil || g.pnsGen != gen) && !g.pnsBuild {
 		// Building the namespace resolves each mount point, which can walk a
@@ -322,7 +325,7 @@ func (g *dguest) vns() *vfs.Namespace {
 		g.pns, g.pnsGen, g.pnsBuild = ns, gen, false
 	}
 	if g.pns == nil {
-		return vfs.NewNamespace(g.dfs.overlay) // re-entered during the first build
+		return namespace.NewNamespace(g.dfs.overlay) // re-entered during the first build
 	}
 	return g.pns
 }
@@ -335,12 +338,12 @@ func (fs *dfs) cgStore() *cgStore {
 	return fs.cgroups
 }
 
-func (fs *dfs) guestNS(g *dguest) *vfs.Namespace {
-	ns := vfs.NewNamespace(fs.overlay)
+func (fs *dfs) guestNS(g *dguest) *namespace.Namespace {
+	ns := namespace.NewNamespace(fs.overlay)
 	ns.Mount("/proc", newPnodeFS(g.procRoot(), devProc, 0x9fa0, "/proc"))
 	ns.Mount("/sys", newPnodeFS(sysRoot(fs.cgStore()), devSys, 0x62656572, "/sys"))
 	// /dev unions the synthetic device nodes over the overlay's own /dev.
-	var ovDev vfs.Node
+	var ovDev core.Node
 	if loc, err := fs.ns.Resolve("/dev", true); err == nil {
 		ovDev = loc.Node
 	}
@@ -384,7 +387,7 @@ func (fs *dfs) ensureBinds(mounts []Mount) {
 				// is whatever backend the embedder composed.
 				mfs := m.FS
 				if m.ReadOnly {
-					mfs = vfs.ReadOnly(mfs)
+					mfs = readonly.ReadOnly(mfs)
 				}
 				fs.binds = append(fs.binds, dynMount{at: at, mfs: mfs})
 				continue
@@ -404,10 +407,10 @@ func (fs *dfs) ensureBinds(mounts []Mount) {
 			// root is symlink-resolved so the confined (no-symlink) opens beneath it
 			// are not refused for a symlink in the host path itself.
 			b := newHostDirFS(host, newRawHostFS(host))
-			b.meta = vfs.NewMetaStore()
-			var mfs vfs.FileSystem = b
+			b.meta = core.NewMetaStore()
+			var mfs core.FileSystem = b
 			if m.ReadOnly {
-				mfs = vfs.ReadOnly(b) // reads only; nothing writes, so no confine
+				mfs = readonly.ReadOnly(b) // reads only; nothing writes, so no confine
 			} else {
 				b.confine = true
 			}
@@ -635,13 +638,13 @@ type dguest struct {
 	tgid int    // thread-group id: the process pid getpid returns (== pid for a process)
 	ppid int
 
-	ft       *ftable        // open-file table: shared across a thread group (CLONE_FILES), copied by fork
-	pfs      *procFs        // umask and cwd: shared by threads, copied by fork
-	mp       *memProc       // host-fd pairing with the stub: shared by threads, new per fork
-	pi       *procInfo      // what /proc shows of this process; shared by its threads
-	pns      *vfs.Namespace // this guest's namespace view (overlay + its own /proc,/sys); built lazily by vns
-	pnsGen   uint64         // dfs.dynGen when pns was built; a mismatch rebuilds it to track mount/umount
-	pnsBuild bool           // vns is building pns; guards re-entry (a mount point that walks a /proc fd link)
+	ft       *ftable              // open-file table: shared across a thread group (CLONE_FILES), copied by fork
+	pfs      *procFs              // umask and cwd: shared by threads, copied by fork
+	mp       *memProc             // host-fd pairing with the stub: shared by threads, new per fork
+	pi       *procInfo            // what /proc shows of this process; shared by its threads
+	pns      *namespace.Namespace // this guest's namespace view (overlay + its own /proc,/sys); built lazily by vns
+	pnsGen   uint64               // dfs.dynGen when pns was built; a mismatch rebuilds it to track mount/umount
+	pnsBuild bool                 // vns is building pns; guards re-entry (a mount point that walks a /proc fd link)
 
 	isThread bool // created by clone(CLONE_VM): its exit (nr 93) retires only this slot
 
@@ -686,8 +689,8 @@ func (g *dguest) rbufOf(n int) []byte {
 // own host fd of that number, which the stub serves itself on the fast path.
 type dfile struct {
 	f       *os.File
-	vf      vfs.File   // a non-host regular file's backing (in-memory, user-defined); nil for host and non-regular fds
-	vn      vfs.Node   // its node, for fstat and SEEK_END
+	vf      core.File  // a non-host regular file's backing (in-memory, user-defined); nil for host and non-regular fds
+	vn      core.Node  // its node, for fstat and SEEK_END
 	fs      *dfs       // set with vf/vn: reaches the per-vnode MAP_SHARED backing (sharedback.go)
 	fpos    int64      // its file offset (laboon owns it; the backing has only ReadAt/WriteAt)
 	fmu     sync.Mutex // serializes fpos across concurrent read/write on a shared description
@@ -695,13 +698,13 @@ type dfile struct {
 	shbf    *os.File   // darwin: the per-vnode shared backing (sharedback.go) the stub maps for a writable MAP_SHARED mapping; borrowed, not closed here
 	gp      string     // guest path (resolved, rooted), for relative lookups
 	isDir   bool
-	stub    int        // the stub's host stdio fd this description is, or -1
-	tty     bool       // a host terminal
-	dents   []dirent   // merged directory listing, built on first getdents64
-	dpos    int        // cursor into dents
-	dmu     sync.Mutex // guards dents/dpos: a description is shared across threads and forks
-	dirID   vfs.NodeID // the opened directory's copy-up-stable identity, for getdents
-	dirIDok bool       // dirID was captured (a real directory opened by openat)
+	stub    int         // the stub's host stdio fd this description is, or -1
+	tty     bool        // a host terminal
+	dents   []dirent    // merged directory listing, built on first getdents64
+	dpos    int         // cursor into dents
+	dmu     sync.Mutex  // guards dents/dpos: a description is shared across threads and forks
+	dirID   core.NodeID // the opened directory's copy-up-stable identity, for getdents
+	dirIDok bool        // dirID was captured (a real directory opened by openat)
 	refs    atomic.Int32
 
 	rkind atomic.Uint32 // the host file's readKind, once asked
@@ -1183,7 +1186,7 @@ func (g *dguest) linkTarget(gp string) (string, bool) {
 	// the overlay union (whose layers do the platform host I/O), and Readlink
 	// reads the symlink off whichever layer won. Correct on every host.
 	loc, err := g.vns().Resolve(gp, false)
-	if err != nil || loc.Node.Kind() != vfs.Symlink {
+	if err != nil || loc.Node.Kind() != core.Symlink {
 		// Only a symlink has a link target. A synthetic node (e.g. a proc or
 		// tmpfs mount relocated under a container rootfs) is a directory whose
 		// Readlink returns an empty string without error; treating that as a
@@ -1241,7 +1244,7 @@ func (g *dguest) openFile(gp string) (*os.File, lxErrno) {
 		return nil, osErrno(err)
 	}
 	f, err := loc.Node.Open(os.O_RDONLY)
-	if (err == errPseudoOpen || errors.Is(err, vfs.ErrNoHostFile)) && loc.Node.Kind() == vfs.Dir {
+	if (err == errPseudoOpen || errors.Is(err, core.ErrNoHostFile)) && loc.Node.Kind() == core.Dir {
 		// A directory with no host file to open: a pseudo filesystem
 		// (proc/sysfs/cgroup2) relocated under a container rootfs, or an in-memory
 		// backend (tmpfs, WithFS). Back the descriptor with an empty directory;
@@ -1262,7 +1265,7 @@ func (g *dguest) openFile(gp string) (*os.File, lxErrno) {
 		// A non-host regular file (an in-memory backend: tmpfs, WithFS) a caller
 		// here must read as a host file — loading an executable to map and rewrite.
 		// Copy it into a temporary host file. (A plain read-only open does not reach
-		// here; it is served through the vfs.File directly.)
+		// here; it is served through the core.File directly.)
 		return g.spillToHost(f)
 	}
 	return of, 0
@@ -1272,7 +1275,7 @@ func (g *dguest) openFile(gp string) (*os.File, lxErrno) {
 // returns it, for a caller that must have a real host file (the loader maps and
 // rewrites an executable). The temp file is unlinked, so it is reclaimed when the
 // returned handle is closed.
-func (g *dguest) spillToHost(vf vfs.File) (*os.File, lxErrno) {
+func (g *dguest) spillToHost(vf core.File) (*os.File, lxErrno) {
 	tmp, err := anonFile(g.dfs.tmpDir, "lc-spill-")
 	if err != nil {
 		vf.Close()
@@ -1310,7 +1313,7 @@ func (g *dguest) spillToHost(vf vfs.File) (*os.File, lxErrno) {
 // directory and getdents reads the real listing through the namespace by path.
 // For an in-memory backend the node is returned too, so fstat answers from it
 // rather than the placeholder; a pseudo node keeps the placeholder's attributes.
-func (g *dguest) openDir(loc vfs.Loc, gp string) (*os.File, *memFile, lxErrno) {
+func (g *dguest) openDir(loc namespace.Loc, gp string) (*os.File, *memFile, lxErrno) {
 	f, err := loc.Node.Open(os.O_RDONLY)
 	if err == nil {
 		if of, ok := f.(*os.File); ok {
@@ -1323,7 +1326,7 @@ func (g *dguest) openDir(loc vfs.Loc, gp string) (*os.File, *memFile, lxErrno) {
 			return nil, nil, osErrno(e)
 		}
 		return ed, nil, 0
-	} else if !errors.Is(err, vfs.ErrNoHostFile) {
+	} else if !errors.Is(err, core.ErrNoHostFile) {
 		return nil, nil, osErrno(err)
 	}
 	ed, e := os.Open(emptyDir())
@@ -2347,20 +2350,20 @@ func (g *dguest) readDirNS(gp string, pin *dfile) []dirent {
 	return ents
 }
 
-// direntKind maps a vfs.Kind to a Linux DT_* directory-entry type.
-func direntKind(k vfs.Kind) byte {
+// direntKind maps a core.Kind to a Linux DT_* directory-entry type.
+func direntKind(k core.Kind) byte {
 	switch k {
-	case vfs.Dir:
+	case core.Dir:
 		return dtDir
-	case vfs.Symlink:
+	case core.Symlink:
 		return dtLnk
-	case vfs.Fifo:
+	case core.Fifo:
 		return dtFifo
-	case vfs.Socket:
+	case core.Socket:
 		return dtSock
-	case vfs.Chardev:
+	case core.Chardev:
 		return dtChr
-	case vfs.Blockdev:
+	case core.Blockdev:
 		return dtBlk
 	}
 	return dtReg
@@ -2484,10 +2487,10 @@ func osErrno(err error) lxErrno {
 	if e, ok := hostErrnoOf(err); ok {
 		return e
 	}
-	if errors.Is(err, vfs.ErrNotDir) {
+	if errors.Is(err, core.ErrNotDir) {
 		return lxENOTDIR
 	}
-	if errors.Is(err, vfs.ErrCrossDevice) {
+	if errors.Is(err, core.ErrCrossDevice) {
 		return lxEXDEV
 	}
 	if errors.Is(err, os.ErrNotExist) {

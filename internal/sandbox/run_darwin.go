@@ -20,8 +20,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/rewrite"
-	"github.com/samyfodil/laboon/internal/vfs"
 	macstub "github.com/samyfodil/laboon/stub/macos"
 )
 
@@ -172,7 +172,7 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	}
 	res := &progResolver{root: rootPath, tmp: rtmp}
 	if !isHost && cfg.RootFS != nil {
-		res.ns = vfs.NewNamespace(cfg.RootFS) // a non-host root: resolve + spill through the FS
+		res.ns = namespace.NewNamespace(cfg.RootFS) // a non-host root: resolve + spill through the FS
 	}
 	gp := path
 	guestPath, err := res.host(gp)
@@ -938,13 +938,13 @@ func headBytes(p string, n int) ([]byte, error) {
 // progResolver maps a guest program or interpreter path to a host path the stub
 // can map. A host-directory root (ns nil) maps its real files under root; a
 // non-host root (ns set) resolves the path through its FileSystem and, when the
-// file is not already host-backed, spills its content — read through the vfs.File,
+// file is not already host-backed, spills its content — read through the core.File,
 // never the host — into a private temp dir (tmp) the stub maps and the Seatbelt
 // profile already grants. The guest never supplies a host path either way.
 type progResolver struct {
 	root string
 	tmp  string
-	ns   *vfs.Namespace
+	ns   *namespace.Namespace
 }
 
 func (r *progResolver) host(gp string) (string, error) {

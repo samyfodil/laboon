@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/vfs"
 )
 
@@ -26,7 +28,7 @@ func (c *countFS) hLstat(p string) (os.FileInfo, error) {
 
 // benchStatSetup builds a realistic deep lower tree (no upper writes) and the
 // shared-cache Namespace over it, the composition the live stat path would use.
-func benchStatSetup(b *testing.B, depth int) (*countFS, *vfs.Namespace, string, string) {
+func benchStatSetup(b *testing.B, depth int) (*countFS, *namespace.Namespace, string, string) {
 	b.Helper()
 	dir := b.TempDir()
 	lower := filepath.Join(dir, "lower")
@@ -49,7 +51,7 @@ func benchStatSetup(b *testing.B, depth int) (*countFS, *vfs.Namespace, string, 
 		b.Fatal(err)
 	}
 	c := &countFS{hostFS: newHostFS(lower, upper, "")}
-	ns := vfs.NewNamespace(vfs.NewOverlayFSWithMeta(vfs.NewMetaStore(),
+	ns := namespace.NewNamespace(vfs.NewOverlayFSWithMeta(core.NewMetaStore(),
 		newHostDirFS(lower, c), newHostDirFS(upper, c)))
 	return c, ns, gp, lower
 }

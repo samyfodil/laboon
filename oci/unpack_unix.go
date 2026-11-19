@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
@@ -32,7 +32,7 @@ func Unpack(r io.Reader, dir string, maxSize int64) error {
 	// A non-root owner and the setuid/setgid/sticky bits cannot be set on the host
 	// (laboon runs unprivileged, and the modes are masked off below), so record
 	// them in the sidecar the run hydrates into the guest's inode table.
-	overrides := map[string]*vfs.Override{}
+	overrides := map[string]*core.Override{}
 	var total int64
 
 	tr := tar.NewReader(r)
@@ -49,7 +49,7 @@ func Unpack(r io.Reader, dir string, maxSize int64) error {
 			continue
 		}
 		if special := h.Mode & 0o7000; h.Uid != 0 || h.Gid != 0 || special != 0 {
-			o := &vfs.Override{}
+			o := &core.Override{}
 			if h.Uid != 0 || h.Gid != 0 {
 				o.HasOwner, o.Uid, o.Gid = true, uint32(h.Uid), uint32(h.Gid)
 			}

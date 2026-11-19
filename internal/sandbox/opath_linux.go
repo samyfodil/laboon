@@ -3,7 +3,7 @@ package sandbox
 import (
 	"os"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 	"golang.org/x/sys/unix"
 )
 
@@ -25,7 +25,7 @@ func osFstatIno(f *os.File) (devIno, error) {
 // the descriptor keeps referring to it after its name is removed (O_PATH inode
 // semantics). It returns nil when the backend has no single host file (a
 // pseudo or synthetic node), in which case the O_PATH fd stays path-based.
-func pinPathFD(n vfs.Node) *os.File {
+func pinPathFD(n core.Node) *os.File {
 	f, err := n.Open(oPathHost)
 	if err != nil {
 		return nil

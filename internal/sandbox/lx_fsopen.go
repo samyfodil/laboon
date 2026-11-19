@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 )
 
 // open(2) semantics over the overlay: openat/openat2 flags, O_PATH and
@@ -480,7 +480,7 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 	}
 	// A read-only open of a regular file (dirs, fifos, devices and writable opens
 	// are handled above). A host backend returns an *os.File; an in-memory backend
-	// (tmpfs, WithFS) returns a vfs.File served through the vfs interface.
+	// (tmpfs, WithFS) returns a core.File served through the vfs interface.
 	loc, err := g.vns().Resolve(gp, false)
 	if err != nil {
 		return sErr(osErrno(err))
@@ -501,7 +501,7 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 // write-mode open there is refused with EROFS.
 func (g *dguest) readOnlyMount(gp string) bool {
 	loc, err := g.vns().Resolve(gp, false)
-	return err == nil && vfs.IsReadOnly(loc.FS)
+	return err == nil && core.IsReadOnly(loc.FS)
 }
 
 func (g *dguest) openVirtualDev(gp string, flags int64) int64 {
@@ -561,7 +561,7 @@ func (g *dguest) createFile(gp string, flags, mode int64) int64 {
 	}
 	// A bind or tmpfs mount is its own writable filesystem, so a create under it
 	// proceeds even when the overlay root has no upper.
-	c, err := g.create(ploc, gp, vfs.CreateSpec{Kind: vfs.Reg, Mode: perm})
+	c, err := g.create(ploc, gp, core.CreateSpec{Kind: core.Reg, Mode: perm})
 	if err != nil {
 		return sErr(osErrno(err))
 	}
@@ -607,11 +607,11 @@ func (g *dguest) openTmpfile(dir string, flags, mode int64) int64 {
 }
 
 // installVFile tracks a non-host regular file (in-memory, user-defined): the
-// description is backed by the filesystem's vfs.File handle vf over node, not a
+// description is backed by the filesystem's core.File handle vf over node, not a
 // host fd. laboon owns the offset and serves read/write/lseek/fstat/ftruncate by
 // driving vf's ReadAt/WriteAt/Truncate and the node's Stat (regfile.go); mmap
 // copies the content in, or maps it directly if vf is an *os.File (mmap_linux.go).
-func (g *dguest) installVFile(gp string, node vfs.Node, vf vfs.File, flags int64) int64 {
+func (g *dguest) installVFile(gp string, node core.Node, vf core.File, flags int64) int64 {
 	return g.installD(&dfile{gp: gp, stub: -1, vf: vf, vn: node, fs: g.dfs}, flags)
 }
 

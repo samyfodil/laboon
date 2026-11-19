@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 	"golang.org/x/sys/unix"
 )
 
@@ -122,10 +122,10 @@ func (g *dguest) getxattr(gp string, d *dfile, name string, buf uint64, size int
 		if e != nil {
 			return sErr(osErrno(e))
 		}
-		if loc.Node.Kind() == vfs.Symlink && strings.HasPrefix(name, "user.") {
+		if loc.Node.Kind() == core.Symlink && strings.HasPrefix(name, "user.") {
 			return sErr(lxENODATA)
 		}
-		xn, ok := loc.Node.(vfs.XattrNode)
+		xn, ok := loc.Node.(core.XattrNode)
 		if !ok {
 			return sErr(lxEOPNOTSUPP) // a synthetic node carries no xattrs
 		}
@@ -159,7 +159,7 @@ func (g *dguest) listxattr(gp string, d *dfile, buf uint64, size int64) int64 {
 		if e != nil {
 			return sErr(osErrno(e))
 		}
-		xn, ok := loc.Node.(vfs.XattrNode)
+		xn, ok := loc.Node.(core.XattrNode)
 		if !ok {
 			return 0 // a synthetic node lists no xattrs
 		}
@@ -222,10 +222,10 @@ func (g *dguest) setxattr(gp string, d *dfile, name string, valAddr uint64, size
 		if e != nil {
 			return sErr(osErrno(e))
 		}
-		if k := loc.Node.Kind(); user && k != vfs.Reg && k != vfs.Dir {
+		if k := loc.Node.Kind(); user && k != core.Reg && k != core.Dir {
 			return sErr(lxEPERM)
 		}
-		xn, ok := loc.Node.(vfs.XattrNode)
+		xn, ok := loc.Node.(core.XattrNode)
 		if !ok {
 			return sErr(lxEOPNOTSUPP)
 		}
@@ -250,7 +250,7 @@ func (g *dguest) removexattr(gp string, d *dfile, name string) int64 {
 		if e != nil {
 			return sErr(osErrno(e))
 		}
-		xn, ok := loc.Node.(vfs.XattrNode)
+		xn, ok := loc.Node.(core.XattrNode)
 		if !ok {
 			return sErr(lxEOPNOTSUPP)
 		}

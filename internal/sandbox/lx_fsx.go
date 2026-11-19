@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 )
 
 // checkpointMeta projects the inode-keyed side table (the live authority for the
@@ -37,7 +37,7 @@ func (fs *dfs) checkpointMeta() error {
 		if err != nil || rel == "." {
 			return err
 		}
-		if vfs.Internal(filepath.Base(hp)) { // whiteout/opaque markers, the sidecar
+		if core.Internal(filepath.Base(hp)) { // whiteout/opaque markers, the sidecar
 			return nil
 		}
 		fi, err := d.Info()
@@ -54,7 +54,7 @@ func (fs *dfs) checkpointMeta() error {
 			if ok && m.hasMode {
 				perm = m.mode
 			}
-			top.Special(gp, vfs.Fifo, 0, perm)
+			top.Special(gp, core.Fifo, 0, perm)
 		} else if ok && m.hasMode {
 			top.SetMode(gp, m.mode)
 		}
@@ -409,7 +409,7 @@ func (g *dguest) mkdirat(dirfd int64, pathAddr uint64, mode int64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	if _, err := g.create(ploc, gp, vfs.CreateSpec{Kind: vfs.Dir, Mode: g.createPerm(mode)}); err != nil {
+	if _, err := g.create(ploc, gp, core.CreateSpec{Kind: core.Dir, Mode: g.createPerm(mode)}); err != nil {
 		return sErr(osErrno(err))
 	}
 	g.notify(gp, inCreate|inIsdir, 0)
@@ -526,7 +526,7 @@ func (g *dguest) renameat2(odfd int64, oaddr uint64, ndfd int64, naddr uint64, f
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	xr, ok := floc.FS.(vfs.ExchangeRenamer)
+	xr, ok := floc.FS.(core.ExchangeRenamer)
 	if !ok {
 		return sErr(lxEINVAL)
 	}
@@ -542,7 +542,7 @@ func (g *dguest) renameat2(odfd int64, oaddr uint64, ndfd int64, naddr uint64, f
 
 // fdOfPseudo returns the open file behind a /proc/<pid>/fd/<n> magic node, or
 // nil when n is not such a node.
-func fdOfPseudo(n vfs.Node) *dfile {
+func fdOfPseudo(n core.Node) *dfile {
 	if pn, ok := n.(*pnodeNode); ok && pn.n != nil && pn.n.kind == pFdObj {
 		return pn.n.fd
 	}
@@ -564,7 +564,7 @@ func (g *dguest) linkUnnamed(od *dfile, np string) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	c, err := dloc.FS.Create(dloc.Node, path.Base(np), vfs.CreateSpec{Kind: vfs.Reg, Mode: uint32(fi.Mode().Perm())})
+	c, err := dloc.FS.Create(dloc.Node, path.Base(np), core.CreateSpec{Kind: core.Reg, Mode: uint32(fi.Mode().Perm())})
 	if err != nil {
 		return sErr(osErrno(err))
 	}
@@ -679,7 +679,7 @@ func (g *dguest) symlinkat(targetAddr uint64, ndfd int64, naddr uint64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	if _, err := g.create(ploc, np, vfs.CreateSpec{Kind: vfs.Symlink, Target: target}); err != nil {
+	if _, err := g.create(ploc, np, core.CreateSpec{Kind: core.Symlink, Target: target}); err != nil {
 		return sErr(osErrno(err))
 	}
 	g.notify(np, inCreate, 0)
@@ -691,11 +691,11 @@ func (g *dguest) mknodat(dirfd int64, pathAddr uint64, mode uint32, dev uint64) 
 	if e != 0 {
 		return sErr(e)
 	}
-	kind := vfs.Reg
+	kind := core.Reg
 	switch mode & lxSIFMT {
 	case 0, lxSIFREG:
 	case lxSIFIFO:
-		kind = vfs.Fifo
+		kind = core.Fifo
 	case lxSIFCHR, lxSIFBLK:
 		// A container runtime populates the container's /dev with the standard
 		// device nodes. The backend holds a device as a placeholder plus its
@@ -704,12 +704,12 @@ func (g *dguest) mknodat(dirfd int64, pathAddr uint64, mode uint32, dev uint64) 
 			return sErr(lxEPERM)
 		}
 		if mode&lxSIFMT == lxSIFCHR {
-			kind = vfs.Chardev
+			kind = core.Chardev
 		} else {
-			kind = vfs.Blockdev
+			kind = core.Blockdev
 		}
 	case lxSIFSCK:
-		kind = vfs.Socket
+		kind = core.Socket
 	case lxSIFDIR:
 		return sErr(lxEPERM)
 	default:
@@ -728,8 +728,8 @@ func (g *dguest) mknodat(dirfd int64, pathAddr uint64, mode uint32, dev uint64) 
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	spec := vfs.CreateSpec{Kind: kind, Mode: perm}
-	if kind == vfs.Chardev || kind == vfs.Blockdev {
+	spec := core.CreateSpec{Kind: kind, Mode: perm}
+	if kind == core.Chardev || kind == core.Blockdev {
 		spec.Rdev = dev
 	}
 	if _, err := g.create(ploc, np, spec); err != nil {
@@ -810,11 +810,11 @@ func (g *dguest) fchmodat(dirfd int64, pathAddr uint64, mode uint32, flags int64
 		if err != nil {
 			return sErr(osErrno(err))
 		}
-		if loc.Node.Kind() == vfs.Symlink {
+		if loc.Node.Kind() == core.Symlink {
 			return sErr(lxEOPNOTSUPP)
 		}
 		m := mode & 0o7777
-		if err := loc.Node.SetAttr(vfs.AttrUpdate{Mode: &m}); err != nil {
+		if err := loc.Node.SetAttr(core.AttrUpdate{Mode: &m}); err != nil {
 			return sErr(osErrno(err))
 		}
 		g.notify(gp, inAttrib, 0)
@@ -865,7 +865,7 @@ func (g *dguest) fchmod(fd int64, mode uint32) int64 {
 			return sErr(osErrno(err))
 		}
 		m := mode & 0o7777
-		if err := loc.Node.SetAttr(vfs.AttrUpdate{Mode: &m}); err != nil {
+		if err := loc.Node.SetAttr(core.AttrUpdate{Mode: &m}); err != nil {
 			return sErr(osErrno(err))
 		}
 		g.notify(d.name(), inAttrib, 0)
@@ -917,9 +917,9 @@ func (g *dguest) fchownat(dirfd int64, pathAddr uint64, uid, gid uint32, flags i
 		if ce != 0 {
 			return sErr(ce)
 		}
-		isSym := loc.Node.Kind() == vfs.Symlink
+		isSym := loc.Node.Kind() == core.Symlink
 		perm := cur.mode & 0o7777
-		if loc.Node.Kind() != vfs.Dir && !isSym {
+		if loc.Node.Kind() != core.Dir && !isSym {
 			perm &^= 0o4000
 			if perm&0o010 != 0 {
 				perm &^= 0o2000
@@ -931,7 +931,7 @@ func (g *dguest) fchownat(dirfd int64, pathAddr uint64, uid, gid uint32, flags i
 		if gid == ^uint32(0) {
 			gid = cur.gid
 		}
-		u := vfs.AttrUpdate{Uid: &uid, Gid: &gid}
+		u := core.AttrUpdate{Uid: &uid, Gid: &gid}
 		if !isSym {
 			u.Mode = &perm
 		}
@@ -1026,7 +1026,7 @@ func (g *dguest) utimensat(dirfd int64, pathAddr, timesAddr uint64, flags int64)
 		if err != nil {
 			return sErr(osErrno(err))
 		}
-		var u vfs.AttrUpdate
+		var u core.AttrUpdate
 		if !omit[0] {
 			a := tsNano(ts[0])
 			u.Atime = &a
@@ -1247,12 +1247,12 @@ func (g *dguest) statfsPath(gp string) (hostStatfs, error) {
 	if err != nil {
 		return hostStatfs{}, err
 	}
-	sf, ok := loc.FS.(vfs.StatFSer)
+	sf, ok := loc.FS.(core.StatFSer)
 	if !ok {
 		if loc, err = g.vns().Resolve("/", false); err != nil {
 			return hostStatfs{}, err
 		}
-		if sf, ok = loc.FS.(vfs.StatFSer); !ok {
+		if sf, ok = loc.FS.(core.StatFSer); !ok {
 			return hostStatfs{}, os.ErrInvalid
 		}
 	}

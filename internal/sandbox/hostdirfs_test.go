@@ -8,11 +8,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/internal/namespace"
 )
 
 // TestHostDirFSMountedOnRoot proves the sandbox's platform host access, expressed
-// as a vfs.FileSystem, mounts on / and resolves/reads uniformly through the vfs
+// as a core.FileSystem, mounts on / and resolves/reads uniformly through the vfs
 // Namespace — the homogeneous model: the real host directory is just a backend
 // in the tree, with its platform I/O internal to it.
 func TestHostDirFSMountedOnRoot(t *testing.T) {
@@ -31,7 +32,7 @@ func TestHostDirFSMountedOnRoot(t *testing.T) {
 	}
 
 	// The sandbox's platform fs, as a FileSystem mounted on /.
-	ns := vfs.NewNamespace(newHostDirFS(dir, newHostFS(dir, "", "")))
+	ns := namespace.NewNamespace(newHostDirFS(dir, newHostFS(dir, "", "")))
 
 	read := func(p string) string {
 		t.Helper()
@@ -55,7 +56,7 @@ func TestHostDirFSMountedOnRoot(t *testing.T) {
 		t.Error("read /sub/f")
 	}
 	// Symlink: not followed, then followed — resolution is the Namespace's.
-	if loc, err := ns.Resolve("/link", false); err != nil || loc.Node.Kind() != vfs.Symlink {
+	if loc, err := ns.Resolve("/link", false); err != nil || loc.Node.Kind() != core.Symlink {
 		t.Fatalf("/link nofollow kind=%v %v", loc.Node.Kind(), err)
 	}
 	if loc, err := ns.Resolve("/link", true); err != nil || loc.Path != "/hello" {

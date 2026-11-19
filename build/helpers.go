@@ -12,9 +12,10 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
-	"github.com/samyfodil/laboon/oci"
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/vfs/hostfs"
+	"github.com/samyfodil/laboon/oci"
 )
 
 // baseConfig seeds the image config from the base image's.
@@ -125,11 +126,11 @@ func applyChown(l *hostfs.Layer, uid, gid uint32) { l.SetOwnerAll(uid, gid) }
 
 // dstFSWrite creates name under dir with the given mode and writes data, using
 // the backend's bulk WriteFile when it offers one. For COPY/ADD heredoc bodies.
-func dstFSWrite(fsys vfs.FileSystem, dir vfs.Node, name string, mode uint32, data []byte) (vfs.Node, error) {
-	if wfs, ok := fsys.(vfs.WriteFileSystem); ok {
-		return wfs.WriteFile(dir, name, vfs.CreateSpec{Kind: vfs.Reg, Mode: mode}, data)
+func dstFSWrite(fsys core.FileSystem, dir core.Node, name string, mode uint32, data []byte) (core.Node, error) {
+	if wfs, ok := fsys.(core.WriteFileSystem); ok {
+		return wfs.WriteFile(dir, name, core.CreateSpec{Kind: core.Reg, Mode: mode}, data)
 	}
-	n, err := fsys.Create(dir, name, vfs.CreateSpec{Kind: vfs.Reg, Mode: mode})
+	n, err := fsys.Create(dir, name, core.CreateSpec{Kind: core.Reg, Mode: mode})
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +153,7 @@ func dstFSWrite(fsys vfs.FileSystem, dir vfs.Node, name string, mode uint32, dat
 // component, never through a symlink, so a planted link cannot carry the write
 // out of the layer. It is the build's COPY/ADD on the same confined machinery
 // the live guest uses.
-func copyThroughVFS(srcNS *vfs.Namespace, src string, dstNS *vfs.Namespace, dst string, mode *uint32, ignore *ignoreMatcher) error {
+func copyThroughVFS(srcNS *namespace.Namespace, src string, dstNS *namespace.Namespace, dst string, mode *uint32, ignore *ignoreMatcher) error {
 	// followLast=false: a symlink named directly as the source is copied as a
 	// symlink, as docker preserves it, not dereferenced.
 	loc, err := srcNS.Resolve(src, false)
@@ -169,10 +170,10 @@ func copyThroughVFS(srcNS *vfs.Namespace, src string, dstNS *vfs.Namespace, dst 
 // mkdirAllVFS ensures the absolute directory dir exists within ns, creating each
 // missing component through its FileSystem (never traversing a symlink), and
 // returns its location. A component present as a non-directory is an error.
-func mkdirAllVFS(ns *vfs.Namespace, dir string) (vfs.Loc, error) {
+func mkdirAllVFS(ns *namespace.Namespace, dir string) (namespace.Loc, error) {
 	cur, err := ns.Resolve("/", true)
 	if err != nil {
-		return vfs.Loc{}, err
+		return namespace.Loc{}, err
 	}
 	for _, name := range strings.Split(strings.Trim(path.Clean(dir), "/"), "/") {
 		if name == "" || name == "." {
@@ -180,14 +181,14 @@ func mkdirAllVFS(ns *vfs.Namespace, dir string) (vfs.Loc, error) {
 		}
 		child, err := cur.FS.Lookup(cur.Node, name)
 		if err != nil {
-			if child, err = cur.FS.Create(cur.Node, name, vfs.CreateSpec{Kind: vfs.Dir, Mode: 0o755}); err != nil {
-				return vfs.Loc{}, err
+			if child, err = cur.FS.Create(cur.Node, name, core.CreateSpec{Kind: core.Dir, Mode: 0o755}); err != nil {
+				return namespace.Loc{}, err
 			}
 		}
-		if child.Kind() != vfs.Dir {
-			return vfs.Loc{}, fmt.Errorf("%s: not a directory", name)
+		if child.Kind() != core.Dir {
+			return namespace.Loc{}, fmt.Errorf("%s: not a directory", name)
 		}
-		cur = vfs.Loc{FS: cur.FS, Node: child}
+		cur = namespace.Loc{FS: cur.FS, Node: child}
 	}
 	return cur, nil
 }
@@ -196,7 +197,7 @@ func mkdirAllVFS(ns *vfs.Namespace, dir string) (vfs.Loc, error) {
 // directory. Directories and symlinks are recreated; symlinks within a copied
 // tree are preserved as links, never followed, so the walk stays confined.
 // Special files (sockets, devices, fifos) are skipped, as the image unpacker is.
-func copyNodeVFS(sfs vfs.FileSystem, sn vfs.Node, dfs vfs.FileSystem, ddir vfs.Node, name, srcPath string, mode *uint32, ignore *ignoreMatcher) error {
+func copyNodeVFS(sfs core.FileSystem, sn core.Node, dfs core.FileSystem, ddir core.Node, name, srcPath string, mode *uint32, ignore *ignoreMatcher) error {
 	if ignore.match(strings.TrimPrefix(path.Clean("/"+srcPath), "/")) {
 		return nil
 	}
@@ -209,8 +210,8 @@ func copyNodeVFS(sfs vfs.FileSystem, sn vfs.Node, dfs vfs.FileSystem, ddir vfs.N
 		m = *mode
 	}
 	switch a.Kind {
-	case vfs.Dir:
-		dn, err := dfs.Create(ddir, name, vfs.CreateSpec{Kind: vfs.Dir, Mode: m})
+	case core.Dir:
+		dn, err := dfs.Create(ddir, name, core.CreateSpec{Kind: core.Dir, Mode: m})
 		if err != nil {
 			if dn, err = dfs.Lookup(ddir, name); err != nil {
 				return err
@@ -230,15 +231,15 @@ func copyNodeVFS(sfs vfs.FileSystem, sn vfs.Node, dfs vfs.FileSystem, ddir vfs.N
 			}
 		}
 		return nil
-	case vfs.Symlink:
+	case core.Symlink:
 		tgt, err := sn.Readlink()
 		if err != nil {
 			return err
 		}
-		_, err = dfs.Create(ddir, name, vfs.CreateSpec{Kind: vfs.Symlink, Target: tgt})
+		_, err = dfs.Create(ddir, name, core.CreateSpec{Kind: core.Symlink, Target: tgt})
 		return err
-	case vfs.Reg:
-		dn, err := dfs.Create(ddir, name, vfs.CreateSpec{Kind: vfs.Reg, Mode: m})
+	case core.Reg:
+		dn, err := dfs.Create(ddir, name, core.CreateSpec{Kind: core.Reg, Mode: m})
 		if err != nil {
 			if dn, err = dfs.Lookup(ddir, name); err != nil {
 				return err
@@ -253,7 +254,7 @@ func copyNodeVFS(sfs vfs.FileSystem, sn vfs.Node, dfs vfs.FileSystem, ddir vfs.N
 // copyContentVFS streams a regular file's bytes from sn to dn through the vfs
 // File interface (ReaderAt/WriterAt), truncating the destination to the source
 // size in case it already existed.
-func copyContentVFS(sn, dn vfs.Node, size int64) error {
+func copyContentVFS(sn, dn core.Node, size int64) error {
 	in, err := sn.Open(os.O_RDONLY)
 	if err != nil {
 		return err

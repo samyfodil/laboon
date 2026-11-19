@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 )
 
 // Layer is one overlay layer, backed by a host directory (aufs/overlayfs style):
@@ -22,7 +22,7 @@ type Layer struct {
 	dir string
 
 	mu   sync.Mutex
-	over map[string]*vfs.Override
+	over map[string]*core.Override
 	wh   map[string]bool // whiteout index: deleted paths, mirrored by on-disk .wh. markers
 }
 
@@ -31,7 +31,7 @@ func NewLayer(dir string) (*Layer, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return &Layer{dir: dir, over: map[string]*vfs.Override{}, wh: map[string]bool{}}, nil
+	return &Layer{dir: dir, over: map[string]*core.Override{}, wh: map[string]bool{}}, nil
 }
 
 // Dir is the layer's host directory.
@@ -45,11 +45,11 @@ func (l *Layer) SaveMeta() error {
 	if len(l.over) == 0 {
 		return nil
 	}
-	b := vfs.EncodeMeta(l.over)
+	b := core.EncodeMeta(l.over)
 	if len(b) == 0 {
 		return nil
 	}
-	return os.WriteFile(filepath.Join(l.dir, vfs.MetaFileName), b, 0o600)
+	return os.WriteFile(filepath.Join(l.dir, core.MetaFileName), b, 0o600)
 }
 
 // LoadOverrides reads the guest metadata a layer directory's sidecar records
@@ -57,13 +57,13 @@ func (l *Layer) SaveMeta() error {
 // layer-relative slash path. A consumer that materializes the directory as a
 // plain tree (a build root, a sandbox lower) uses it to restore what the host
 // files cannot carry. Absent or unreadable sidecar yields an empty map.
-func LoadOverrides(dir string) map[string]vfs.Override {
-	b, err := os.ReadFile(filepath.Join(dir, vfs.MetaFileName))
+func LoadOverrides(dir string) map[string]core.Override {
+	b, err := os.ReadFile(filepath.Join(dir, core.MetaFileName))
 	if err != nil {
 		return nil
 	}
-	out := map[string]vfs.Override{}
-	vfs.DecodeMeta(b, func(p string, o vfs.Override) { out[p] = o })
+	out := map[string]core.Override{}
+	core.DecodeMeta(b, func(p string, o core.Override) { out[p] = o })
 	return out
 }
 
@@ -71,42 +71,42 @@ func LoadOverrides(dir string) map[string]vfs.Override {
 // to dir, no leading slash, as LoadOverrides reads them). The OCI unpacker uses
 // it to carry owners and special mode bits a non-root host cannot set on the
 // unpacked files. Nothing is written when m records no override.
-func SaveOverrides(dir string, m map[string]*vfs.Override) error {
-	b := vfs.EncodeMeta(m)
+func SaveOverrides(dir string, m map[string]*core.Override) error {
+	b := core.EncodeMeta(m)
 	if len(b) == 0 {
 		return nil
 	}
-	return os.WriteFile(filepath.Join(dir, vfs.MetaFileName), b, 0o600)
+	return os.WriteFile(filepath.Join(dir, core.MetaFileName), b, 0o600)
 }
 
 // LoadMetaInto reads a layer directory's path-keyed override sidecar and keys it
 // into store by each path's current host inode, so a reconstructed overlay (a
 // reloaded build step, a kept upper reopened) recovers the guest metadata the
 // host files cannot hold. A dir with no sidecar loads nothing.
-func LoadMetaInto(dir string, store *vfs.MetaStore) {
-	b, err := os.ReadFile(filepath.Join(dir, vfs.MetaFileName))
+func LoadMetaInto(dir string, store *core.MetaStore) {
+	b, err := os.ReadFile(filepath.Join(dir, core.MetaFileName))
 	if err != nil {
 		return
 	}
-	vfs.DecodeMeta(b, func(p string, o vfs.Override) {
+	core.DecodeMeta(b, func(p string, o core.Override) {
 		fi, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(p)))
 		if err != nil {
 			return
 		}
-		if id, ok := vfs.StatID(fi); ok {
+		if id, ok := core.StatID(fi); ok {
 			oo := o
-			store.Update(id, func(d *vfs.Override) { *d = oo })
+			store.Update(id, func(d *core.Override) { *d = oo })
 		}
 	})
 }
 
 // loadMeta reads the sidecar override map if present.
 func (l *Layer) loadMeta() {
-	b, err := os.ReadFile(filepath.Join(l.dir, vfs.MetaFileName))
+	b, err := os.ReadFile(filepath.Join(l.dir, core.MetaFileName))
 	if err != nil {
 		return
 	}
-	vfs.DecodeMeta(b, func(p string, o vfs.Override) {
+	core.DecodeMeta(b, func(p string, o core.Override) {
 		oc := o
 		l.over[p] = &oc
 	})
@@ -125,11 +125,11 @@ func (l *Layer) host(p string) string {
 	return filepath.Join(l.dir, filepath.FromSlash(clean(p)))
 }
 
-func (l *Layer) ov(p string) *vfs.Override {
+func (l *Layer) ov(p string) *core.Override {
 	p = clean(p)
 	o := l.over[p]
 	if o == nil {
-		o = &vfs.Override{}
+		o = &core.Override{}
 		l.over[p] = o
 	}
 	return o
@@ -148,7 +148,7 @@ func (l *Layer) Mkdir(p string, mode uint32) error {
 	if err := l.mkparent(p); err != nil {
 		return err
 	}
-	return os.Mkdir(l.host(p), vfs.HostMode(mode, true))
+	return os.Mkdir(l.host(p), core.HostMode(mode, true))
 }
 
 // Put creates a regular file at p with the given bytes and mode.
@@ -158,7 +158,7 @@ func (l *Layer) Put(p string, mode uint32, data []byte) error {
 	if err := l.mkparent(p); err != nil {
 		return err
 	}
-	if err := os.WriteFile(l.host(p), data, vfs.HostMode(mode, false)); err != nil {
+	if err := os.WriteFile(l.host(p), data, core.HostMode(mode, false)); err != nil {
 		return err
 	}
 	l.recordMode(p, mode, false)
@@ -190,7 +190,7 @@ func (l *Layer) Hardlink(newp, oldp string) error {
 
 // Special records a device, fifo or socket node at p as a placeholder file with
 // its kind in the override map (an unprivileged layer cannot make a real one).
-func (l *Layer) Special(p string, k vfs.Kind, rdev uint64, mode uint32) error {
+func (l *Layer) Special(p string, k core.Kind, rdev uint64, mode uint32) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.mkparent(p); err != nil {
@@ -215,7 +215,7 @@ func (l *Layer) Whiteout(p string) error {
 	if err := os.MkdirAll(l.host(dir), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(l.host(dir), vfs.WhiteoutPrefix+base), nil, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(l.host(dir), core.WhiteoutPrefix+base), nil, 0o600); err != nil {
 		return err
 	}
 	l.wh[cp] = true
@@ -228,7 +228,7 @@ func (l *Layer) Unwhiteout(p string) {
 	defer l.mu.Unlock()
 	cp := clean(p)
 	dir, base := path.Split(cp)
-	os.Remove(filepath.Join(l.host(dir), vfs.WhiteoutPrefix+base))
+	os.Remove(filepath.Join(l.host(dir), core.WhiteoutPrefix+base))
 	delete(l.wh, cp)
 }
 
@@ -265,7 +265,7 @@ func (l *Layer) SetOpaque(p string) error {
 	if err := os.MkdirAll(l.host(p), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(l.host(p), vfs.OpaqueMarker), nil, 0o600)
+	return os.WriteFile(filepath.Join(l.host(p), core.OpaqueMarker), nil, 0o600)
 }
 
 // SetMode sets the guest permission bits at p.
@@ -280,7 +280,7 @@ func (l *Layer) SetMode(p string, mode uint32) error {
 // the exact guest bits, records them in the override map; otherwise it clears any
 // stale override. The caller holds l.mu.
 func (l *Layer) recordMode(p string, mode uint32, dir bool) {
-	hm := vfs.HostMode(mode, dir)
+	hm := core.HostMode(mode, dir)
 	os.Chmod(l.host(p), hm)
 	p = clean(p)
 	if uint32(hm)&0o7777 == mode&0o7777 {
@@ -322,7 +322,7 @@ func (l *Layer) SetOwnerAll(uid, gid uint32) {
 			return nil
 		}
 		name := filepath.ToSlash(rel)
-		if strings.HasPrefix(path.Base(name), vfs.WhiteoutPrefix) {
+		if strings.HasPrefix(path.Base(name), core.WhiteoutPrefix) {
 			return nil
 		}
 		l.SetOwner(name, uid, gid)
@@ -343,7 +343,7 @@ func (l *Layer) SetModeAll(mode uint32) {
 			return nil
 		}
 		name := filepath.ToSlash(rel)
-		if vfs.Internal(path.Base(name)) || d.Type()&os.ModeSymlink != 0 {
+		if core.Internal(path.Base(name)) || d.Type()&os.ModeSymlink != 0 {
 			return nil // markers/sidecar, and symlinks carry no mode
 		}
 		l.SetMode(name, mode)
@@ -354,34 +354,34 @@ func (l *Layer) SetModeAll(mode uint32) {
 // --- reading a layer ----------------------------------------------------------
 
 // Stat returns what the layer records at p: a file, a whiteout, or nothing.
-func (l *Layer) Stat(p string) (vfs.Attr, bool) {
+func (l *Layer) Stat(p string) (core.Attr, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	p = clean(p)
 	if l.wh[p] {
-		return vfs.Attr{Whiteout: true}, true
+		return core.Attr{Whiteout: true}, true
 	}
 	fi, err := os.Lstat(l.host(p))
 	if err != nil {
-		return vfs.Attr{}, false
+		return core.Attr{}, false
 	}
 	a := l.attrLocked(p, fi)
 	return a, true
 }
 
-func (l *Layer) attrLocked(p string, fi os.FileInfo) vfs.Attr {
-	a := vfs.Attr{Mode: uint32(fi.Mode().Perm())}
+func (l *Layer) attrLocked(p string, fi os.FileInfo) core.Attr {
+	a := core.Attr{Mode: uint32(fi.Mode().Perm())}
 	switch {
 	case fi.IsDir():
-		a.Kind = vfs.Dir
-		if _, err := os.Lstat(filepath.Join(l.host(p), vfs.OpaqueMarker)); err == nil {
+		a.Kind = core.Dir
+		if _, err := os.Lstat(filepath.Join(l.host(p), core.OpaqueMarker)); err == nil {
 			a.Opaque = true
 		}
 	case fi.Mode()&os.ModeSymlink != 0:
-		a.Kind = vfs.Symlink
+		a.Kind = core.Symlink
 		a.Target, _ = os.Readlink(l.host(p))
 	default:
-		a.Kind = vfs.Reg
+		a.Kind = core.Reg
 	}
 	if o := l.over[p]; o != nil {
 		if o.Special {
@@ -404,39 +404,39 @@ func (l *Layer) ReadFile(p string) ([]byte, error) {
 
 // adopt copies the path p from src into this layer with the attributes a — a
 // copy-up. The parent must already exist.
-func (l *Layer) adopt(src *Layer, p string, a vfs.Attr) error {
+func (l *Layer) adopt(src *Layer, p string, a core.Attr) error {
 	if err := l.mkparent(p); err != nil {
 		return err
 	}
 	switch {
-	case a.Kind == vfs.Dir:
-		if err := os.MkdirAll(l.host(p), vfs.HostMode(a.Mode, true)); err != nil {
+	case a.Kind == core.Dir:
+		if err := os.MkdirAll(l.host(p), core.HostMode(a.Mode, true)); err != nil {
 			return err
 		}
-	case a.Kind == vfs.Symlink:
+	case a.Kind == core.Symlink:
 		os.Remove(l.host(p))
 		if err := os.Symlink(a.Target, l.host(p)); err != nil {
 			return err
 		}
-	case a.Kind >= vfs.Fifo: // a special node placeholder
+	case a.Kind >= core.Fifo: // a special node placeholder
 		if err := os.WriteFile(l.host(p), nil, 0o600); err != nil {
 			return err
 		}
 	default: // regular file
-		if err := copyFile(src.host(p), l.host(p), vfs.HostMode(a.Mode, false)); err != nil {
+		if err := copyFile(src.host(p), l.host(p), core.HostMode(a.Mode, false)); err != nil {
 			return err
 		}
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if a.Kind != vfs.Symlink {
-		l.recordMode(p, a.Mode, a.Kind == vfs.Dir)
+	if a.Kind != core.Symlink {
+		l.recordMode(p, a.Mode, a.Kind == core.Dir)
 	}
 	if a.Uid != 0 || a.Gid != 0 {
 		o := l.ov(p)
 		o.Uid, o.Gid, o.HasOwner = a.Uid, a.Gid, true
 	}
-	if a.Kind >= vfs.Fifo {
+	if a.Kind >= core.Fifo {
 		o := l.ov(p)
 		o.Special, o.Kind, o.Rdev = true, a.Kind, a.Rdev
 	}
@@ -452,7 +452,7 @@ func (l *Layer) removeOverride(p string) {
 
 // Entries lists directory p's own entries, whether it is opaque, and whether it
 // is a directory in this layer.
-func (l *Layer) Entries(p string) (entries []vfs.Entry, opaque, ok bool) {
+func (l *Layer) Entries(p string) (entries []core.Entry, opaque, ok bool) {
 	ents, err := os.ReadDir(l.host(p))
 	if err != nil {
 		return nil, false, false
@@ -460,27 +460,27 @@ func (l *Layer) Entries(p string) (entries []vfs.Entry, opaque, ok bool) {
 	for _, e := range ents {
 		name := e.Name()
 		switch {
-		case name == vfs.MetaFileName:
+		case name == core.MetaFileName:
 			// internal sidecar, not a layer entry
-		case name == vfs.OpaqueMarker:
+		case name == core.OpaqueMarker:
 			opaque = true
-		case strings.HasPrefix(name, vfs.WhiteoutPrefix):
-			entries = append(entries, vfs.Entry{Name: name[len(vfs.WhiteoutPrefix):], Whiteout: true})
+		case strings.HasPrefix(name, core.WhiteoutPrefix):
+			entries = append(entries, core.Entry{Name: name[len(core.WhiteoutPrefix):], Whiteout: true})
 		default:
-			entries = append(entries, vfs.Entry{Name: name, Kind: kindOf(e)})
+			entries = append(entries, core.Entry{Name: name, Kind: kindOf(e)})
 		}
 	}
 	return entries, opaque, true
 }
 
-func kindOf(e os.DirEntry) vfs.Kind {
+func kindOf(e os.DirEntry) core.Kind {
 	switch {
 	case e.IsDir():
-		return vfs.Dir
+		return core.Dir
 	case e.Type()&os.ModeSymlink != 0:
-		return vfs.Symlink
+		return core.Symlink
 	}
-	return vfs.Reg
+	return core.Reg
 }
 
 func isDirHost(hp string) bool {

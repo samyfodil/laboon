@@ -9,8 +9,8 @@ import (
 	"io"
 	"sync"
 
+	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/internal/rewrite"
-	"github.com/samyfodil/laboon/internal/vfs"
 )
 
 // ErrKilled reports that the kernel killed the stub because the backstop
@@ -44,14 +44,14 @@ type Config struct {
 	Terminal Terminal
 	// Trace, if set, receives one line per guest syscall.
 	Trace io.Writer
-	// RootFS is the guest's root filesystem ("/"), any vfs.FileSystem: a host
+	// RootFS is the guest's root filesystem ("/"), any core.FileSystem: a host
 	// directory (HostRoot, what WithRoot builds), an in-memory tree (NewMemFS), a
 	// union, a read-only or hardened wrapper, a network-backed or custom backend.
 	// Without it the guest has no filesystem and the program path is a host path.
 	// The root is always a FileSystem, so the sandbox takes no host path for it;
 	// the parts that still need a real host directory (a host image's writable
 	// upper, the darwin exec resolver) recover it from a HostRoot with HostRootPath.
-	RootFS vfs.FileSystem
+	RootFS core.FileSystem
 	// Dir is the guest's initial working directory ("/" if empty).
 	Dir string
 	// Upper, if set with a host-directory RootFS, is a writable overlay layer kept after the run
@@ -128,11 +128,11 @@ type UserID struct {
 // Mount places a filesystem into the guest at Guest. The common case is a
 // host-path bind: a Host directory is bound as files (read-write, confined), and
 // an AF_UNIX connect under Guest reaches the host socket at the matching Host
-// path. Alternatively FS supplies the filesystem directly — any vfs.FileSystem
+// path. Alternatively FS supplies the filesystem directly — any core.FileSystem
 // (in-memory, a union, a hardened or read-only wrapper, a custom backend) — and
 // Host is then unused. The public WithMount builds the former, WithFS the latter.
 type Mount struct {
 	Host, Guest string
-	ReadOnly    bool           // bind read-only (EROFS on any change)
-	FS          vfs.FileSystem // if set, mount this filesystem at Guest instead of a host bind
+	ReadOnly    bool            // bind read-only (EROFS on any change)
+	FS          core.FileSystem // if set, mount this filesystem at Guest instead of a host bind
 }

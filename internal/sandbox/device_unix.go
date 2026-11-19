@@ -6,7 +6,7 @@ import (
 	"os"
 	"path"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 	"golang.org/x/sys/unix"
 )
 
@@ -52,7 +52,7 @@ func (g *dguest) makeDeviceNode(gp string, rdev uint64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	if _, err := g.create(ploc, gp, vfs.CreateSpec{Kind: vfs.Chardev, Mode: 0o600, Rdev: rdev}); err != nil {
+	if _, err := g.create(ploc, gp, core.CreateSpec{Kind: core.Chardev, Mode: 0o600, Rdev: rdev}); err != nil {
 		return sErr(osErrno(err))
 	}
 	return 0

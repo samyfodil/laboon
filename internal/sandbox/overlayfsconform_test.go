@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/vfs"
 	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
@@ -51,14 +53,14 @@ func TestOverlayFSConformance(t *testing.T) {
 	// Reopen the run's lower and kept upper as a union overlay over the REAL
 	// platform backend (hostDirFS), with the kept upper's metadata sidecar loaded
 	// into the shared store — the composition the live routing uses.
-	store := vfs.NewMetaStore()
+	store := core.NewMetaStore()
 	lo := newHostDirFS(lower, newHostFS(lower, "", ""))
 	up := newHostDirFS(upper, newHostFS(upper, "", ""))
 	ofs := vfs.NewOverlayFSWithMeta(store, lo, up)
 	hostfs.LoadMetaInto(upper, store)
-	ns := vfs.NewNamespace(ofs)
+	ns := namespace.NewNamespace(ofs)
 
-	stat := func(p string) vfs.Attr {
+	stat := func(p string) core.Attr {
 		t.Helper()
 		loc, err := ns.Resolve(p, false)
 		if err != nil {
@@ -92,7 +94,7 @@ func TestOverlayFSConformance(t *testing.T) {
 	if body("/sub/f.txt") != "nested" {
 		t.Error("sub/f.txt content")
 	}
-	if a := stat("/sl"); a.Kind != vfs.Symlink || a.Target != "/keep.txt" {
+	if a := stat("/sl"); a.Kind != core.Symlink || a.Target != "/keep.txt" {
 		t.Errorf("sl = %+v", a)
 	}
 	if _, err := ns.Resolve("/gone.txt", false); err == nil {

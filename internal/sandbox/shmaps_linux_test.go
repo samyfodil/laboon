@@ -4,17 +4,17 @@ import (
 	"os"
 	"testing"
 
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/memfs"
 	"golang.org/x/sys/unix"
-
-	"github.com/samyfodil/laboon/internal/vfs"
 )
 
 // newTestBacking makes a shBacking over a fresh memFS file, with content in its
 // memfd, registered on fs and reserved for pages mappings.
-func newTestBacking(t *testing.T, fs *dfs, content []byte, pages int64) (*shBacking, vfs.FileSystem) {
+func newTestBacking(t *testing.T, fs *dfs, content []byte, pages int64) (*shBacking, core.FileSystem) {
 	t.Helper()
-	mem := vfs.NewMemFS()
-	if _, err := mem.(vfs.WriteFileSystem).WriteFile(mem.Root(), "f", vfs.CreateSpec{Kind: vfs.Reg, Mode: 0o644}, make([]byte, len(content))); err != nil {
+	mem := memfs.NewMemFS()
+	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, len(content))); err != nil {
 		t.Fatal(err)
 	}
 	node, err := mem.Lookup(mem.Root(), "f")
@@ -44,7 +44,7 @@ func newTestBacking(t *testing.T, fs *dfs, content []byte, pages int64) (*shBack
 	return sb, mem
 }
 
-func memFileBytes(t *testing.T, mem vfs.FileSystem, n int) []byte {
+func memFileBytes(t *testing.T, mem core.FileSystem, n int) []byte {
 	t.Helper()
 	node, err := mem.Lookup(mem.Root(), "f")
 	if err != nil {

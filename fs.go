@@ -1,6 +1,11 @@
 package laboon
 
 import (
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/bind"
+	"github.com/samyfodil/laboon/filesystems/harden"
+	"github.com/samyfodil/laboon/filesystems/memfs"
+	"github.com/samyfodil/laboon/filesystems/readonly"
 	"github.com/samyfodil/laboon/internal/vfs"
 	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
@@ -17,48 +22,48 @@ import (
 // Implement it for a custom backend (an object store, a database), or use a
 // provided one: NewMemFS, NewDirFS, Overlay, and the ReadOnly and HardenFS
 // wrappers.
-type FileSystem = vfs.FileSystem
+type FileSystem = core.FileSystem
 
 // These are the types a custom FileSystem implements against or returns.
 type (
 	// Node is a filesystem object, identified independently of the names reaching it.
-	Node = vfs.Node
+	Node = core.Node
 	// File is an open handle to a regular file's content.
-	File = vfs.File
+	File = core.File
 	// Attr is a node's attributes, as Node.Stat returns them.
-	Attr = vfs.Attr
+	Attr = core.Attr
 	// AttrUpdate is the set of changes SetAttr applies; a nil field is unchanged.
-	AttrUpdate = vfs.AttrUpdate
+	AttrUpdate = core.AttrUpdate
 	// CreateSpec describes an object to create.
-	CreateSpec = vfs.CreateSpec
+	CreateSpec = core.CreateSpec
 	// Dirent is one entry of a directory listing.
-	Dirent = vfs.Dirent
+	Dirent = core.Dirent
 	// Kind is a filesystem object's type.
-	Kind = vfs.Kind
+	Kind = core.Kind
 	// NodeID is a backend-local object identity, unique within one FileSystem.
-	NodeID = vfs.NodeID
+	NodeID = core.NodeID
 	// StatFS holds a filesystem's statfs counters.
-	StatFS = vfs.StatFS
+	StatFS = core.StatFS
 	// StatFSer is the optional capability of a FileSystem that reports statfs.
-	StatFSer = vfs.StatFSer
+	StatFSer = core.StatFSer
 	// WriteFileSystem is a FileSystem whose file content can be written in bulk.
-	WriteFileSystem = vfs.WriteFileSystem
+	WriteFileSystem = core.WriteFileSystem
 )
 
 // The kinds a Kind takes.
 const (
-	KindReg      = vfs.Reg
-	KindDir      = vfs.Dir
-	KindSymlink  = vfs.Symlink
-	KindFifo     = vfs.Fifo
-	KindChardev  = vfs.Chardev
-	KindBlockdev = vfs.Blockdev
-	KindSocket   = vfs.Socket
+	KindReg      = core.Reg
+	KindDir      = core.Dir
+	KindSymlink  = core.Symlink
+	KindFifo     = core.Fifo
+	KindChardev  = core.Chardev
+	KindBlockdev = core.Blockdev
+	KindSocket   = core.Socket
 )
 
 // NewMemFS makes an empty in-memory FileSystem (the afero-mem equivalent): files,
 // directories, symlinks and hardlinks held in memory, volatile across runs.
-func NewMemFS() FileSystem { return vfs.NewMemFS() }
+func NewMemFS() FileSystem { return memfs.NewMemFS() }
 
 // NewDirFS presents the host directory root as a FileSystem. Unlike WithMount it
 // is a plain tree with no subtree confinement or socket forwarding; use WithMount
@@ -72,40 +77,40 @@ func Overlay(layers ...FileSystem) FileSystem { return vfs.NewOverlayFS(layers..
 
 // ReadOnly wraps fs so every change — create, link, remove, rename, and a
 // write-mode open — fails with EROFS, while reads pass through.
-func ReadOnly(fs FileSystem) FileSystem { return vfs.ReadOnly(fs) }
+func ReadOnly(fs FileSystem) FileSystem { return readonly.ReadOnly(fs) }
 
 // Bind presents the subtree rooted at root (a node of fs) as its own FileSystem,
 // so part of one filesystem can be mounted on its own.
-func Bind(fs FileSystem, root Node) FileSystem { return vfs.Bind(fs, root) }
+func Bind(fs FileSystem, root Node) FileSystem { return bind.Bind(fs, root) }
 
 // HardenFS wraps fs and removes capabilities with the given options, each denied
 // with EPERM:
 //
 //	laboon.WithFS("/data", laboon.HardenFS(laboon.NewMemFS(),
 //	    laboon.WithNoSymLink(), laboon.WithNoDevice(), laboon.WithNoSocket()))
-func HardenFS(fs FileSystem, opts ...HardenOption) FileSystem { return vfs.HardenFS(fs, opts...) }
+func HardenFS(fs FileSystem, opts ...HardenOption) FileSystem { return harden.HardenFS(fs, opts...) }
 
 // A HardenOption turns off one capability of a HardenFS.
-type HardenOption = vfs.HardenOption
+type HardenOption = harden.HardenOption
 
 // WithNoHardLink denies hardlink creation.
-func WithNoHardLink() HardenOption { return vfs.WithNoHardLink() }
+func WithNoHardLink() HardenOption { return harden.WithNoHardLink() }
 
 // WithNoSymLink denies symlink creation.
-func WithNoSymLink() HardenOption { return vfs.WithNoSymLink() }
+func WithNoSymLink() HardenOption { return harden.WithNoSymLink() }
 
 // WithNoDevice denies device-node creation.
-func WithNoDevice() HardenOption { return vfs.WithNoDevice() }
+func WithNoDevice() HardenOption { return harden.WithNoDevice() }
 
 // WithNoSocket denies filesystem-socket creation.
-func WithNoSocket() HardenOption { return vfs.WithNoSocket() }
+func WithNoSocket() HardenOption { return harden.WithNoSocket() }
 
 // WithNoFifo denies named-pipe creation.
-func WithNoFifo() HardenOption { return vfs.WithNoFifo() }
+func WithNoFifo() HardenOption { return harden.WithNoFifo() }
 
 // WithConfinedLinks makes symlinks in the filesystem resolve relative to its own
 // root, so a symlink inside cannot name a path outside it (an absolute target
 // restarts at the mount point and "../" cannot climb out). A guest tmpfs is not
 // confined, keeping exact Linux semantics; this is for an embedder-mounted
 // backend meant to be self-contained.
-func WithConfinedLinks() HardenOption { return vfs.WithConfinedLinks() }
+func WithConfinedLinks() HardenOption { return harden.WithConfinedLinks() }

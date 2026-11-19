@@ -9,7 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/internal/namespace"
 )
 
 // Guest file permission checks against the process's fs credentials. Image
@@ -129,7 +130,7 @@ func (g *dguest) dacUnlink(gp string) lxErrno {
 // goes into the create, which the overlay records under its own lock; for a
 // backend that does not keep it, dacOwn records it while gp is marked as being
 // made, which a stat of gp waits out (makes).
-func (g *dguest) create(ploc vfs.Loc, gp string, spec vfs.CreateSpec) (vfs.Node, error) {
+func (g *dguest) create(ploc namespace.Loc, gp string, spec core.CreateSpec) (core.Node, error) {
 	fs := g.dfs
 	fs.mu.Lock()
 	spec.Uid, spec.Gid = g.ps.cred.fsuid, g.ps.cred.fsgid

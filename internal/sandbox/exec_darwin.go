@@ -13,7 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 	"golang.org/x/sys/unix"
 )
 
@@ -406,7 +406,7 @@ func rootedProgram(root, prog string) (string, bool) {
 	// it follows symlinks the way execve does, restarting an absolute target at
 	// the root. The resolved guest path maps straight back to its host path.
 	fs := &dfs{rootAbs: abs, hostFS: newHostFS(abs, "", "")}
-	fs.ov.store = vfs.NewMetaStore()
+	fs.ov.store = core.NewMetaStore()
 	fs.buildNS()
 	loc, err := fs.ns.Resolve(path.Clean("/"+prog), true)
 	if err != nil {

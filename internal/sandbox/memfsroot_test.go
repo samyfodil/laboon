@@ -11,7 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/memfs"
 )
 
 // A memFS is a complete guest root with no host path behind it. Executing a
@@ -24,7 +25,7 @@ func TestMemFSRootExec(t *testing.T) {
 	if root == "" {
 		t.Skip("set LC_MEMFS_ROOT to a rootfs with /bin/busybox")
 	}
-	mem := vfs.NewMemFS()
+	mem := memfs.NewMemFS()
 	mirrorToMem(t, mem, root)
 
 	var out bytes.Buffer
@@ -62,9 +63,9 @@ func TestMemFSRootExec(t *testing.T) {
 // mirrorToMem copies the host directory tree at root into the in-memory
 // filesystem fsys (directories, regular files, symlinks), so the guest's root is
 // a memFS holding the same content with no host path behind it.
-func mirrorToMem(t *testing.T, fsys vfs.FileSystem, root string) {
+func mirrorToMem(t *testing.T, fsys core.FileSystem, root string) {
 	t.Helper()
-	wfs, _ := fsys.(vfs.WriteFileSystem)
+	wfs, _ := fsys.(core.WriteFileSystem)
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -90,20 +91,20 @@ func mirrorToMem(t *testing.T, fsys vfs.FileSystem, root string) {
 		}
 		switch {
 		case d.IsDir():
-			_, err = fsys.Create(parent, name, vfs.CreateSpec{Kind: vfs.Dir, Mode: uint32(info.Mode().Perm())})
+			_, err = fsys.Create(parent, name, core.CreateSpec{Kind: core.Dir, Mode: uint32(info.Mode().Perm())})
 		case info.Mode()&os.ModeSymlink != 0:
 			tgt, e := os.Readlink(p)
 			if e != nil {
 				return e
 			}
-			_, err = fsys.Create(parent, name, vfs.CreateSpec{Kind: vfs.Symlink, Target: tgt})
+			_, err = fsys.Create(parent, name, core.CreateSpec{Kind: core.Symlink, Target: tgt})
 		case info.Mode().IsRegular():
 			b, e := os.ReadFile(p)
 			if e != nil {
 				return e
 			}
 			if wfs != nil {
-				_, err = wfs.WriteFile(parent, name, vfs.CreateSpec{Kind: vfs.Reg, Mode: uint32(info.Mode().Perm())}, b)
+				_, err = wfs.WriteFile(parent, name, core.CreateSpec{Kind: core.Reg, Mode: uint32(info.Mode().Perm())}, b)
 			}
 		}
 		return err

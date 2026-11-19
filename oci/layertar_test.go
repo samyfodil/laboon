@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/internal/vfs/hostfs"
 )
 
@@ -48,7 +48,7 @@ func TestLayerTarRoundTrip(t *testing.T) {
 	if b, err := got.ReadFile("etc/hello"); err != nil || string(b) != "hi there" {
 		t.Fatalf("etc/hello = %q, %v", b, err)
 	}
-	if a, ok := got.Stat("link"); !ok || a.Kind != vfs.Symlink || a.Target != "etc/hello" {
+	if a, ok := got.Stat("link"); !ok || a.Kind != core.Symlink || a.Target != "etc/hello" {
 		t.Fatalf("link = %+v, %v", a, ok)
 	}
 	if a, ok := got.Stat("run.sh"); !ok || a.Mode != 0o4755 {

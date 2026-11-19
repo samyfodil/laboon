@@ -15,7 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/memfs"
 )
 
 // mmapGuestBin returns the testdata/mmapguest.c guest, which selects a behavior
@@ -46,8 +47,8 @@ func mmapGuestBin(t *testing.T) string {
 // on Linux and on macOS (where it exercises the darwin host-file backing).
 func TestMmapSharedCrossPlatform(t *testing.T) {
 	exe := mmapGuestBin(t)
-	mem := vfs.NewMemFS()
-	if _, err := mem.(vfs.WriteFileSystem).WriteFile(mem.Root(), "f", vfs.CreateSpec{Kind: vfs.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
+	mem := memfs.NewMemFS()
+	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
 		t.Fatal(err)
 	}
 	runMmapGuest(t, exe, mem, "MMAP-OK")
@@ -85,7 +86,7 @@ func TestMmapMsyncWriteBack(t *testing.T) {
 // under the host root, so on unix the root is "/" and the guest path is exe;
 // on Windows, where "/" is not a host path, the root is the guest binary's
 // directory and the guest runs it by its base name.
-func runMmapGuest(t *testing.T, exe string, mem vfs.FileSystem, want string, args ...string) {
+func runMmapGuest(t *testing.T, exe string, mem core.FileSystem, want string, args ...string) {
 	t.Helper()
 	root, gp := HostRoot("/"), exe
 	if runtime.GOOS == "windows" {
@@ -131,8 +132,8 @@ func TestMmapReevict(t *testing.T) {
 // it from under the child); both stores reach the composed filesystem.
 func TestMmapForkShared(t *testing.T) {
 	exe := mmapGuestBin(t)
-	mem := vfs.NewMemFS()
-	if _, err := mem.(vfs.WriteFileSystem).WriteFile(mem.Root(), "f", vfs.CreateSpec{Kind: vfs.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
+	mem := memfs.NewMemFS()
+	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
 		t.Fatal(err)
 	}
 	runMmapGuest(t, exe, mem, "MMAP-OK", "fork")
@@ -144,7 +145,7 @@ func TestMmapForkShared(t *testing.T) {
 	}
 }
 
-func memReadAt(t *testing.T, mem vfs.FileSystem, name string, off int64, n int) []byte {
+func memReadAt(t *testing.T, mem core.FileSystem, name string, off int64, n int) []byte {
 	t.Helper()
 	node, err := mem.Lookup(mem.Root(), name)
 	if err != nil {
@@ -162,7 +163,7 @@ func memReadAt(t *testing.T, mem vfs.FileSystem, name string, off int64, n int) 
 	return b
 }
 
-func memSize(t *testing.T, mem vfs.FileSystem, name string) int64 {
+func memSize(t *testing.T, mem core.FileSystem, name string) int64 {
 	t.Helper()
 	node, err := mem.Lookup(mem.Root(), name)
 	if err != nil {
@@ -184,47 +185,47 @@ type wbFS struct {
 func newWBFS(size int) *wbFS {
 	w := &atomic.Int64{}
 	fsys := &wbFS{}
-	fsys.root = &wbNode{id: vfs.NodeID{Dev: 99, Ino: 1}, dir: true, writes: w}
-	fsys.file = &wbNode{id: vfs.NodeID{Dev: 99, Ino: 2}, data: make([]byte, size), writes: w}
+	fsys.root = &wbNode{id: core.NodeID{Dev: 99, Ino: 1}, dir: true, writes: w}
+	fsys.file = &wbNode{id: core.NodeID{Dev: 99, Ino: 2}, data: make([]byte, size), writes: w}
 	return fsys
 }
 
-func (c *wbFS) Root() vfs.Node { return c.root }
-func (c *wbFS) Lookup(dir vfs.Node, name string) (vfs.Node, error) {
+func (c *wbFS) Root() core.Node { return c.root }
+func (c *wbFS) Lookup(dir core.Node, name string) (core.Node, error) {
 	if dir == c.root && name == "f" {
 		return c.file, nil
 	}
 	return nil, &fs.PathError{Op: "lookup", Path: name, Err: fs.ErrNotExist}
 }
-func (c *wbFS) ReadDir(dir vfs.Node) ([]vfs.Dirent, error) {
-	return []vfs.Dirent{{Name: "f", Kind: vfs.Reg, Ino: c.file.id.Ino}}, nil
+func (c *wbFS) ReadDir(dir core.Node) ([]core.Dirent, error) {
+	return []core.Dirent{{Name: "f", Kind: core.Reg, Ino: c.file.id.Ino}}, nil
 }
-func (c *wbFS) Create(vfs.Node, string, vfs.CreateSpec) (vfs.Node, error) {
+func (c *wbFS) Create(core.Node, string, core.CreateSpec) (core.Node, error) {
 	return nil, fs.ErrPermission
 }
-func (c *wbFS) Link(vfs.Node, string, vfs.Node) (vfs.Node, error) { return nil, fs.ErrPermission }
-func (c *wbFS) Remove(vfs.Node, string, bool) error               { return fs.ErrPermission }
-func (c *wbFS) Rename(vfs.Node, string, vfs.Node, string) error   { return fs.ErrPermission }
+func (c *wbFS) Link(core.Node, string, core.Node) (core.Node, error) { return nil, fs.ErrPermission }
+func (c *wbFS) Remove(core.Node, string, bool) error                 { return fs.ErrPermission }
+func (c *wbFS) Rename(core.Node, string, core.Node, string) error    { return fs.ErrPermission }
 
 type wbNode struct {
-	id     vfs.NodeID
+	id     core.NodeID
 	dir    bool
 	mu     sync.Mutex
 	data   []byte
 	writes *atomic.Int64
 }
 
-func (n *wbNode) ID() vfs.NodeID { return n.id }
-func (n *wbNode) Kind() vfs.Kind {
+func (n *wbNode) ID() core.NodeID { return n.id }
+func (n *wbNode) Kind() core.Kind {
 	if n.dir {
-		return vfs.Dir
+		return core.Dir
 	}
-	return vfs.Reg
+	return core.Reg
 }
-func (n *wbNode) Stat() (vfs.Attr, error) {
+func (n *wbNode) Stat() (core.Attr, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	a := vfs.Attr{Kind: n.Kind(), Mode: 0o644, Nlink: 1}
+	a := core.Attr{Kind: n.Kind(), Mode: 0o644, Nlink: 1}
 	if n.dir {
 		a.Mode = 0o755
 	} else {
@@ -232,9 +233,9 @@ func (n *wbNode) Stat() (vfs.Attr, error) {
 	}
 	return a, nil
 }
-func (n *wbNode) SetAttr(vfs.AttrUpdate) error { return nil }
-func (n *wbNode) Readlink() (string, error)    { return "", fs.ErrInvalid }
-func (n *wbNode) Open(int) (vfs.File, error)   { return &wbFile{n: n}, nil }
+func (n *wbNode) SetAttr(core.AttrUpdate) error { return nil }
+func (n *wbNode) Readlink() (string, error)     { return "", fs.ErrInvalid }
+func (n *wbNode) Open(int) (core.File, error)   { return &wbFile{n: n}, nil }
 
 type wbFile struct{ n *wbNode }
 

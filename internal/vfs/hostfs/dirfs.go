@@ -1,4 +1,4 @@
-// Package hostfs holds vfs.FileSystem backends and layers that are implemented
+// Package hostfs holds core.FileSystem backends and layers that are implemented
 // over the host OS (a host directory tree, the copy-up layer's on-disk sidecar
 // and whiteouts). It is kept out of the core vfs package so that package has no
 // direct host-OS interaction: vfs defines the abstraction (the resolver, the
@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 )
 
 // clean is the backend-local path cleaner (vfs has its own); a guest path is
@@ -30,7 +30,7 @@ func clean(p string) string { return strings.Trim(path.Clean("/"+p), "/") }
 type dirFS struct{ root string }
 
 // NewDirFS presents the host directory root as a plain FileSystem.
-func NewDirFS(root string) vfs.FileSystem {
+func NewDirFS(root string) core.FileSystem {
 	os.MkdirAll(root, 0o755)
 	return &dirFS{root: root}
 }
@@ -40,47 +40,47 @@ func (f *dirFS) hp(p string) string { return filepath.Join(f.root, filepath.From
 type dirNode struct {
 	fs   *dirFS
 	p    string
-	kind vfs.Kind
-	id   vfs.NodeID
+	kind core.Kind
+	id   core.NodeID
 }
 
-func (f *dirFS) node(p string) (vfs.Node, error) {
+func (f *dirFS) node(p string) (core.Node, error) {
 	p = clean(p)
 	fi, err := os.Lstat(f.hp(p))
 	if err != nil {
 		return nil, &fs.PathError{Op: "lookup", Path: p, Err: fs.ErrNotExist}
 	}
-	id, _ := vfs.StatID(fi)
+	id, _ := core.StatID(fi)
 	return &dirNode{fs: f, p: p, kind: kindOf2(fi), id: id}, nil
 }
 
-func (f *dirFS) Root() vfs.Node { n, _ := f.node(""); return n }
+func (f *dirFS) Root() core.Node { n, _ := f.node(""); return n }
 
-func (f *dirFS) Lookup(dir vfs.Node, name string) (vfs.Node, error) {
+func (f *dirFS) Lookup(dir core.Node, name string) (core.Node, error) {
 	return f.node(path.Join(dir.(*dirNode).p, name))
 }
 
-func (f *dirFS) ReadDir(dir vfs.Node) ([]vfs.Dirent, error) {
+func (f *dirFS) ReadDir(dir core.Node) ([]core.Dirent, error) {
 	ents, err := os.ReadDir(f.hp(dir.(*dirNode).p))
 	if err != nil {
 		return nil, err
 	}
-	out := make([]vfs.Dirent, 0, len(ents))
+	out := make([]core.Dirent, 0, len(ents))
 	for _, e := range ents {
-		out = append(out, vfs.Dirent{Name: e.Name(), Kind: kindOfDirEntry(e)})
+		out = append(out, core.Dirent{Name: e.Name(), Kind: kindOfDirEntry(e)})
 	}
 	return out, nil
 }
 
-func (f *dirFS) Create(dir vfs.Node, name string, spec vfs.CreateSpec) (vfs.Node, error) {
+func (f *dirFS) Create(dir core.Node, name string, spec core.CreateSpec) (core.Node, error) {
 	p := path.Join(dir.(*dirNode).p, name)
 	hp := f.hp(p)
 	os.MkdirAll(filepath.Dir(hp), 0o755)
 	var err error
 	switch spec.Kind {
-	case vfs.Dir:
+	case core.Dir:
 		err = os.Mkdir(hp, os.FileMode(spec.Mode&0o777)|0o700)
-	case vfs.Symlink:
+	case core.Symlink:
 		err = os.Symlink(spec.Target, hp)
 	default:
 		var file *os.File
@@ -94,7 +94,7 @@ func (f *dirFS) Create(dir vfs.Node, name string, spec vfs.CreateSpec) (vfs.Node
 	return f.node(p)
 }
 
-func (f *dirFS) WriteFile(dir vfs.Node, name string, spec vfs.CreateSpec, data []byte) (vfs.Node, error) {
+func (f *dirFS) WriteFile(dir core.Node, name string, spec core.CreateSpec, data []byte) (core.Node, error) {
 	p := path.Join(dir.(*dirNode).p, name)
 	hp := f.hp(p)
 	os.MkdirAll(filepath.Dir(hp), 0o755)
@@ -104,7 +104,7 @@ func (f *dirFS) WriteFile(dir vfs.Node, name string, spec vfs.CreateSpec, data [
 	return f.node(p)
 }
 
-func (f *dirFS) Link(dir vfs.Node, name string, target vfs.Node) (vfs.Node, error) {
+func (f *dirFS) Link(dir core.Node, name string, target core.Node) (core.Node, error) {
 	p := path.Join(dir.(*dirNode).p, name)
 	if err := os.Link(f.hp(target.(*dirNode).p), f.hp(p)); err != nil {
 		return nil, err
@@ -112,33 +112,33 @@ func (f *dirFS) Link(dir vfs.Node, name string, target vfs.Node) (vfs.Node, erro
 	return f.node(p)
 }
 
-func (f *dirFS) Remove(dir vfs.Node, name string, isDir bool) error {
+func (f *dirFS) Remove(dir core.Node, name string, isDir bool) error {
 	return os.Remove(f.hp(path.Join(dir.(*dirNode).p, name)))
 }
 
-func (f *dirFS) Rename(fromDir vfs.Node, from string, toDir vfs.Node, to string) error {
+func (f *dirFS) Rename(fromDir core.Node, from string, toDir core.Node, to string) error {
 	return os.Rename(f.hp(path.Join(fromDir.(*dirNode).p, from)), f.hp(path.Join(toDir.(*dirNode).p, to)))
 }
 
-func (n *dirNode) ID() vfs.NodeID { return n.id }
-func (n *dirNode) Kind() vfs.Kind { return n.kind }
+func (n *dirNode) ID() core.NodeID { return n.id }
+func (n *dirNode) Kind() core.Kind { return n.kind }
 
-func (n *dirNode) Stat() (vfs.Attr, error) {
+func (n *dirNode) Stat() (core.Attr, error) {
 	fi, err := os.Lstat(n.fs.hp(n.p))
 	if err != nil {
-		return vfs.Attr{}, err
+		return core.Attr{}, err
 	}
-	a := vfs.Attr{Kind: kindOf2(fi), Mode: uint32(fi.Mode().Perm()), Size: fi.Size(), Mtime: fi.ModTime().UnixNano()}
-	if _, nlink, ok := vfs.FileID(fi); ok {
+	a := core.Attr{Kind: kindOf2(fi), Mode: uint32(fi.Mode().Perm()), Size: fi.Size(), Mtime: fi.ModTime().UnixNano()}
+	if _, nlink, ok := core.FileID(fi); ok {
 		a.Nlink = nlink
 	}
-	if a.Kind == vfs.Symlink {
+	if a.Kind == core.Symlink {
 		a.Target, _ = os.Readlink(n.fs.hp(n.p))
 	}
 	return a, nil
 }
 
-func (n *dirNode) SetAttr(u vfs.AttrUpdate) error {
+func (n *dirNode) SetAttr(u core.AttrUpdate) error {
 	hp := n.fs.hp(n.p)
 	if u.Mode != nil {
 		if err := os.Chmod(hp, os.FileMode(*u.Mode&0o777)); err != nil {
@@ -171,7 +171,7 @@ func (n *dirNode) SetAttr(u vfs.AttrUpdate) error {
 
 // times resolves the (atime, mtime) to set, filling an unspecified one from the
 // node's current times.
-func (n *dirNode) times(u vfs.AttrUpdate) (time.Time, time.Time, error) {
+func (n *dirNode) times(u core.AttrUpdate) (time.Time, time.Time, error) {
 	var at, mt time.Time
 	if u.Atime == nil || u.Mtime == nil {
 		fi, err := os.Lstat(n.fs.hp(n.p))
@@ -191,31 +191,31 @@ func (n *dirNode) times(u vfs.AttrUpdate) (time.Time, time.Time, error) {
 
 func (n *dirNode) Readlink() (string, error) { return os.Readlink(n.fs.hp(n.p)) }
 
-func (n *dirNode) Open(flags int) (vfs.File, error) {
+func (n *dirNode) Open(flags int) (core.File, error) {
 	return os.OpenFile(n.fs.hp(n.p), flags, 0)
 }
 
-func kindOf2(fi os.FileInfo) vfs.Kind {
+func kindOf2(fi os.FileInfo) core.Kind {
 	switch m := fi.Mode(); {
 	case m.IsDir():
-		return vfs.Dir
+		return core.Dir
 	case m&os.ModeSymlink != 0:
-		return vfs.Symlink
+		return core.Symlink
 	case m&os.ModeNamedPipe != 0:
-		return vfs.Fifo
+		return core.Fifo
 	case m&os.ModeSocket != 0:
-		return vfs.Socket
+		return core.Socket
 	case m&os.ModeCharDevice != 0:
-		return vfs.Chardev
+		return core.Chardev
 	case m&os.ModeDevice != 0:
-		return vfs.Blockdev
+		return core.Blockdev
 	}
-	return vfs.Reg
+	return core.Reg
 }
 
-func kindOfDirEntry(e os.DirEntry) vfs.Kind {
+func kindOfDirEntry(e os.DirEntry) core.Kind {
 	if fi, err := e.Info(); err == nil {
 		return kindOf2(fi)
 	}
-	return vfs.Reg
+	return core.Reg
 }

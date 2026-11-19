@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	. "github.com/samyfodil/laboon/core"
 )
 
 // overlayFS is a copy-on-write union of FileSystems: reads merge the layers
@@ -45,10 +47,10 @@ func (f *overlayFS) makingLock(p string) *sync.RWMutex {
 // before now is treated as stale. Over-invalidation (bumping when nothing
 // actually changed) is safe; missing a bump is not, so every mutating method
 // defers this.
-func (f *overlayFS) touch() { f.mutGen.Add(1) }
+func (f *overlayFS) Touch() { f.mutGen.Add(1) }
 
 // gen is the current mutation generation, for the resolve cache (generational).
-func (f *overlayFS) gen() uint64 { return f.mutGen.Load() }
+func (f *overlayFS) Gen() uint64 { return f.mutGen.Load() }
 
 // NewOverlayFS unions layers (lowest first, writable top last) with its own
 // metadata store.
@@ -242,7 +244,7 @@ func (f *overlayFS) topDir(p string) (Node, error) {
 // copyUp makes the overlay path p present and writable in the top layer: a
 // lower-only object is copied up with its contents and metadata.
 func (f *overlayFS) copyUp(n *ovNode) (Node, error) {
-	defer f.touch()
+	defer f.Touch()
 	if tn := n.nodes[len(f.layers)-1]; tn != nil {
 		return tn, nil // already in the top
 	}
@@ -396,7 +398,7 @@ func (f *overlayFS) unwhiteout(topDir Node, name string) {
 }
 
 func (f *overlayFS) Create(dir Node, name string, spec CreateSpec) (Node, error) {
-	defer f.touch()
+	defer f.Touch()
 	d := dir.(*ovNode)
 	topDir, err := f.topDir(d.p)
 	if err != nil {
@@ -428,7 +430,7 @@ func (f *overlayFS) Create(dir Node, name string, spec CreateSpec) (Node, error)
 }
 
 func (f *overlayFS) WriteFile(dir Node, name string, spec CreateSpec, data []byte) (Node, error) {
-	defer f.touch()
+	defer f.Touch()
 	d := dir.(*ovNode)
 	topDir, err := f.topDir(d.p)
 	if err != nil {
@@ -449,7 +451,7 @@ func (f *overlayFS) WriteFile(dir Node, name string, spec CreateSpec, data []byt
 }
 
 func (f *overlayFS) Link(dir Node, name string, target Node) (Node, error) {
-	defer f.touch()
+	defer f.Touch()
 	t, ok := target.(*ovNode)
 	d, okd := dir.(*ovNode)
 	if !ok || !okd {
@@ -471,7 +473,7 @@ func (f *overlayFS) Link(dir Node, name string, target Node) (Node, error) {
 }
 
 func (f *overlayFS) Remove(dir Node, name string, isDir bool) error {
-	defer f.touch()
+	defer f.Touch()
 	d := dir.(*ovNode)
 	child, err := f.Lookup(dir, name)
 	if err != nil {
@@ -562,7 +564,7 @@ func (f *overlayFS) deepCopyUp(n *ovNode) error {
 }
 
 func (f *overlayFS) Rename(fromDir Node, from string, toDir Node, to string) error {
-	defer f.touch()
+	defer f.Touch()
 	src, err := f.Lookup(fromDir, from)
 	if err != nil {
 		return err
@@ -592,18 +594,12 @@ func (f *overlayFS) Rename(fromDir Node, from string, toDir Node, to string) err
 	return nil
 }
 
-// ExchangeRenamer is the optional capability of a FileSystem that can swap two
-// entries atomically (RENAME_EXCHANGE). Both names must exist.
-type ExchangeRenamer interface {
-	RenameExchange(fromDir Node, from string, toDir Node, to string) error
-}
-
 // RenameExchange swaps from and to atomically. Both are deep-copied up so a
 // merged directory is fully materialized in the top, then the top layer swaps
 // them; no whiteout is needed, since each path keeps a top entry (the other's
 // old content) that shadows its lower.
 func (f *overlayFS) RenameExchange(fromDir Node, from string, toDir Node, to string) error {
-	defer f.touch()
+	defer f.Touch()
 	src, err := f.Lookup(fromDir, from)
 	if err != nil {
 		return err
@@ -689,7 +685,7 @@ func (n *ovNode) Listxattr() ([]byte, error) {
 }
 
 func (n *ovNode) Setxattr(name string, value []byte, flags int) error {
-	defer n.fs.touch()
+	defer n.fs.Touch()
 	tn, err := n.fs.copyUp(n)
 	if err != nil {
 		return err
@@ -702,7 +698,7 @@ func (n *ovNode) Setxattr(name string, value []byte, flags int) error {
 }
 
 func (n *ovNode) Removexattr(name string) error {
-	defer n.fs.touch()
+	defer n.fs.Touch()
 	tn, err := n.fs.copyUp(n)
 	if err != nil {
 		return err
@@ -761,7 +757,7 @@ func (n *ovNode) Stat() (Attr, error) {
 }
 
 func (n *ovNode) SetAttr(u AttrUpdate) error {
-	defer n.fs.touch()
+	defer n.fs.Touch()
 	tn, err := n.fs.copyUp(n)
 	if err != nil {
 		return err
@@ -815,4 +811,11 @@ func (n *ovNode) Open(flags int) (File, error) {
 		return tn.Open(flags)
 	}
 	return n.nodes[n.owner].Open(flags)
+}
+
+func clean(p string) string         { return strings.Trim(path.Clean("/"+p), "/") }
+func join(base, name string) string { return "/" + clean(base+"/"+name) }
+
+func (n *ovNode) CloneNode() Node {
+	return &ovNode{fs: n.fs, p: n.p, nodes: append([]Node(nil), n.nodes...), owner: n.owner, kind: n.kind}
 }

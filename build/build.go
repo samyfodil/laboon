@@ -18,10 +18,11 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
-	"github.com/samyfodil/laboon/oci"
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/sandbox"
-	"github.com/samyfodil/laboon/internal/vfs"
 	"github.com/samyfodil/laboon/internal/vfs/hostfs"
+	"github.com/samyfodil/laboon/oci"
 )
 
 // Options configure a build.
@@ -559,8 +560,8 @@ func (b *builder) copy(in Instruction) (v1.Layer, error) {
 	// Resolve sources confined to their root and write the layer confined to the
 	// step directory, both through the vfs, so COPY/ADD cannot escape the build
 	// context or a prior stage via a symlink or "..".
-	srcNS := vfs.NewNamespace(hostfs.NewDirFS(srcRoot))
-	dstNS := vfs.NewNamespace(hostfs.NewDirFS(upper))
+	srcNS := namespace.NewNamespace(hostfs.NewDirFS(srcRoot))
+	dstNS := namespace.NewNamespace(hostfs.NewDirFS(upper))
 	// .dockerignore applies to the build context, not a --from stage.
 	var ignore *ignoreMatcher
 	if in.Flags["from"] == "" {
@@ -631,7 +632,7 @@ func (b *builder) copy(in Instruction) (v1.Layer, error) {
 		// directory); a file, or any source when there are several, lands under its
 		// base name inside dst.
 		srcIsDir := false
-		if loc, e := srcNS.Resolve(src, false); e == nil && loc.Node.Kind() == vfs.Dir {
+		if loc, e := srcNS.Resolve(src, false); e == nil && loc.Node.Kind() == core.Dir {
 			srcIsDir = true
 		}
 		to := dst

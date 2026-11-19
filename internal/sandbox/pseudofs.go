@@ -6,14 +6,14 @@ import (
 	"io/fs"
 	"path"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 )
 
-// pnodeFS exposes a synthetic pnode tree (/proc, /sys, /dev) as a vfs.FileSystem
+// pnodeFS exposes a synthetic pnode tree (/proc, /sys, /dev) as a core.FileSystem
 // so the Namespace resolves those paths like any other mount. It serves
 // RESOLUTION only — Lookup/ReadDir/Stat/Readlink over the pnode structure, which
 // is reader-independent metadata. A pseudo file's content (generated on read,
-// applied on write), device opens and fd objects are richer than vfs.File, so
+// applied on write), device opens and fd objects are richer than core.File, so
 // Open is left to the sandbox's pseudoOpen with the reading guest, the way exec
 // and bind resolve through the Namespace but act in the sandbox. The tree itself
 // is a per-reader view (pid-namespace-relative), so each guest mounts its own.
@@ -35,19 +35,19 @@ type pnodeNode struct {
 }
 
 // errPseudoOpen marks a pseudo node whose open the sandbox must perform (its
-// file semantics exceed vfs.File).
+// file semantics exceed core.File).
 var errPseudoOpen = &fs.PathError{Op: "open", Path: "pseudo", Err: fs.ErrInvalid}
 
-func pkindToVfs(k pkind) vfs.Kind {
+func pkindToVfs(k pkind) core.Kind {
 	switch k {
 	case pDir:
-		return vfs.Dir
+		return core.Dir
 	case pLink, pFdObj:
-		return vfs.Symlink
+		return core.Symlink
 	case pDev:
-		return vfs.Chardev
+		return core.Chardev
 	}
-	return vfs.Reg
+	return core.Reg
 }
 
 func (f *pnodeFS) node(p string, n *pnode) *pnodeNode {
@@ -58,9 +58,9 @@ func (f *pnodeFS) node(p string, n *pnode) *pnodeNode {
 	return &pnodeNode{fs: f, p: p, n: n}
 }
 
-func (f *pnodeFS) Root() vfs.Node { return f.node(f.base, f.root) }
+func (f *pnodeFS) Root() core.Node { return f.node(f.base, f.root) }
 
-func (f *pnodeFS) Lookup(dir vfs.Node, name string) (vfs.Node, error) {
+func (f *pnodeFS) Lookup(dir core.Node, name string) (core.Node, error) {
 	d := dir.(*pnodeNode)
 	if d.n.kind != pDir {
 		return nil, &fs.PathError{Op: "lookup", Path: path.Join(d.p, name), Err: fs.ErrNotExist}
@@ -72,33 +72,35 @@ func (f *pnodeFS) Lookup(dir vfs.Node, name string) (vfs.Node, error) {
 	return f.node(path.Join(d.p, name), c), nil
 }
 
-func (f *pnodeFS) ReadDir(dir vfs.Node) ([]vfs.Dirent, error) {
+func (f *pnodeFS) ReadDir(dir core.Node) ([]core.Dirent, error) {
 	d := dir.(*pnodeNode)
 	if d.n.kind != pDir || d.n.kids == nil {
 		return nil, nil
 	}
 	cs := d.n.kids()
-	out := make([]vfs.Dirent, 0, len(cs))
+	out := make([]core.Dirent, 0, len(cs))
 	for _, c := range cs {
-		out = append(out, vfs.Dirent{Name: c.name, Kind: pkindToVfs(c.n.kind), Ino: pino(path.Join(d.p, c.name))})
+		out = append(out, core.Dirent{Name: c.name, Kind: pkindToVfs(c.n.kind), Ino: pino(path.Join(d.p, c.name))})
 	}
 	return out, nil
 }
 
 func pseudoROFS(op string) error { return &fs.PathError{Op: op, Path: "pseudo", Err: fs.ErrPermission} }
 
-func (f *pnodeFS) Create(vfs.Node, string, vfs.CreateSpec) (vfs.Node, error) {
+func (f *pnodeFS) Create(core.Node, string, core.CreateSpec) (core.Node, error) {
 	return nil, pseudoROFS("create")
 }
-func (f *pnodeFS) Link(vfs.Node, string, vfs.Node) (vfs.Node, error) { return nil, pseudoROFS("link") }
-func (f *pnodeFS) Remove(vfs.Node, string, bool) error               { return pseudoROFS("remove") }
-func (f *pnodeFS) Rename(vfs.Node, string, vfs.Node, string) error   { return pseudoROFS("rename") }
+func (f *pnodeFS) Link(core.Node, string, core.Node) (core.Node, error) {
+	return nil, pseudoROFS("link")
+}
+func (f *pnodeFS) Remove(core.Node, string, bool) error              { return pseudoROFS("remove") }
+func (f *pnodeFS) Rename(core.Node, string, core.Node, string) error { return pseudoROFS("rename") }
 
-func (n *pnodeNode) ID() vfs.NodeID { return vfs.NodeID{Dev: n.n.dev, Ino: n.n.ino} }
-func (n *pnodeNode) Kind() vfs.Kind { return pkindToVfs(n.n.kind) }
+func (n *pnodeNode) ID() core.NodeID { return core.NodeID{Dev: n.n.dev, Ino: n.n.ino} }
+func (n *pnodeNode) Kind() core.Kind { return pkindToVfs(n.n.kind) }
 
-func (n *pnodeNode) Stat() (vfs.Attr, error) {
-	a := vfs.Attr{
+func (n *pnodeNode) Stat() (core.Attr, error) {
+	a := core.Attr{
 		Kind:  pkindToVfs(n.n.kind),
 		Mode:  n.n.perm & 0o7777,
 		Nlink: 1,
@@ -114,9 +116,9 @@ func (n *pnodeNode) Stat() (vfs.Attr, error) {
 	return a, nil
 }
 
-func (n *pnodeNode) SetAttr(vfs.AttrUpdate) error { return pseudoROFS("setattr") }
-func (n *pnodeNode) Readlink() (string, error)    { return n.n.target, nil }
-func (n *pnodeNode) Open(int) (vfs.File, error)   { return nil, errPseudoOpen }
+func (n *pnodeNode) SetAttr(core.AttrUpdate) error { return pseudoROFS("setattr") }
+func (n *pnodeNode) Readlink() (string, error)     { return n.n.target, nil }
+func (n *pnodeNode) Open(int) (core.File, error)   { return nil, errPseudoOpen }
 
 // devFS is the /dev mount: a union of the synthetic device nodes (null, zero,
 // pts, ...) over the overlay's own /dev (console, shm, whatever the guest made
@@ -124,17 +126,17 @@ func (n *pnodeNode) Open(int) (vfs.File, error)   { return nil, errPseudoOpen }
 // the other pseudo mounts it serves resolution; a synthetic node's Open returns
 // the pseudo sentinel, while an overlay node opens normally.
 type devFS struct {
-	syn   *pnode         // synthetic /dev root (per-guest: pts needs the guest)
-	ovFS  vfs.FileSystem // the overlay, for Lookup/ReadDir/Create under /dev
-	ovDev vfs.Node       // the overlay's own /dev node (nil if it has none)
-	dev   uint64         // devDevtmp, for synthetic node identity
+	syn   *pnode          // synthetic /dev root (per-guest: pts needs the guest)
+	ovFS  core.FileSystem // the overlay, for Lookup/ReadDir/Create under /dev
+	ovDev core.Node       // the overlay's own /dev node (nil if it has none)
+	dev   uint64          // devDevtmp, for synthetic node identity
 }
 
 type devNodeU struct {
 	fs  *devFS
 	p   string
-	syn *pnode   // set when this node is a synthetic device
-	ov  vfs.Node // set when it comes from the overlay
+	syn *pnode    // set when this node is a synthetic device
+	ov  core.Node // set when it comes from the overlay
 }
 
 func (f *devFS) synNode(p string, n *pnode) *devNodeU {
@@ -142,12 +144,12 @@ func (f *devFS) synNode(p string, n *pnode) *devNodeU {
 	return &devNodeU{fs: f, p: p, syn: n}
 }
 
-func (f *devFS) Root() vfs.Node {
+func (f *devFS) Root() core.Node {
 	f.syn.dev, f.syn.ino = f.dev, pino("/dev")
 	return &devNodeU{fs: f, p: "/dev", syn: f.syn, ov: f.ovDev}
 }
 
-func (f *devFS) Lookup(dir vfs.Node, name string) (vfs.Node, error) {
+func (f *devFS) Lookup(dir core.Node, name string) (core.Node, error) {
 	d := dir.(*devNodeU)
 	if d.syn != nil && d.syn.kind == pDir {
 		if c := d.syn.child(name); c != nil {
@@ -162,14 +164,14 @@ func (f *devFS) Lookup(dir vfs.Node, name string) (vfs.Node, error) {
 	return nil, &fs.PathError{Op: "lookup", Path: path.Join(d.p, name), Err: fs.ErrNotExist}
 }
 
-func (f *devFS) ReadDir(dir vfs.Node) ([]vfs.Dirent, error) {
+func (f *devFS) ReadDir(dir core.Node) ([]core.Dirent, error) {
 	d := dir.(*devNodeU)
 	seen := map[string]bool{}
-	var out []vfs.Dirent
+	var out []core.Dirent
 	if d.syn != nil && d.syn.kids != nil {
 		for _, c := range d.syn.kids() {
 			seen[c.name] = true
-			out = append(out, vfs.Dirent{Name: c.name, Kind: pkindToVfs(c.n.kind), Ino: pino(path.Join(d.p, c.name))})
+			out = append(out, core.Dirent{Name: c.name, Kind: pkindToVfs(c.n.kind), Ino: pino(path.Join(d.p, c.name))})
 		}
 	}
 	if d.ov != nil {
@@ -183,14 +185,14 @@ func (f *devFS) ReadDir(dir vfs.Node) ([]vfs.Dirent, error) {
 	return out, nil
 }
 
-func (f *devFS) Create(dir vfs.Node, name string, spec vfs.CreateSpec) (vfs.Node, error) {
+func (f *devFS) Create(dir core.Node, name string, spec core.CreateSpec) (core.Node, error) {
 	d := dir.(*devNodeU)
 	if d.ov != nil { // a new /dev entry lands in the overlay, not the synthetic set
 		return f.ovFS.Create(d.ov, name, spec)
 	}
 	return nil, pseudoROFS("create")
 }
-func (f *devFS) Link(dir vfs.Node, name string, t vfs.Node) (vfs.Node, error) {
+func (f *devFS) Link(dir core.Node, name string, t core.Node) (core.Node, error) {
 	d := dir.(*devNodeU)
 	if d.ov != nil {
 		if tu, ok := t.(*devNodeU); ok && tu.ov != nil {
@@ -204,7 +206,7 @@ func (f *devFS) Link(dir vfs.Node, name string, t vfs.Node) (vfs.Node, error) {
 	}
 	return nil, pseudoROFS("link")
 }
-func (f *devFS) Remove(dir vfs.Node, name string, isDir bool) error {
+func (f *devFS) Remove(dir core.Node, name string, isDir bool) error {
 	d := dir.(*devNodeU)
 	if d.syn != nil && d.syn.child(name) != nil {
 		return pseudoROFS("remove") // a synthetic device cannot be removed
@@ -214,7 +216,7 @@ func (f *devFS) Remove(dir vfs.Node, name string, isDir bool) error {
 	}
 	return pseudoROFS("remove")
 }
-func (f *devFS) Rename(fromDir vfs.Node, from string, toDir vfs.Node, to string) error {
+func (f *devFS) Rename(fromDir core.Node, from string, toDir core.Node, to string) error {
 	fd, td := fromDir.(*devNodeU), toDir.(*devNodeU)
 	if fd.ov != nil && td.ov != nil {
 		return f.ovFS.Rename(fd.ov, from, td.ov, to)
@@ -222,25 +224,25 @@ func (f *devFS) Rename(fromDir vfs.Node, from string, toDir vfs.Node, to string)
 	return pseudoROFS("rename")
 }
 
-func (n *devNodeU) ID() vfs.NodeID {
+func (n *devNodeU) ID() core.NodeID {
 	if n.syn != nil {
-		return vfs.NodeID{Dev: n.syn.dev, Ino: n.syn.ino}
+		return core.NodeID{Dev: n.syn.dev, Ino: n.syn.ino}
 	}
 	return n.ov.ID()
 }
-func (n *devNodeU) Kind() vfs.Kind {
+func (n *devNodeU) Kind() core.Kind {
 	if n.syn != nil {
 		return pkindToVfs(n.syn.kind)
 	}
 	return n.ov.Kind()
 }
-func (n *devNodeU) Stat() (vfs.Attr, error) {
+func (n *devNodeU) Stat() (core.Attr, error) {
 	if n.syn != nil {
 		return (&pnodeNode{n: n.syn}).Stat()
 	}
 	return n.ov.Stat()
 }
-func (n *devNodeU) SetAttr(u vfs.AttrUpdate) error {
+func (n *devNodeU) SetAttr(u core.AttrUpdate) error {
 	if n.ov != nil {
 		return n.ov.SetAttr(u)
 	}
@@ -256,7 +258,7 @@ func (n *devNodeU) Readlink() (string, error) {
 	}
 	return n.ov.Readlink()
 }
-func (n *devNodeU) Open(flags int) (vfs.File, error) {
+func (n *devNodeU) Open(flags int) (core.File, error) {
 	if n.syn != nil {
 		return nil, errPseudoOpen // a synthetic device opens via pseudoOpen
 	}

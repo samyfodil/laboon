@@ -6,7 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 )
 
 // shBacking is the one host object that backs a non-host file while any part of
@@ -15,14 +15,14 @@ import (
 // fork children map the same object and see each other's writes. While it exists
 // it is the authoritative copy of the file's data — reads, writes, size and
 // truncate for that vnode go through it — and its content is written back to the
-// vfs.File on msync and at teardown. The object is a plain *os.File, so the
+// core.File on msync and at teardown. The object is a plain *os.File, so the
 // coherence and write-back logic here is backend- and platform-independent; only
 // creating it (memfd vs temp file) and mapping it into the stub are per-platform.
 type shBacking struct {
-	id   vfs.NodeID
+	id   core.NodeID
 	mu   sync.Mutex
 	f    *os.File     // the mapping-capable host object; the stub maps this
-	vf   vfs.File     // the backend the content is written back to
+	vf   core.File    // the backend the content is written back to
 	size int64        // the object's allocated length (>= eof)
 	eof  int64        // the file's logical size: reads stop here, write-back covers [0,eof)
 	maps atomic.Int64 // live mapped pages across all address spaces; evicted at zero
@@ -60,7 +60,7 @@ func (sb *shBacking) ReadAt(p []byte, off int64) (int, error) {
 
 // writeAt writes into the backing (so every mapping of the vnode sees it) and
 // extends the logical size if the write runs past the end; the bytes reach the
-// vfs.File at the next write-back. off is an absolute file offset.
+// core.File at the next write-back. off is an absolute file offset.
 func (sb *shBacking) writeAt(p []byte, off int64) (int, error) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
@@ -109,7 +109,7 @@ func (sb *shBacking) growLocked(n int64) error {
 	return nil
 }
 
-// writeBack copies the logical content out to the vfs.File, so the guest's
+// writeBack copies the logical content out to the core.File, so the guest's
 // shared-mapping and write() stores reach the backend. Only [0, eof) is written:
 // a mapping may run past the end of the file, but those bytes are not part of it.
 // A write error is returned so eviction can keep a backing whose data did not
@@ -195,7 +195,7 @@ func (fs *dfs) evict(sb *shBacking) {
 	if err := sb.writeBack(); err != nil {
 		fs.shMu.Lock()
 		if fs.shared == nil {
-			fs.shared = map[vfs.NodeID]*shBacking{}
+			fs.shared = map[core.NodeID]*shBacking{}
 		}
 		fs.shared[sb.id] = sb
 		fs.sharedN.Add(1)
@@ -207,7 +207,7 @@ func (fs *dfs) evict(sb *shBacking) {
 
 // backing returns the live shared backing of vnode id, or nil. The atomic count
 // makes the common case (nothing shared-mapped) a single load with no lock.
-func (fs *dfs) backing(id vfs.NodeID) *shBacking {
+func (fs *dfs) backing(id core.NodeID) *shBacking {
 	if fs.sharedN.Load() == 0 {
 		return nil
 	}
@@ -218,10 +218,10 @@ func (fs *dfs) backing(id vfs.NodeID) *shBacking {
 }
 
 // putBacking records sb as vnode id's backing. fs.shMu held.
-func (fs *dfs) putBacking(id vfs.NodeID, sb *shBacking) {
+func (fs *dfs) putBacking(id core.NodeID, sb *shBacking) {
 	sb.id = id
 	if fs.shared == nil {
-		fs.shared = map[vfs.NodeID]*shBacking{}
+		fs.shared = map[core.NodeID]*shBacking{}
 	}
 	fs.shared[id] = sb
 	fs.sharedN.Add(1)

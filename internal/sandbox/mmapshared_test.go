@@ -12,13 +12,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/memfs"
 )
 
 // A writable MAP_SHARED mapping of a non-host file (here an in-memory memFS file)
 // is coherent and written back generically: one host backing per vnode, so two
 // independent opens map the same object and see each other's writes, and msync
-// flushes the content back to the vfs.File. The guest proves cross-open coherence;
+// flushes the content back to the core.File. The guest proves cross-open coherence;
 // the test proves write-back by reading the memFS file afterward.
 func TestMmapSharedNonHost(t *testing.T) {
 	exe := filepath.Join(t.TempDir(), "mmapshared")
@@ -26,8 +27,8 @@ func TestMmapSharedNonHost(t *testing.T) {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
 
-	mem := vfs.NewMemFS()
-	if _, err := mem.(vfs.WriteFileSystem).WriteFile(mem.Root(), "f", vfs.CreateSpec{Kind: vfs.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
+	mem := memfs.NewMemFS()
+	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -45,7 +46,7 @@ func TestMmapSharedNonHost(t *testing.T) {
 		t.Fatalf("code=%d err=%v out=%q", code, err, out.String())
 	}
 
-	// Write-back: the guest's shared-mapping write reached the vfs.File.
+	// Write-back: the guest's shared-mapping write reached the core.File.
 	n, err := mem.Lookup(mem.Root(), "f")
 	if err != nil {
 		t.Fatal(err)
@@ -72,8 +73,8 @@ func TestMmapCacheCoherence(t *testing.T) {
 	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mmapcache.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
-	mem := vfs.NewMemFS()
-	if _, err := mem.(vfs.WriteFileSystem).WriteFile(mem.Root(), "f", vfs.CreateSpec{Kind: vfs.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
+	mem := memfs.NewMemFS()
+	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
 		t.Fatal(err)
 	}
 	runMmapGuest(t, exe, mem, "MMAP-CACHE-OK")
@@ -96,8 +97,8 @@ func TestMmapSharedNoEOFExtend(t *testing.T) {
 	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mmapeof.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
-	mem := vfs.NewMemFS()
-	if _, err := mem.(vfs.WriteFileSystem).WriteFile(mem.Root(), "f", vfs.CreateSpec{Kind: vfs.Reg, Mode: 0o644}, make([]byte, 100)); err != nil {
+	mem := memfs.NewMemFS()
+	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 100)); err != nil {
 		t.Fatal(err)
 	}
 	runMmapGuest(t, exe, mem, "MMAP-EOF-OK")
@@ -117,8 +118,8 @@ func TestMmapEvictWriteBack(t *testing.T) {
 	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mmapevict.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
-	mem := vfs.NewMemFS()
-	if _, err := mem.(vfs.WriteFileSystem).WriteFile(mem.Root(), "f", vfs.CreateSpec{Kind: vfs.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
+	mem := memfs.NewMemFS()
+	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
 		t.Fatal(err)
 	}
 	runMmapGuest(t, exe, mem, "MMAP-EVICT-OK")
@@ -135,8 +136,8 @@ func TestMmapForkCoherent(t *testing.T) {
 	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mmapfork.c").CombinedOutput(); err != nil {
 		t.Skipf("static gcc unavailable: %v\n%s", err, b)
 	}
-	mem := vfs.NewMemFS()
-	if _, err := mem.(vfs.WriteFileSystem).WriteFile(mem.Root(), "f", vfs.CreateSpec{Kind: vfs.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
+	mem := memfs.NewMemFS()
+	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
 		t.Fatal(err)
 	}
 	runMmapGuest(t, exe, mem, "MMAP-FORK-OK")

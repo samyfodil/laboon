@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/filesystems/memfs"
 )
 
 func buildProbe(t *testing.T, name string) string {
@@ -44,7 +44,7 @@ func TestWithFSMem(t *testing.T) {
 	code, err := Run(ctx, exe, Config{
 		Args:   []string{exe},
 		RootFS: HostRoot("/"),
-		Mounts: []Mount{{Guest: "/data", FS: vfs.NewMemFS()}},
+		Mounts: []Mount{{Guest: "/data", FS: memfs.NewMemFS()}},
 		Stdout: &out, Stderr: &out,
 	})
 	if err != nil || code != 0 || !strings.Contains(out.String(), "FSRW-OK") {

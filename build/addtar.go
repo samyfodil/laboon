@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/oci"
-	"github.com/samyfodil/laboon/internal/vfs"
 )
 
 // archiveSuffixes are the local-archive extensions ADD auto-extracts, with the
@@ -32,7 +32,7 @@ func isArchive(name string) (comp string, ok bool) {
 // extractArchive unpacks the archive node n (compressed per comp) into the host
 // directory dest, through oci.Unpack's confined (os.Root) extractor so a crafted
 // entry cannot escape. dest is inside the step's layer directory.
-func extractArchive(n vfs.Node, comp, dest string) error {
+func extractArchive(n core.Node, comp, dest string) error {
 	a, err := n.Stat()
 	if err != nil {
 		return err

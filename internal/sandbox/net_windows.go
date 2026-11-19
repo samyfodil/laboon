@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/core"
 	"golang.org/x/sys/windows"
 )
 
@@ -682,7 +682,7 @@ func (g *dguest) mkSockNode(gp string) lxErrno {
 	if err != nil {
 		return osErrno(err)
 	}
-	if _, err := g.create(ploc, gp, vfs.CreateSpec{Kind: vfs.Socket, Mode: g.createPerm(0o777)}); err != nil {
+	if _, err := g.create(ploc, gp, core.CreateSpec{Kind: core.Socket, Mode: g.createPerm(0o777)}); err != nil {
 		return osErrno(err)
 	}
 	g.notify(gp, inCreate, 0)
