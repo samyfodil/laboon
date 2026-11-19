@@ -31,7 +31,11 @@ import (
 func guestBin(t *testing.T, name string) string {
 	t.Helper()
 	if dir := os.Getenv("LC_GUEST_DIR"); dir != "" {
-		return filepath.Join(dir, name)
+		exe := filepath.Join(dir, name)
+		if _, err := os.Stat(exe); err != nil {
+			t.Skipf("guest %q not staged in LC_GUEST_DIR (testdata/%s.c)", name, name)
+		}
+		return exe
 	}
 	if name == "mmapguest" {
 		if exe := os.Getenv("LC_MMAP_BIN"); exe != "" {

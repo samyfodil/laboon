@@ -158,5 +158,25 @@ func (n *testDirNode) SetAttr(u AttrUpdate) error {
 }
 func (n *testDirNode) Readlink() (string, error) { return os.Readlink(n.fs.hp(n.p)) }
 func (n *testDirNode) Open(flags int) (File, error) {
-	return os.OpenFile(n.fs.hp(n.p), flags, 0)
+	of, err := os.OpenFile(n.fs.hp(n.p), flags, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &testDirFile{File: of, n: n}, nil
+}
+
+// testDirFile answers fstat through the node, so the open handle reports the
+// backend-agnostic Info a guest stat is built from (core.File.Stat), not the raw
+// os.FileInfo an *os.File would.
+type testDirFile struct {
+	*os.File
+	n *testDirNode
+}
+
+func (f *testDirFile) Stat() (Info, error) {
+	a, err := f.n.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return FileInfo(path.Base(f.n.p), a, f.n.id), nil
 }
