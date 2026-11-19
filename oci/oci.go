@@ -35,6 +35,7 @@ type Image struct {
 	Digest string // config digest; identifies the unpacked contents
 	Root   string // rootfs directory
 	Config Config
+	img    v1.Image // the image's layers, for FS() -- composes without extraction
 }
 
 // Config is the part of the image config the sandbox uses.
@@ -146,6 +147,10 @@ func store(dir, refFile, ref string, img v1.Image, maxSize int64) (*Image, error
 			User:       cf.Config.User,
 		},
 	}
+	out.img = img
+	if err := saveLayout(dir, digest.Hex, img); err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(out.Root); err == nil {
 		return out, remember(refFile, digest.Hex)
 	}
@@ -206,6 +211,9 @@ func local(dir, refFile, ref string) (*Image, error) {
 	out := &Image{Ref: ref, Digest: "sha256:" + h, Root: filepath.Join(dir, h, "rootfs")}
 	if err := json.Unmarshal(b, &out.Config); err != nil {
 		return nil, err
+	}
+	if im, err := loadLayoutImage(dir, h); err == nil {
+		out.img = im // the layers, for FS(); absent on a pre-layout cache entry
 	}
 	if _, err := os.Stat(out.Root); err != nil {
 		return nil, err

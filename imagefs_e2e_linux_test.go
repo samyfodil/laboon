@@ -58,17 +58,22 @@ func TestImageFSRunEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	upper := t.TempDir()
-	fsys, closeFS, err := oci.ImageFS(img, upper)
+	stored, err := oci.Store(img, "test/e2e:latest", oci.Options{CacheDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	layers, closeFS, err := stored.Layers()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer closeFS()
+	// Compose the writable top outside oci, as a caller does.
+	root := Overlay(append(layers, NewDiskFS(t.TempDir()))...)
 
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	code, err := Run(ctx, "/run", WithArgs("run"), WithRootFS(fsys), WithStdout(&out), WithStderr(&out))
+	code, err := Run(ctx, "/run", WithArgs("run"), WithFS("/", root), WithStdout(&out), WithStderr(&out))
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v out=%q", code, err, out.String())
 	}

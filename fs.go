@@ -70,6 +70,11 @@ func NewMemFS() FileSystem { return memfs.NewMemFS() }
 // for a sandboxed host bind.
 func NewDirFS(root string) FileSystem { return hostfs.NewDirFS(root) }
 
+// NewDiskFS presents the host directory root as a faithful writable FileSystem
+// (guest owner, sub-floor mode and special-node kind kept in a sidecar), the
+// on-disk writable top of a copy-on-write composition over an image.
+func NewDiskFS(root string) FileSystem { return hostfs.NewDiskFS(root) }
+
 // Overlay unions layers into one copy-on-write FileSystem (aufs/overlayfs style):
 // lowest layer first, the writable top layer last. A read sees the topmost layer
 // that has the file; a write goes to the top.

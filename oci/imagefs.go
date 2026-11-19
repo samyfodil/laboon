@@ -8,21 +8,32 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/samyfodil/laboon/core"
-	"github.com/samyfodil/laboon/filesystems/hostfs"
-	"github.com/samyfodil/laboon/filesystems/overlayfs"
 	"github.com/samyfodil/laboon/filesystems/tarfs"
 )
 
-// ImageFS composes img as a copy-on-write FileSystem without extracting it to a
-// directory tree. Each layer is read from its tar through a lazy TarFS -- the
-// archive is indexed once and content is served on demand, never held whole in
-// memory -- and the layers are unioned lowest-first under a faithful on-disk
-// writable upper, so the result is a guest root that reads from the image and
-// writes to disk. The layers' uncompressed tars are staged in a temp directory
-// (one file each, not an unpacked tree); the returned close removes them and
-// must be called when the filesystem is no longer in use.
-func ImageFS(img v1.Image, upper string) (fsys core.FileSystem, close func() error, err error) {
-	layers, err := img.Layers()
+// Layers returns the image's layers as read-only FileSystems, lowest first.
+// Each is read lazily from its tar -- indexed once and served on demand, never
+// extracted to a directory tree and never held whole in memory. The image is its
+// layers; to run it, compose them with a writable top outside oci:
+//
+//	layers, close, _ := img.Layers()
+//	defer close()
+//	root := laboon.Overlay(append(layers, laboon.NewDiskFS(upperDir))...)
+//	laboon.Run(ctx, prog, laboon.WithFS("/", root))
+//
+// close removes the staged layer tars and must be called when the layers are no
+// longer in use.
+func (i *Image) Layers() ([]core.FileSystem, func() error, error) {
+	if i.img == nil {
+		return nil, nil, fmt.Errorf("oci: image %s has no layers loaded", i.Ref)
+	}
+	return layerFSes(i.img)
+}
+
+// layerFSes stages each layer's uncompressed tar in a temp file (one file, not
+// an unpacked tree) and opens it as a lazy TarFS; close removes them.
+func layerFSes(img v1.Image) (layers []core.FileSystem, close func() error, err error) {
+	v1layers, err := img.Layers()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -43,30 +54,28 @@ func ImageFS(img v1.Image, upper string) (fsys core.FileSystem, close func() err
 		}
 	}()
 
-	fses := make([]core.FileSystem, 0, len(layers)+1)
-	for i, l := range layers {
+	for n, l := range v1layers {
 		rc, e := l.Uncompressed()
 		if e != nil {
-			return nil, nil, fmt.Errorf("layer %d: %w", i, e)
+			return nil, nil, fmt.Errorf("layer %d: %w", n, e)
 		}
-		f, e := os.CreateTemp(tmp, fmt.Sprintf("layer-%d-*.tar", i))
+		f, e := os.CreateTemp(tmp, fmt.Sprintf("layer-%d-*.tar", n))
 		if e != nil {
 			rc.Close()
 			return nil, nil, e
 		}
-		n, e := io.Copy(f, rc)
+		size, e := io.Copy(f, rc)
 		rc.Close()
 		if e != nil {
 			f.Close()
-			return nil, nil, fmt.Errorf("stage layer %d: %w", i, e)
+			return nil, nil, fmt.Errorf("stage layer %d: %w", n, e)
 		}
 		files = append(files, f) // kept open: TarFS serves content via ReadAt
-		tfs, e := tarfs.TarFS(f, n)
+		tfs, e := tarfs.TarFS(f, size)
 		if e != nil {
-			return nil, nil, fmt.Errorf("index layer %d: %w", i, e)
+			return nil, nil, fmt.Errorf("index layer %d: %w", n, e)
 		}
-		fses = append(fses, tfs)
+		layers = append(layers, tfs)
 	}
-	fses = append(fses, hostfs.NewDiskFS(upper))
-	return overlayfs.OverlayFS(fses...), cleanup, nil
+	return layers, cleanup, nil
 }

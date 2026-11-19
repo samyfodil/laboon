@@ -190,21 +190,13 @@ func WithMountReadOnly(host, guest string) Option {
 func WithFS(guest string, fs FileSystem) Option {
 	return func(o *options) {
 		if strings.TrimRight(guest, "/") == "" {
-			o.cfg.RootFS = fs // the guest root is this filesystem (see WithRootFS)
+			o.cfg.RootFS = fs // the guest root is this filesystem
 			return
 		}
 		o.cfg.Mounts = append(o.cfg.Mounts, sandbox.Mount{Guest: guest, FS: fs})
 	}
 }
 
-// WithRootFS makes fs, a FileSystem, the guest's root ("/"). It is the general
-// form of WithRoot: where WithRoot roots the guest at a host directory, WithRootFS
-// roots it at any backend — NewMemFS for an in-memory root, an Overlay union, a
-// read-only or hardened wrapper, a network-backed or custom FileSystem — with no
-// host path behind it. WithFS("/", fs) is equivalent.
-func WithRootFS(fs FileSystem) Option {
-	return func(o *options) { o.cfg.RootFS = fs }
-}
 
 // Terminal and WinSize are re-exported so a caller using WithTerminal need not
 // import the sandbox package.

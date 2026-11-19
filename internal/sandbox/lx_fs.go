@@ -138,7 +138,7 @@ func newDfs(rootFS core.FileSystem, upper string, mem []byte, done <-chan struct
 		rootFS = nil
 	}
 	if rootFS != nil {
-		// The root is a FileSystem the embedder composed (WithRootFS / WithFS "/"):
+		// The root is a FileSystem the embedder composed (WithFS "/"):
 		// the vfs layer touches no host path for it. hostFS stays empty — the host is
 		// reached only through a backend (a writable upper or a bind), never the root.
 		fs.rootFS = rootFS

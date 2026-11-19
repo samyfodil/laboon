@@ -31,7 +31,7 @@ func TestComposedRootOverImage(t *testing.T) {
 	defer cancel()
 	code, err := Run(ctx, "/bin/busybox",
 		WithArgs("sh", "-c", "test -x /bin/busybox && echo FROM-IMAGE=ok; echo COMPOSED-UPPER > /over.txt; cat /over.txt"),
-		WithRootFS(composed),
+		WithFS("/", composed),
 		WithStdout(&out), WithStderr(&out))
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v out=%q", code, err, out.String())
