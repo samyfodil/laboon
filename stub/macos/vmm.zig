@@ -301,6 +301,12 @@ pub const Vmm = struct {
         _ = hv_vcpu_set_sys_reg(v.vcpu, SR_SCTLR_EL1, sctlr | 0x1005); // MMU + D-cache + I-cache (atomics/exclusives need cacheable memory; Apple Silicon keeps the vcpu coherent with the host)
         _ = hv_vcpu_set_reg(v.vcpu, REG_PC, entry);
         _ = hv_vcpu_set_reg(v.vcpu, REG_CPSR, 0x3c5); // EL1h, DAIF masked
+        // Enter as the kernel does at exec: x0 is the dynamic linker's fini
+        // pointer, which glibc's _start registers as an exit callback when it is
+        // nonzero; a stale value there makes glibc call garbage at process exit
+        // (musl ignores it). A fresh vcpu starts zeroed, but make the invariant
+        // explicit, as the non-HVF stub does (stub.zig enterGuest).
+        _ = hv_vcpu_set_reg(v.vcpu, REG_X0, 0);
     }
 
     // enableStep arms arm64 software single-step: MDSCR_EL1.SS, PSTATE.SS for the

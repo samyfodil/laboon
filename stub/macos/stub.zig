@@ -1570,16 +1570,23 @@ fn loadAndEnter(path: [*:0]const u8, interpPath: ?[*:0]const u8, mainSites: [*:0
 const LC_EXEC_STOP: u64 = 0x4c430018; // sandbox/lx_signal.go lxExecStop
 
 // enterGuest jumps to the guest entry on the guest stack, leaving no stub frame.
+// It enters exactly as the kernel does at exec: x0, fp and lr are zero. x0 is the
+// dynamic linker's fini pointer, which glibc's _start registers as an exit
+// callback when it is nonzero; a leftover host value there made glibc call it at
+// process exit and fault (musl ignores the parameter, so only glibc was hit).
+// sp and entry are pinned to x1/x2 so clearing x0 cannot clobber the branch
+// target, matching the Linux stub's enter (stub/zig/aarch64.zig).
 fn enterGuest(entry: u64, sp: u64) noreturn {
     sig.enterGuest();
     asm volatile (
-        \\ mov sp, %[sp]
-        \\ mov x29, #0
-        \\ mov x30, #0
-        \\ br %[entry]
+        \\ mov sp, x1
+        \\ mov x0, xzr
+        \\ mov x29, xzr
+        \\ mov x30, xzr
+        \\ br x2
         :
-        : [sp] "r" (sp),
-          [entry] "r" (entry),
+        : [sp] "{x1}" (sp),
+          [entry] "{x2}" (entry),
         : "memory"
     );
     unreachable;
