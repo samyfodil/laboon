@@ -1112,6 +1112,21 @@ func (g *dguest) guestAbs(dirfd int64, p string) (string, lxErrno) {
 // followLast controls the final component (lstat/readlink/unlink don't follow).
 func (g *dguest) resolve(gp string, followLast bool) (string, lxErrno) {
 	if g.rootAbs == "" && !isPseudoPath(gp) {
+		// A non-host root has no host path to resolve against; the namespace does
+		// the walk. For an exec target or interpreter (followLast) the host kernel
+		// would follow a final symlink -- e.g. an image's /bin/ls -> coreutils --
+		// but here nothing does, so follow it through the namespace, which applies
+		// the same confinement as any path. On any failure, leave gp for the
+		// caller's open to report the real error.
+		if !followLast {
+			return gp, 0
+		}
+		if loc, err := g.vns().Resolve(gp, true); err == nil {
+			if loc.Path == "" {
+				return "/", 0
+			}
+			return loc.Path, 0
+		}
 		return gp, 0
 	}
 	parts := strings.Split(strings.TrimPrefix(path.Clean(gp), "/"), "/")
