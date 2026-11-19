@@ -379,7 +379,9 @@ func (l *Layer) attrLocked(p string, fi os.FileInfo) core.Attr {
 		}
 	case fi.Mode()&os.ModeSymlink != 0:
 		a.Kind = core.Symlink
-		a.Target, _ = os.Readlink(l.host(p))
+		if t, err := os.Readlink(l.host(p)); err == nil {
+			a.Target = filepath.ToSlash(t) // a guest symlink target is slash-separated; os.Readlink hands back backslashes on windows
+		}
 	default:
 		a.Kind = core.Reg
 	}

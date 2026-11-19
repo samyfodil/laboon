@@ -6,8 +6,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 func layer(t *testing.T, entries ...tar.Header) *bytes.Buffer {
@@ -53,6 +56,23 @@ func TestUnpackStaysInRoot(t *testing.T) {
 	}
 }
 
+// sidecarMode returns the mode recorded for guest path p in an unpack sidecar
+// (<dir>.lcmeta), where windows keeps the modes NTFS cannot hold on the file.
+func sidecarMode(t *testing.T, sidecar, p string) uint32 {
+	t.Helper()
+	b, err := os.ReadFile(sidecar)
+	if err != nil {
+		t.Fatalf("read sidecar %s: %v", sidecar, err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if e, ok := hostfs.ParseEntry(line); ok && e.Path == p {
+			return e.Mode
+		}
+	}
+	t.Fatalf("no sidecar entry for %s", p)
+	return 0
+}
+
 func TestUnpackModesAndDevices(t *testing.T) {
 	dir := t.TempDir()
 	tr := layer(t,
@@ -67,12 +87,21 @@ func TestUnpackModesAndDevices(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "ok")); err != nil {
 		t.Fatal("cleaned path not written inside the rootfs")
 	}
-	st, err := os.Stat(filepath.Join(dir, "bin/suid"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Mode()&os.ModeSetuid != 0 || st.Mode().Perm() != 0o755 {
-		t.Fatalf("mode = %v, want 0755 without setuid", st.Mode())
+	// Unpack drops setuid and keeps 0o755. The host file carries the mode on a
+	// POSIX host; on windows NTFS cannot, so the real mode rides in the
+	// <dir>.lcmeta sidecar and is read back from there.
+	if runtime.GOOS == "windows" {
+		if m := sidecarMode(t, dir+".lcmeta", "bin/suid"); m&0o4000 != 0 || m&0o777 != 0o755 {
+			t.Fatalf("sidecar mode = %o, want 0755 without setuid", m)
+		}
+	} else {
+		st, err := os.Stat(filepath.Join(dir, "bin/suid"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode()&os.ModeSetuid != 0 || st.Mode().Perm() != 0o755 {
+			t.Fatalf("mode = %v, want 0755 without setuid", st.Mode())
+		}
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "dev/sda")); err == nil {
 		t.Fatal("device node created")

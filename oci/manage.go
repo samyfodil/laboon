@@ -22,7 +22,11 @@ func refFileFor(dir string, r name.Reference, arch string) string {
 	if arch != "amd64" {
 		key += "@" + arch
 	}
-	return filepath.Join(dir, "refs", url.PathEscape(key))
+	// url.PathEscape leaves ':' (a ref's tag, and a digest's algorithm separator)
+	// unescaped, but NTFS reads a ':' in a filename as an alternate-data-stream
+	// separator — "img:latest" becomes the empty file "img" with the data in a
+	// ":latest" stream — so escape it too, keeping the name one real file on every OS.
+	return filepath.Join(dir, "refs", strings.ReplaceAll(url.PathEscape(key), ":", "%3A"))
 }
 
 // Local returns a previously pulled or stored image for ref without touching a

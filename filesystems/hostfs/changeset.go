@@ -59,7 +59,7 @@ func walkChanges(l *Layer, dir string, links map[uint64]string, fn func(Change, 
 		if a.Kind == core.Reg {
 			// Names that share an inode become a hardlink after the first.
 			if fi, err := os.Lstat(l.host(p)); err == nil {
-				if id, nlink, ok := core.FileID(fi); ok && nlink > 1 {
+				if id, nlink, ok := fileIdent(l.host(p), fi); ok && nlink > 1 {
 					if first, seen := links[id]; seen {
 						ch.LinkTo = first
 					} else {
