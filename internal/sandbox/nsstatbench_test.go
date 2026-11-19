@@ -9,9 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/overlayfs"
 	"github.com/samyfodil/laboon/internal/namespace"
-	"github.com/samyfodil/laboon/internal/vfs"
 )
 
 // countFS wraps a hostFS and counts hLstat calls, to measure how many host
@@ -51,7 +50,7 @@ func benchStatSetup(b *testing.B, depth int) (*countFS, *namespace.Namespace, st
 		b.Fatal(err)
 	}
 	c := &countFS{hostFS: newHostFS(lower, upper, "")}
-	ns := namespace.NewNamespace(vfs.NewOverlayFSWithMeta(core.NewMetaStore(),
+	ns := namespace.NewNamespace(overlayfs.OverlayFS(
 		newHostDirFS(lower, c), newHostDirFS(upper, c)))
 	return c, ns, gp, lower
 }

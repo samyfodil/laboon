@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"github.com/samyfodil/laboon/core"
-	"github.com/samyfodil/laboon/internal/namespace"
-	"github.com/samyfodil/laboon/internal/vfs"
 	"github.com/samyfodil/laboon/filesystems/hostfs"
+	"github.com/samyfodil/laboon/filesystems/overlayfs"
+	"github.com/samyfodil/laboon/internal/namespace"
 )
 
 // TestOverlayFSConformance proves the vfs overlay backend, resolved through a
@@ -53,11 +53,10 @@ func TestOverlayFSConformance(t *testing.T) {
 	// Reopen the run's lower and kept upper as a union overlay over the REAL
 	// platform backend (hostDirFS), with the kept upper's metadata sidecar loaded
 	// into the shared store — the composition the live routing uses.
-	store := core.NewMetaStore()
 	lo := newHostDirFS(lower, newHostFS(lower, "", ""))
 	up := newHostDirFS(upper, newHostFS(upper, "", ""))
-	ofs := vfs.NewOverlayFSWithMeta(store, lo, up)
-	hostfs.LoadMetaInto(upper, store)
+	ofs := overlayfs.OverlayFS(lo, up)
+	hostfs.LoadMetaInto(upper, up.meta) // the upper leaf owns its metadata now
 	ns := namespace.NewNamespace(ofs)
 
 	stat := func(p string) core.Attr {

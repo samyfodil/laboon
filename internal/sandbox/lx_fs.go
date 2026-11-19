@@ -15,10 +15,10 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
+	"github.com/samyfodil/laboon/filesystems/overlayfs"
 	"github.com/samyfodil/laboon/filesystems/readonly"
 	"github.com/samyfodil/laboon/internal/namespace"
-	"github.com/samyfodil/laboon/internal/vfs"
-	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // Confined filesystem for the macOS backend. The supervisor owns the fd table
@@ -292,18 +292,24 @@ func (fs *dfs) buildNS() {
 		} else {
 			up := newHostDirFS(fs.upperAbs, fs.hostFS)
 			up.confine = true
-			fs.overlay = vfs.NewOverlayFSWithMeta(fs.ov.store, fs.rootFS, up)
+			up.meta = fs.ov.store // the leaf and the sandbox share one metadata authority
+			fs.overlay = overlayfs.OverlayFS(fs.rootFS, up)
 		}
 	case fs.rootAbs == "":
-		fs.overlay = newHostDirFS("/", fs.hostFS)
+		h := newHostDirFS("/", fs.hostFS)
+		h.meta = fs.ov.store
+		fs.overlay = h
 	default:
-		layers := []core.FileSystem{newHostDirFS(fs.rootAbs, fs.hostFS)}
+		lower := newHostDirFS(fs.rootAbs, fs.hostFS)
+		lower.meta = fs.ov.store
+		layers := []core.FileSystem{lower}
 		if fs.upperAbs != "" {
 			up := newHostDirFS(fs.upperAbs, fs.hostFS)
 			up.confine = true // the writable, guest-mutable layer
+			up.meta = fs.ov.store
 			layers = append(layers, up)
 		}
-		fs.overlay = vfs.NewOverlayFSWithMeta(fs.ov.store, layers...)
+		fs.overlay = overlayfs.OverlayFS(layers...)
 	}
 	fs.ns = namespace.NewNamespace(fs.overlay)
 }

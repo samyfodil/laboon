@@ -598,7 +598,18 @@ func (n *overlayNode) Removexattr(name string) error {
 func (n *overlayNode) Underlying() Node                  { return n.nodes[n.owner] }
 func (n *overlayNode) WritableUnderlying() (Node, error) { return n.fs.copyUp(n) }
 
-func (n *overlayNode) ID() NodeID { return n.nodes[n.owner].ID() }
+// ID is the node's lowest layer's identity, not the owner's: a copy-up adds a
+// top node but the lowest (origin) id never changes, so a consumer keying on it
+// (a file lock, a directory pin) sees one identity across copy-up and needs no
+// separate origin map.
+func (n *overlayNode) ID() NodeID {
+	for i := 0; i < len(n.nodes); i++ {
+		if n.nodes[i] != nil {
+			return n.nodes[i].ID()
+		}
+	}
+	return n.nodes[n.owner].ID()
+}
 func (n *overlayNode) Kind() Kind { return n.kind }
 
 func (n *overlayNode) Stat() (Attr, error) {

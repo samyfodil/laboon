@@ -8,7 +8,7 @@ import (
 	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/filesystems/bind"
 	"github.com/samyfodil/laboon/filesystems/memfs"
-	"github.com/samyfodil/laboon/internal/vfs"
+	"github.com/samyfodil/laboon/filesystems/overlayfs"
 )
 
 // Mount flags (uapi/linux/mount.h).
@@ -155,16 +155,20 @@ func (g *dguest) mountOverlay(target, data string) int64 {
 		if !ok {
 			return sErr(lxEACCES) // a layer resolving outside the backing tree is an escape
 		}
-		layers = append(layers, newHostDirFS(h, fs.hostFS))
+		lo := newHostDirFS(h, fs.hostFS)
+		lo.meta = fs.ov.store
+		layers = append(layers, lo)
 	}
 	if upper != "" {
 		h, ok := fs.overlayLayerHost(upper)
 		if !ok {
 			return sErr(lxEACCES)
 		}
-		layers = append(layers, newHostDirFS(h, fs.hostFS))
+		lo := newHostDirFS(h, fs.hostFS)
+		lo.meta = fs.ov.store
+		layers = append(layers, lo)
 	}
-	ovl := vfs.NewOverlayFS(layers...)
+	ovl := overlayfs.OverlayFS(layers...)
 	if err := g.vns().Mount(target, ovl); err != nil {
 		return sErr(osErrno(err))
 	}

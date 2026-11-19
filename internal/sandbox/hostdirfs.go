@@ -29,7 +29,9 @@ type hostDirFS struct {
 	meta *core.MetaStore
 }
 
-func newHostDirFS(root string, h hostFS) *hostDirFS { return &hostDirFS{root: root, h: h} }
+func newHostDirFS(root string, h hostFS) *hostDirFS {
+	return &hostDirFS{root: root, h: h, meta: core.NewMetaStore()}
+}
 
 // hp is the host path of the backend-relative guest path p. It goes through the
 // platform hostPath so names NTFS cannot hold are escaped (winfs); on unix
@@ -100,19 +102,27 @@ func (f *hostDirFS) ReadDir(dir core.Node) ([]core.Dirent, error) {
 func (f *hostDirFS) Create(dir core.Node, name string, spec core.CreateSpec) (core.Node, error) {
 	p := path.Join(dir.(*hostNode).p, name)
 	hp := f.hp(p)
+	hm := uint32(core.HostMode(spec.Mode, spec.Kind == core.Dir)) // keep the host file owner-writable
 	var err error
 	switch spec.Kind {
 	case core.Dir:
-		err = f.h.hMkdir(hp, spec.Mode)
+		err = f.h.hMkdir(hp, hm)
 	case core.Symlink:
 		err = f.h.hSymlink(spec.Target, hp)
 	case core.Fifo:
-		err = f.h.hMkfifo(hp, spec.Mode)
+		err = f.h.hMkfifo(hp, hm)
 	case core.Socket:
-		err = f.h.hMksock(hp, spec.Mode)
+		err = f.h.hMksock(hp, hm)
+	case core.Chardev, core.Blockdev:
+		// An unprivileged host cannot mknod a device; keep a placeholder file and
+		// record its kind and number so Stat reports them.
+		var file *os.File
+		if file, err = f.h.hOpen(hp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); file != nil {
+			file.Close()
+		}
 	default:
 		var file *os.File
-		if file, err = f.h.hOpen(hp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(spec.Mode&0o777)); file != nil {
+		if file, err = f.h.hOpen(hp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(hm&0o777)); file != nil {
 			file.Close()
 		}
 	}
@@ -120,14 +130,34 @@ func (f *hostDirFS) Create(dir core.Node, name string, spec core.CreateSpec) (co
 		return nil, err
 	}
 	n, err := f.node(p)
-	if err == nil && f.meta != nil && (spec.Kind == core.Chardev || spec.Kind == core.Blockdev) {
-		// A device is a placeholder file on the host; record its kind and number
-		// so Stat reports them (a container runtime matches /dev/null's rdev).
-		f.meta.Update(n.ID(), func(o *core.Override) {
-			o.Special, o.Kind, o.Rdev = true, spec.Kind, spec.Rdev
-		})
+	if err == nil {
+		f.record(n.ID(), spec)
 	}
 	return n, err
+}
+
+// record keeps, for the new node, the guest metadata a host file cannot hold: a
+// non-root owner, a sub-floor mode, and a device node's kind/number.
+func (f *hostDirFS) record(id core.NodeID, spec core.CreateSpec) {
+	if f.meta == nil {
+		return
+	}
+	sub := uint32(core.HostMode(spec.Mode, spec.Kind == core.Dir))&0o7777 != spec.Mode&0o7777
+	dev := spec.Kind == core.Chardev || spec.Kind == core.Blockdev
+	owner := spec.Uid != 0 || spec.Gid != 0
+	if !sub && !dev && !owner {
+		f.meta.Delete(id)
+		return
+	}
+	f.meta.Update(id, func(o *core.Override) {
+		o.Mode, o.HasMode = spec.Mode&0o7777, sub
+		o.Uid, o.Gid, o.HasOwner = spec.Uid, spec.Gid, owner
+		if dev {
+			o.Special, o.Kind, o.Rdev = true, spec.Kind, spec.Rdev
+		} else {
+			o.Special, o.Kind, o.Rdev = false, 0, 0
+		}
+	})
 }
 
 func (f *hostDirFS) Link(dir core.Node, name string, target core.Node) (core.Node, error) {
@@ -176,8 +206,16 @@ func (n *hostNode) Stat() (core.Attr, error) {
 		a.Target, _ = n.fs.h.hReadlink(n.fs.hp(n.p))
 	}
 	if n.fs.meta != nil {
-		if o, ok := n.fs.meta.Get(n.id); ok && o.Special {
-			a.Kind, a.Rdev = o.Kind, o.Rdev
+		if o, ok := n.fs.meta.Get(n.id); ok {
+			if o.HasMode {
+				a.Mode = o.Mode
+			}
+			if o.HasOwner {
+				a.Uid, a.Gid = o.Uid, o.Gid
+			}
+			if o.Special {
+				a.Kind, a.Rdev = o.Kind, o.Rdev
+			}
 		}
 	}
 	return a, nil
@@ -186,12 +224,34 @@ func (n *hostNode) Stat() (core.Attr, error) {
 func (n *hostNode) SetAttr(u core.AttrUpdate) error {
 	hp := n.fs.hp(n.p)
 	if u.Mode != nil {
-		if err := n.fs.h.hChmod(hp, *u.Mode); err != nil {
+		hm := uint32(core.HostMode(*u.Mode, n.kind == core.Dir))
+		if err := n.fs.h.hChmod(hp, hm); err != nil {
 			return err
 		}
+		if n.fs.meta != nil {
+			sub := hm&0o7777 != *u.Mode&0o7777
+			n.fs.meta.Update(n.id, func(o *core.Override) {
+				if sub {
+					o.Mode, o.HasMode = *u.Mode&0o7777, true
+				} else {
+					o.HasMode = false
+				}
+			})
+		}
 	}
-	// A non-root guest owner the host cannot hold is the overlay's MetaStore to
-	// keep, so u.Uid/u.Gid are not applied to the host file here.
+	// A non-root guest owner the host cannot hold is recorded in the leaf's own
+	// store, not applied to the host file.
+	if (u.Uid != nil || u.Gid != nil) && n.fs.meta != nil {
+		n.fs.meta.Update(n.id, func(o *core.Override) {
+			if u.Uid != nil {
+				o.Uid = *u.Uid
+			}
+			if u.Gid != nil {
+				o.Gid = *u.Gid
+			}
+			o.HasOwner = o.Uid != 0 || o.Gid != 0
+		})
+	}
 	if u.Atime != nil || u.Mtime != nil {
 		at, mt := u.Atime, u.Mtime
 		if at == nil || mt == nil {
