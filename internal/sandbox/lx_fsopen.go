@@ -409,7 +409,11 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		if e != 0 {
 			return sErr(e)
 		}
-		d := &dfile{f: f, gp: gp, isDir: true, stub: -1, mem: mem}
+		var vinfo core.Info
+		if da, de := loc.Node.Stat(); de == nil {
+			vinfo = core.FileInfo(path.Base(gp), da, loc.Node.ID())
+		}
+		d := &dfile{f: f, gp: gp, isDir: true, stub: -1, mem: mem, vinfo: vinfo}
 		// Pin the directory's identity so getdents enumerates the directory that
 		// was opened, not whichever one later occupies this path: if the path is
 		// rmdir'd and remade, or another directory is renamed onto it, a fresh
@@ -514,7 +518,8 @@ func (g *dguest) openVirtualDev(gp string, flags int64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	if fd, ok := g.openDeviceBacking(gp, a.Rdev, flags); ok {
+	vinfo := core.FileInfo(path.Base(gp), a, loc.Node.ID())
+	if fd, ok := g.openDeviceBacking(gp, a.Rdev, vinfo, flags); ok {
 		return fd
 	}
 	host, full, ok := hostDevByRdev(a.Rdev)
@@ -525,7 +530,7 @@ func (g *dguest) openVirtualDev(gp string, flags int64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	return g.installD(&dfile{f: f, gp: gp, stub: -1, full: full}, flags)
+	return g.installD(&dfile{f: f, gp: gp, stub: -1, full: full, vinfo: vinfo}, flags)
 }
 
 // hostDevByRdev maps a Linux character-device number to the host device laboon

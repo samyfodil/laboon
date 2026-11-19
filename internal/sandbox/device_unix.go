@@ -61,7 +61,7 @@ func (g *dguest) makeDeviceNode(gp string, rdev uint64) int64 {
 // openDeviceBacking installs the open-file description for an attached Device
 // whose node carries rdev, or reports false if rdev is not one. Each open dups
 // the guest end so closing one fd does not close the backing.
-func (g *dguest) openDeviceBacking(gp string, rdev uint64, flags int64) (int64, bool) {
+func (g *dguest) openDeviceBacking(gp string, rdev uint64, vinfo core.Info, flags int64) (int64, bool) {
 	g.devs.mu.Lock()
 	gf := g.devs.back[rdev]
 	g.devs.mu.Unlock()
@@ -72,5 +72,5 @@ func (g *dguest) openDeviceBacking(gp string, rdev uint64, flags int64) (int64, 
 	if err != nil {
 		return sErr(osErrno(err)), true
 	}
-	return g.installD(&dfile{f: os.NewFile(uintptr(nfd), gp), gp: gp, stub: -1}, flags), true
+	return g.installD(&dfile{f: os.NewFile(uintptr(nfd), gp), gp: gp, stub: -1, vinfo: vinfo}, flags), true
 }

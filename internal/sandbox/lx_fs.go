@@ -662,6 +662,7 @@ func (g *dguest) rbufOf(n int) []byte {
 type dfile struct {
 	f       *os.File
 	hf      core.File  // a host-backed file's vfs handle: fstat goes through it (hf.Stat), f is only the borrowed data-plane descriptor; nil for non-host and non-file fds
+	vinfo   core.Info  // a precomputed vfs-node stat for an object with no openable host handle (a mknod'd device backed by a host /dev node, a directory): fstat reports this, not the raw backing fd
 	vf      core.File  // a non-host regular file's backing (in-memory, user-defined); nil for host and non-regular fds
 	vn      core.Node  // its node, for fstat and SEEK_END
 	fs      *dfs       // set with vf/vn: reaches the per-vnode MAP_SHARED backing (sharedback.go)
@@ -2053,6 +2054,13 @@ func (g *dguest) fdStatOf(d *dfile) (lxStat, lxErrno) {
 			return lxStat{}, osErrno(err)
 		}
 		st := nodeStat(info.Attr(), info.ID())
+		if p := d.fx.perm.Load(); p&permSet != 0 {
+			st.mode = st.mode&^0o7777 | p&0o7777
+		}
+		return st, 0
+	}
+	if d.vinfo != nil { // a mknod'd device or a directory: its vfs-node stat, not the raw backing fd's
+		st := nodeStat(d.vinfo.Attr(), d.vinfo.ID())
 		if p := d.fx.perm.Load(); p&permSet != 0 {
 			st.mode = st.mode&^0o7777 | p&0o7777
 		}
