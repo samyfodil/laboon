@@ -99,7 +99,7 @@ func (l *Layer) ApplyTo(root string) error {
 			// Names that shared an inode in the layer stay hardlinks in root, so a
 			// later build step sees the same link group, not independent copies.
 			linked := false
-			if id, nlink, ok := core.FileID(fi); ok && nlink > 1 {
+			if id, nlink, ok := fileIdent(hp, fi); ok && nlink > 1 {
 				if first, seen := links[id]; seen {
 					os.Remove(target)
 					if os.Link(first, target) == nil {

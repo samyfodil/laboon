@@ -162,7 +162,7 @@ func (d *DiskFS) record(p string, spec core.CreateSpec) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	cp := clean(p)
-	sub := uint32(core.HostMode(spec.Mode, spec.Kind == core.Dir))&0o7777 != spec.Mode&0o7777
+	sub := subFloor(spec.Mode, spec.Kind == core.Dir)
 	special := spec.Kind >= core.Fifo
 	if !sub && spec.Uid == 0 && spec.Gid == 0 && !special {
 		delete(d.over, cp)
@@ -228,6 +228,9 @@ func (n *diskNode) Stat() (core.Attr, error) {
 	if _, nlink, ok := core.FileID(fi); ok {
 		a.Nlink = nlink
 	}
+	if a.Nlink == 0 { // a host that carries no link count (NTFS via os.Lstat): a live file has at least one
+		a.Nlink = 1
+	}
 	if a.Kind == core.Symlink {
 		a.Target, _ = os.Readlink(n.fs.hp(n.p))
 	}
@@ -255,7 +258,7 @@ func (n *diskNode) SetAttr(u core.AttrUpdate) error {
 			return err
 		}
 		n.fs.mu.Lock()
-		if floored != *u.Mode&0o7777 {
+		if subFloor(*u.Mode, n.kind == core.Dir) {
 			o := n.fs.ov(n.p)
 			o.Mode, o.HasMode = *u.Mode&0o7777, true
 		} else if o := n.fs.over[clean(n.p)]; o != nil {

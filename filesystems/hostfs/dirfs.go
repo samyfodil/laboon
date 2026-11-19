@@ -132,6 +132,9 @@ func (n *dirNode) Stat() (core.Attr, error) {
 	if _, nlink, ok := core.FileID(fi); ok {
 		a.Nlink = nlink
 	}
+	if a.Nlink == 0 { // a host that carries no link count (NTFS via os.Lstat): a live file has at least one
+		a.Nlink = 1
+	}
 	if a.Kind == core.Symlink {
 		a.Target, _ = os.Readlink(n.fs.hp(n.p))
 	}
