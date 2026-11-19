@@ -23,7 +23,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/samyfodil/laboon/internal/winfs"
+	"github.com/samyfodil/laboon/filesystems/winfs"
 )
 
 // The Windows hostFS. NTFS has no POSIX modes, owners, FIFOs or usable

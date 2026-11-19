@@ -26,7 +26,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
-	"github.com/samyfodil/laboon/internal/winfs"
+	"github.com/samyfodil/laboon/filesystems/winfs"
 )
 
 // Image is an unpacked image.

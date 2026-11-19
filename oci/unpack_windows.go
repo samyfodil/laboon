@@ -13,7 +13,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/samyfodil/laboon/internal/winfs"
+	"github.com/samyfodil/laboon/filesystems/winfs"
 )
 
 // On Windows a rootfs is laid out for the sandbox's NTFS host filesystem
