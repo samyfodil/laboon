@@ -132,6 +132,36 @@ probe with `export fn`, since the accessors are `inline`).
    `stub-arm64.bin`).
 6. Defer `vmm.zig` (HVF) — require static-PIE guests first.
 
+## Running status (2026-11-20): end-to-end trap core WORKS on the mac
+
+The x86-64 stub compiles, both darwin arches build+embed per-arch (build.sh →
+stub-{arm64,amd64}.bin, macstub_{arm64,amd64}.go), and on the M4 under Rosetta the
+darwin/amd64 supervisor loads an x86-64 static-PIE glibc guest, the stub rewrites
+its syscalls to ud2, the guest runs and traps, and the supervisor serves syscalls
+over the channel. Proven keystones (all mac-validated): the mcontext/FXSAVE
+layout, the ud2+SIGILL trap/serve/resume, the Seatbelt Mach allowlist (Rosetta's
+exception server needs it), the x86-64 site finder (computeSitesELFX64, 109 sites
+in startup), rewriteSite→ud2.
+
+**Remaining blocker — the syscall-number ABI.** The darwin `syscalls` map is
+keyed by arm64 Linux numbers (gen_linux_arm64.go: "keyed by the arm64 numbers").
+An x86-64 guest uses x86-64 Linux numbers, so e.g. brk(12)/mmap(9)/fstat(5)
+dispatch to the xattr handler (syscalls[5..16]). The fix mirrors linux/amd64 and
+windows/amd64: call `toGeneric(nr, a)` before the dispatch in run_darwin.go's
+serveLoop (around the `handler(nr)` / `nr==lxClone`/`lxExecve` sites), and define
+`toGeneric`/`fromGeneric` for darwin — identity for arm64 (gen_darwin_arm64.go,
+like gen_linux_arm64.go), and the x86-64 translation for amd64 (gen_darwin_amd64.go).
+`x64Generic`/`x64Result`/`swapOFlags` already compile for darwin/amd64
+(lx_x64nr_amd64.go). The amd64 side also needs the x86-64-specific handlers
+gen_linux_amd64.go registers (arch_prctl, poll, select, time, the x64Memory
+calls) adapted to darwin host calls. The hard sub-piece is **arch_prctl(ARCH_SET_FS):
+on darwin x86-64 the guest's TLS is %fs while Darwin/libSystem TLS is %gs (so %fs
+is free), but setting the guest thread's %fs base under Rosetta needs a stub
+mechanism (wrfsbase if CR4.FSGSBASE is honored, else a Mach thread_set_state /
+Darwin TSD call) — experiment on the mac.** glibc sets up TLS before main, so
+startup.c cannot finish until arch_prctl works. The rewriter's AnalyzeFS/FSSite
+is the hook if %fs accesses must be virtualized instead.
+
 ## Implementation status (serve path DONE)
 
 The validated serve path is in (`0edbf42`): `onFault` SIGILL at a `0f 0b` site →
