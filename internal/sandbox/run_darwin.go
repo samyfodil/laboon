@@ -546,7 +546,11 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 			g.outW = ^uint64(0) // a tracer's edit: the stub measured other arguments
 		}
 		nr, a = ch.page.nr, ch.page.args
-		switch nr {
+		// An x86-64 guest posts x86-64 numbers; translate to the shared table's
+		// asm-generic keys (identity on arm64). The stub sentinels are large
+		// private values that pass through unchanged, so they still match below.
+		gnr, ga, generic := toGeneric(nr, a)
+		switch gnr {
 		case lxExit:
 			code := int(int32(a[0]))
 			if g.isThread {
@@ -649,10 +653,10 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 		case lxClone, lxClone3:
 			var r cloneReq
 			var e lxErrno
-			if nr == lxClone {
-				r, e = cloneArgs(a)
+			if gnr == lxClone {
+				r, e = cloneArgs(ga)
 			} else {
-				r, e = g.clone3Args(a[0], a[1])
+				r, e = g.clone3Args(ga[0], ga[1])
 			}
 			if e != 0 {
 				ch.page.ret = errno(e)
@@ -666,10 +670,10 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 
 		case lxExecve, lxExecveat:
 			var ok bool
-			if nr == lxExecve {
-				ok = g.execve(lxAtFdcwd, a[0], a[1], a[2], 0)
+			if gnr == lxExecve {
+				ok = g.execve(lxAtFdcwd, ga[0], ga[1], ga[2], 0)
 			} else {
-				ok = g.execve(int64(int32(a[0])), a[1], a[2], a[3], int64(int32(a[4])))
+				ok = g.execve(int64(int32(ga[0])), ga[1], ga[2], ga[3], int64(int32(ga[4])))
 			}
 			if cfg.Trace != nil {
 				fmt.Fprintf(cfg.Trace, "[pid %d] execve -> %v ret=%#x\n", g.pid, ok, ch.page.ret)
@@ -718,8 +722,8 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 			ch.reply(repResult)
 
 		default:
-			if h, ok := handler(nr); ok {
-				ch.page.ret = uint64(h(g, a))
+			if h, ok := handler(gnr); ok && generic {
+				ch.page.ret = uint64(fromGeneric(nr, a, h(g, ga)))
 				g.ptraceSyscallExit(int64(ch.page.ret))
 				ch.reply(repResult)
 				break

@@ -1,11 +1,22 @@
 # darwin/amd64 — x86-64 macOS stub port
 
-Status: **in progress**. The macOS stub is arm64-only. `GOOS=darwin GOARCH=amd64`
-builds on the Go side (`macstub.go` embeds the arm64 `stub.bin` regardless), but
-at runtime the arm64 stub cannot run an amd64 guest's machine code, so it SIGILLs.
-This is a full x86-64 stub port, not a flag. The rewriter already classifies
-x86-64 syscall sites (`0f 05`), so the supervisor/rewrite side is ready; the work
-is the Zig stub.
+Status: **in progress — syscall-number ABI DONE, at the %fs TLS boundary**. The
+x86-64 stub compiles, both darwin arches build with per-arch embed, and a glibc
+static-PIE guest (`testdata/startup.c`) runs end-to-end on the M4 under Rosetta:
+it loads, rewrites syscalls to `ud2`, runs through libc self-relocation and TLS
+setup, dispatches its syscalls through the number-ABI translation, and faults
+exactly at the first `%fs` access (SIGSEGV at `si_addr=0x10`, physical `%fs`
+base 0). The one remaining subsystem is `%fs` TLS virtualization (below).
+
+The syscall-number ABI (DONE, mac-validated 2026-11-20): an x86-64 guest posts
+x86-64 numbers; the stub's `x64gen` translates for its local dispatch (memory,
+clocks, stdio, futex, thread/proc control) while forwarding the raw number, and
+the supervisor's `toGeneric`/`fromGeneric` (`gen_darwin_amd64.go`, reusing the
+shared `x64Generic`/`x64Result`) translate the forwarded calls — the open-flag
+and legacy→at argument rewrites happen in the supervisor, not the stub. This
+removed the earlier xattr "hang" (brk(12) had mis-dispatched to the arm64-keyed
+xattr handler). `arch_prctl(ARCH_SET_FS)` is served in the stub (stores the
+guest `%fs` base; no `wrfsbase`).
 
 ## Arch-specific surface (per file, heaviest first)
 

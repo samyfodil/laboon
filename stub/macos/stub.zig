@@ -84,6 +84,19 @@ const NR_FUTEX: u64 = 98;
 const NR_SET_ROBUST_LIST: u64 = 99;
 const NR_GETTID: u64 = 178;
 const NR_MUNMAP: u64 = 215;
+// x86-64 arch_prctl subfunctions. On x86-64 glibc keeps its thread pointer in
+// %fs, which the stub virtualizes (wrfsbase faults under Rosetta), so the stub
+// serves arch_prctl itself rather than forwarding it.
+const X64_ARCH_PRCTL: u64 = 158;
+const X64_GETTID: u64 = 186;
+const ARCH_SET_GS: u64 = 0x1001;
+const ARCH_SET_FS: u64 = 0x1002;
+const ARCH_GET_FS: u64 = 0x1003;
+const ARCH_GET_GS: u64 = 0x1004;
+// NO_LOCAL is x64gen's answer for a call the stub does not serve in-guest: it
+// matches no local handler, so the call forwards to the supervisor by its raw
+// x86-64 number.
+const NO_LOCAL: u64 = ~@as(u64, 0);
 const STDIO_TRACED: u64 = 1 << 63; // the supervisor set this thread as ptrace-traced
 const NR_VFORK_WAIT: u64 = 0x1_0000_0001; // stub->supervisor only, not a Linux number
 const NR_THREAD_GONE: u64 = 0x1_0000_0002; // a thread ended; no reply expected
@@ -417,27 +430,120 @@ fn localTraced(frame: [*]u64, r: u64) u64 {
     return serveReplies(ch, frame);
 }
 
+// x64gen maps an x86-64 syscall number to the asm-generic number the stub's
+// local handlers are keyed by, for the calls the stub serves in-guest (memory,
+// clocks, stdio, futex, thread and process control). It is the in-stub dual of
+// the supervisor's toGeneric; a call the stub does not serve maps to NO_LOCAL
+// and forwards to the supervisor under its raw x86-64 number, which the
+// supervisor translates (so the open-flag and legacy->at argument rewrites
+// happen there, not here). A number the stub serves but x64gen misses forwards
+// and ENOSYSes loudly rather than being mis-served -- the intended failure.
+fn x64gen(nr: u64) u64 {
+    return switch (nr) {
+        0 => 63, // read
+        1 => 64, // write
+        17 => 67, // pread64
+        18 => 68, // pwrite64
+        19 => 65, // readv
+        20 => 66, // writev
+        295 => 69, // preadv
+        296 => 70, // pwritev
+        9 => 222, // mmap
+        10 => 226, // mprotect
+        11 => 215, // munmap
+        12 => 214, // brk
+        25 => 216, // mremap
+        26 => 227, // msync
+        27 => 232, // mincore
+        28 => 233, // madvise
+        149 => 228, // mlock
+        150 => 229, // munlock
+        151 => 230, // mlockall
+        152 => 231, // munlockall
+        325 => 284, // mlock2
+        30 => 196, // shmat
+        67 => 197, // shmdt
+        35 => 101, // nanosleep
+        24 => 124, // sched_yield
+        219 => 128, // restart_syscall
+        228 => 113, // clock_gettime
+        229 => 114, // clock_getres
+        230 => 115, // clock_nanosleep
+        96 => 169, // gettimeofday
+        318 => 278, // getrandom
+        98 => 165, // getrusage
+        309 => 168, // getcpu
+        324 => 283, // membarrier
+        281 => 22, // epoll_pwait
+        202 => 98, // futex
+        273 => 99, // set_robust_list
+        60 => 93, // exit
+        218 => 96, // set_tid_address
+        186 => 178, // gettid
+        else => NO_LOCAL,
+    };
+}
+
+// The guest's x86-64 %fs (and %gs) base. glibc sets %fs through arch_prctl and
+// then reads its TLS as %fs:disp; the physical %fs base cannot be set under
+// Rosetta (wrfsbase faults), so these hold the value the %fs-site handling
+// resolves against. Per thread, like the segment base they stand in for.
+threadlocal var g_guest_fsbase: u64 = 0;
+threadlocal var g_guest_gsbase: u64 = 0;
+
+// archPrctl serves an x86-64 arch_prctl(code, addr): it stores or returns the
+// guest's virtual %fs/%gs base. frame[0] is the code, frame[1] the address.
+fn archPrctl(frame: [*]u64) u64 {
+    const addr = frame[1];
+    switch (frame[0]) {
+        ARCH_SET_FS => {
+            g_guest_fsbase = addr;
+            return 0;
+        },
+        ARCH_SET_GS => {
+            g_guest_gsbase = addr;
+            return 0;
+        },
+        ARCH_GET_FS => {
+            @as(*align(1) u64, @ptrFromInt(addr)).* = g_guest_fsbase;
+            return 0;
+        },
+        ARCH_GET_GS => {
+            @as(*align(1) u64, @ptrFromInt(addr)).* = g_guest_gsbase;
+            return 0;
+        },
+        else => return @bitCast(@as(i64, -22)), // EINVAL
+    }
+}
+
 fn serveSyscall(frame: [*]u64) u64 {
     // No tpidr_el0 juggling: the guest's thread pointer lives in a TSD slot (see
     // g_tp_key), reached by the rewritten mrs/msr sites, and libSystem's own TLS
     // rides tpidrro_el0, which the kernel keeps per-thread. The physical
     // tpidr_el0 belongs entirely to Darwin here.
-    if (frame[8] -% sig.NR_SIGALTSTACK <= sig.NR_RT_SIGRETURN - sig.NR_SIGALTSTACK) {
-        if (sig.handle(frame[8], frame)) |r| return localTraced(frame, r);
+    // gen is the asm-generic number the local handlers key on; on arm64 the
+    // guest already issues it, on x86-64 x64gen translates. frame[8] stays the
+    // raw guest number, which the forward path hands the supervisor.
+    const gen = if (tstate.arm64) frame[8] else x64gen(frame[8]);
+    if (!tstate.arm64 and frame[8] == X64_ARCH_PRCTL) return archPrctl(frame);
+    // x86-64 signal delivery is not wired up yet; on arm64 the sig fast path
+    // serves sigaltstack..rt_sigreturn in-guest.
+    if (tstate.arm64 and gen -% sig.NR_SIGALTSTACK <= sig.NR_RT_SIGRETURN - sig.NR_SIGALTSTACK) {
+        if (sig.handle(gen, frame)) |r| return localTraced(frame, r);
     }
-    if (frame[8] == NR_MUNMAP and g_exit_sp != 0 and @intFromPtr(frame) -% frame[0] < frame[1]) {
+    if (gen == NR_MUNMAP and g_exit_sp != 0 and @intFromPtr(frame) -% frame[0] < frame[1]) {
         g_unmap = .{ frame[0], frame[1] };
         return 0;
     }
-    switch (frame[8]) {
+    switch (gen) {
         NR_FUTEX => return localTraced(frame, futex.handle(frame[0..6].*)),
         NR_SET_ROBUST_LIST => return localTraced(frame, 0),
         NR_EXIT => if (g_is_thread or g_threads.load(.seq_cst) > 1) threadExit(frame[0]),
         else => {
-            if (stdio.handle(g_chan, frame[8], frame)) |r| return localTraced(frame, r);
-            if (local.handle(frame[8], frame)) |r| return localTraced(frame, r);
+            if (stdio.handle(g_chan, gen, frame)) |r| return localTraced(frame, r);
+            if (local.handle(gen, frame)) |r| return localTraced(frame, r);
             g_frame = frame;
-            if (mem.handle(frame[8], frame)) |r| return localTraced(frame, r);
+            if (mem.handle(gen, frame)) |r| return localTraced(frame, r);
         },
     }
     const ch = g_chan;
@@ -447,12 +553,13 @@ fn serveSyscall(frame: [*]u64) u64 {
         if (ch.stdio & STDIO_TRACED != 0) sig.publishFrame(frame, frame[33]);
     }
     ch.kind = chan.MSG_SYSCALL;
-    ch.nr = frame[8];
-    if (ch.nr == NR_SET_TID_ADDRESS) {
+    ch.nr = frame[8]; // the raw guest number; the supervisor translates it
+    if (gen == NR_SET_TID_ADDRESS) {
         // Record the clear-on-exit word here; the supervisor only supplies the
-        // tid, which is what set_tid_address returns.
+        // tid, which is what set_tid_address returns. Forward as gettid in the
+        // guest's own ABI so the supervisor's translation lands on gettid.
         g_ctid = frame[0];
-        ch.nr = NR_GETTID;
+        ch.nr = if (tstate.arm64) NR_GETTID else X64_GETTID;
     }
     ch.guest_rip = frame[33] -% SITE_DELTA; // the syscall site is one instruction back
     ch.args[0] = frame[0];
@@ -461,7 +568,7 @@ fn serveSyscall(frame: [*]u64) u64 {
     ch.args[3] = frame[3];
     ch.args[4] = frame[4];
     ch.args[5] = frame[5];
-    ch.ret = mem.outPrefix(ch.nr, frame);
+    ch.ret = mem.outPrefix(gen, frame);
     const r = serveReplies(ch, frame);
     // A tracer may have edited the registers during a stop; apply them before
     // the guest resumes, overriding the syscall result in x0.
