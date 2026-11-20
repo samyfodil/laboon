@@ -19,17 +19,17 @@ PT_LOADs over it, so a page the end of .text and the start of .rodata share
 keeps exec — else a never-run instruction there (_fini at exit) faulted once the
 process had threads.
 
-Signals (DONE, mac-validated 2026-11-20): `testdata/signals.c` passes 22 of 23
+Signals (DONE, mac-validated 2026-11-20): `testdata/signals.c` passes all 23
 cases — handler, kill-self, mask-pending, nested, ppoll-sigmask, sigchld-
 sigsuspend, sigaltstack, sa-restart/eintr-read, segv-siglongjmp, timers,
-sigtimedwait, the fork cases (kill-child, vm-die) and pthread-kill. x86-64
-delivers handlers and applies sigreturn straight onto the trap's mcontext (no
-arm64 brk-trap switch): serveTrap stashes the mcontext, the handler/sigsuspend/
-sigreturn paths build the switch context and run doSwitch on it, and
-sysSigreturnX64 parses deliverOnto's frame back. The one remaining failure,
-`sigpipe-default`, is a pre-existing non-fork gap first reached now that the
-suite runs to the end (the held-fd stdio fast path returns EPIPE without routing
-it through the afterSyscall SIGPIPE raise); it is not an x86-64 regression.
+sigtimedwait, sigpipe, the fork cases (kill-child, vm-die) and pthread-kill.
+x86-64 delivers handlers and applies sigreturn straight onto the trap's mcontext
+(no arm64 brk-trap switch): serveTrap stashes the mcontext, the handler/
+sigsuspend/sigreturn paths build the switch context and run doSwitch on it, and
+sysSigreturnX64 parses deliverOnto's frame back. `epipeRaises` matches `frame[8]`,
+the raw guest syscall number, so its write/writev/send* numbers are arch-aware
+(x86-64 1/20/44/46/307, not the asm-generic 64/66/…) — else EPIPE never raised
+the guest's SIGPIPE on x86-64.
 
 fork (DONE, mac-validated 2026-11-20): fork/wait, a fork loop, and the
 fork-dependent signal cases all run — `testdata/forktest.c` and the kill-child,

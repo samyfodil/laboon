@@ -89,11 +89,13 @@ pub const NR_RT_SIGPENDING: u64 = 136;
 pub const NR_RT_SIGTIMEDWAIT: u64 = 137;
 pub const NR_RT_SIGRETURN: u64 = 139;
 const NR_RESTART_SYSCALL: u64 = 128;
-const NR_WRITE: u64 = 64;
-const NR_WRITEV: u64 = 66;
-const NR_SENDTO: u64 = 206;
-const NR_SENDMSG: u64 = 211;
-const NR_SENDMMSG: u64 = 269;
+// epipeRaises matches these against frame[8], which is the raw guest number
+// (asm-generic on arm64, x86-64 on x86-64), not the translated dispatch number.
+const NR_WRITE: u64 = if (tstate.arm64) 64 else 1;
+const NR_WRITEV: u64 = if (tstate.arm64) 66 else 20;
+const NR_SENDTO: u64 = if (tstate.arm64) 206 else 44;
+const NR_SENDMSG: u64 = if (tstate.arm64) 211 else 46;
+const NR_SENDMMSG: u64 = if (tstate.arm64) 269 else 307;
 const LC_SIGDIE: u64 = 0x4c430010; // after mem.zig's 0x4c4300xx
 const LC_SIGSTOP: u64 = 0x4c430011;
 const LC_SIGTAKE: u64 = 0x4c430012;
