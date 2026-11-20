@@ -42,14 +42,14 @@ var filterArches = []filterArch{
 		clone: 56, tgkill: 234, recvmsg: 47, close: 3, seccomp: 317,
 		// read write writev mmap mprotect munmap mremap madvise getpid gettid
 		// futex rt_sigreturn rt_sigprocmask arch_prctl exit exit_group sigaltstack
-		// msync mincore clock_gettime clock_getres gettimeofday getrusage
-		// restart_syscall
+		// msync mincore clock_gettime clock_getres gettimeofday getrusage getcpu
+		// rseq restart_syscall
 		allowed: []uint32{0, 1, 20, 9, 10, 11, 25, 28, 39, 186, 202, 15, 14, 158, 60, 231, 131,
-			26, 27, 228, 229, 96, 98, 219},
+			26, 27, 228, 229, 96, 98, 309, 334, 219},
 		// getpid gettid futex rt_sigreturn rt_sigprocmask arch_prctl exit
 		// exit_group sigaltstack clock_gettime clock_getres gettimeofday
-		// getrusage restart_syscall
-		guest: []uint32{39, 186, 202, 15, 14, 158, 60, 231, 131, 228, 229, 96, 98, 219},
+		// getrusage getcpu rseq restart_syscall
+		guest: []uint32{39, 186, 202, 15, 14, 158, 60, 231, 131, 228, 229, 96, 98, 309, 334, 219},
 		stdio: []uint32{0, 1, 20},
 	},
 	{
@@ -57,14 +57,14 @@ var filterArches = []filterArch{
 		clone: 220, tgkill: 131, recvmsg: 212, close: 57, seccomp: 277,
 		// read write writev mmap mprotect munmap mremap madvise getpid gettid
 		// futex rt_sigreturn rt_sigprocmask exit exit_group sigaltstack
-		// msync mincore clock_gettime clock_getres gettimeofday getrusage
-		// restart_syscall
+		// msync mincore clock_gettime clock_getres gettimeofday getrusage getcpu
+		// rseq restart_syscall
 		allowed: []uint32{63, 64, 66, 222, 226, 215, 216, 233, 172, 178, 98, 139, 135, 93, 94, 132,
-			227, 232, 113, 114, 169, 165, 128},
+			227, 232, 113, 114, 169, 165, 168, 293, 128},
 		// getpid gettid futex rt_sigreturn rt_sigprocmask exit exit_group
-		// sigaltstack clock_gettime clock_getres gettimeofday getrusage
-		// restart_syscall
-		guest: []uint32{172, 178, 98, 139, 135, 93, 94, 132, 113, 114, 169, 165, 128},
+		// sigaltstack clock_gettime clock_getres gettimeofday getrusage getcpu
+		// rseq restart_syscall
+		guest: []uint32{172, 178, 98, 139, 135, 93, 94, 132, 113, 114, 169, 165, 168, 293, 128},
 		stdio: []uint32{63, 64, 66},
 	},
 }
