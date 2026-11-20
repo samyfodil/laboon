@@ -703,7 +703,7 @@ fn vforkSpawn(ch: *chan.Chan, h: *CloneHandoff, tid: u64, frame: [*]u64) u64 {
     const top = @intFromPtr(frame) + FRAME_TOP;
     const stk = malloc(PARK_STACK) orelse return cloneFailed(h.slot - @intFromPtr(g_base), CLONE_VFORK, ch);
     var v = VforkPark{ .ch = ch, .h = h, .lo = 0, .len = 0, .save = undefined, .ok = false };
-    v.lo = asm volatile ("mov %[o], sp"
+    v.lo = asm volatile (if (tstate.arm64) "mov %[o], sp" else "movq %%rsp, %[o]"
         : [o] "=r" (-> u64),
     );
     v.len = top - v.lo;
@@ -876,6 +876,10 @@ pub fn threadExit(code: u64) noreturn {
     // The main thread runs on the stack the stub built for the program, which
     // no joiner frees; it finishes where it is.
     if (g_exit_sp == 0) threadExitFinish(g_ctid, code);
+    if (!tstate.arm64) { // multi-thread teardown: pending the x86-64 port
+        asm volatile ("ud2");
+        unreachable;
+    }
     asm volatile (
         \\ mov sp, %[sp]
         \\ mov x0, %[ctid]
@@ -897,6 +901,10 @@ pub fn threadExit(code: u64) noreturn {
 // A guest thread finishes on its own libc stack, as threadExit does.
 pub fn deadThread() noreturn {
     if (g_exit_sp == 0) deadThreadFinish();
+    if (!tstate.arm64) { // multi-thread teardown: pending the x86-64 port
+        asm volatile ("ud2");
+        unreachable;
+    }
     asm volatile (
         \\ mov sp, %[sp]
         \\ bl %[f]
@@ -956,7 +964,7 @@ fn cloneBootstrap(arg: ?*anyopaque) callconv(.C) ?*anyopaque {
     // Save this pthread's own stack pointer before switching to the guest's, so
     // thread exit can return to it (see lcThreadExit). The libc stack is left
     // untouched for the thread's whole life and stays valid for pthread_exit.
-    g_exit_sp = asm volatile ("mov %[o], sp"
+    g_exit_sp = asm volatile (if (tstate.arm64) "mov %[o], sp" else "movq %%rsp, %[o]"
         : [o] "=r" (-> u64),
     );
     if (g_chan.stdio & STDIO_TRACED != 0) {
@@ -1660,17 +1668,34 @@ const LC_EXEC_STOP: u64 = 0x4c430018; // sandbox/lx_signal.go lxExecStop
 // target, matching the Linux stub's enter (stub/zig/aarch64.zig).
 fn enterGuest(entry: u64, sp: u64) noreturn {
     sig.enterGuest();
-    asm volatile (
-        \\ mov sp, x1
-        \\ mov x0, xzr
-        \\ mov x29, xzr
-        \\ mov x30, xzr
-        \\ br x2
-        :
-        : [sp] "{x1}" (sp),
-          [entry] "{x2}" (entry),
-        : "memory"
-    );
+    if (tstate.arm64) {
+        asm volatile (
+            \\ mov sp, x1
+            \\ mov x0, xzr
+            \\ mov x29, xzr
+            \\ mov x30, xzr
+            \\ br x2
+            :
+            : [sp] "{x1}" (sp),
+              [entry] "{x2}" (entry),
+            : "memory"
+        );
+    } else {
+        // x86-64 exec ABI: %rdx is the dynamic linker's rtld_fini, which glibc's
+        // _start registers as an exit callback when nonzero -- a stale host value
+        // there faults at exit (as x0 did on arm64; see [[macos-port]]). sp and
+        // entry ride r8/r9 so zeroing rdx/rbp cannot clobber the branch target.
+        asm volatile (
+            \\ movq %%r8, %%rsp
+            \\ xorl %%edx, %%edx
+            \\ xorl %%ebp, %%ebp
+            \\ jmpq *%%r9
+            :
+            : [sp] "{r8}" (sp),
+              [entry] "{r9}" (entry),
+            : "memory"
+        );
+    }
     unreachable;
 }
 

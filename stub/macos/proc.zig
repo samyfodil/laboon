@@ -4,6 +4,7 @@
 // other thread of this task).
 
 const std = @import("std");
+const tstate = @import("tstate.zig");
 
 const NR_GETRUSAGE: u64 = 165;
 const NR_GETCPU: u64 = 168;
@@ -23,6 +24,12 @@ fn neg(e: i64) u64 {
 // x0 = 0: what a clone child sees on Linux. x16 carries the branch and is not
 // restored, as on the trampoline's own return path.
 pub fn resumeFrame(frame: [*]const u64, sp: u64) callconv(.C) noreturn {
+    if (!tstate.arm64) {
+        // clone/fork child resume: pending the x86-64 full-context port (not on
+        // the single-process startup milestone).
+        asm volatile ("ud2");
+        unreachable;
+    }
     asm volatile (
         \\ mov x16, x0
         \\ ldp q0,  q1,  [x16, #272]
@@ -83,6 +90,10 @@ pub const FRAME_BYTES: usize = 784;
 // fresh stub resumes this way at the fork's return.
 pub fn resumeIsland(frame: [*]u64) callconv(.C) noreturn {
     frame[0] = 0;
+    if (!tstate.arm64) {
+        asm volatile ("ud2"); // fork resume: pending the x86-64 full-context port
+        unreachable;
+    }
     asm volatile (
         \\ mov sp, x0
         \\ ldp q0,  q1,  [sp, #272]
@@ -165,7 +176,7 @@ pub fn resetOnExec() void {
 // save its state), the same trick .NET's FlushProcessWriteBuffers uses on
 // Apple Silicon, where a TLB shootdown sends no IPI.
 fn barrierAllThreads() bool {
-    asm volatile ("dmb ish" ::: "memory");
+    asm volatile (if (tstate.arm64) "dmb ish" else "mfence" ::: "memory");
     const task = mach_task_self();
     var list: [*]mach_port_t = undefined;
     var count: c_uint = 0;
@@ -183,7 +194,7 @@ fn barrierAllThreads() bool {
     }
     _ = mach_port_deallocate(task, self);
     _ = vm_deallocate(task, @intFromPtr(list), count * @sizeOf(mach_port_t));
-    asm volatile ("dmb ish" ::: "memory");
+    asm volatile (if (tstate.arm64) "dmb ish" else "mfence" ::: "memory");
     return true;
 }
 

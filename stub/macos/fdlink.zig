@@ -10,6 +10,7 @@
 // fork child takes its parent's cached files over on its own (forkAdopt).
 
 const std = @import("std");
+const tstate = @import("tstate.zig");
 
 pub const OP_INSTALL: u64 = 1;
 
@@ -32,27 +33,56 @@ const SYS_recvmsg: u64 = 27;
 // sys issues a raw Darwin BSD syscall, -errno on failure. The kernel writes a
 // second result into x1, so x1..x5 are clobbers loaded inside the asm.
 pub fn sys(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) i64 {
-    return asm volatile (
-        \\ mov x1, %[a1]
-        \\ mov x2, %[a2]
-        \\ mov x3, %[a3]
-        \\ mov x4, %[a4]
-        \\ mov x5, %[a5]
-        \\ mov x16, %[nr]
-        \\ svc #0x80
-        \\ b.cc 1f
-        \\ neg x0, x0
-        \\ 1:
-        : [ret] "={x0}" (-> i64),
-        : [nr] "r" (nr),
-          [a0] "{x0}" (a0),
-          [a1] "r" (a1),
-          [a2] "r" (a2),
-          [a3] "r" (a3),
-          [a4] "r" (a4),
-          [a5] "r" (a5),
-        : "x1", "x2", "x3", "x4", "x5", "x16", "cc", "memory"
-    );
+    if (tstate.arm64) {
+        return asm volatile (
+            \\ mov x1, %[a1]
+            \\ mov x2, %[a2]
+            \\ mov x3, %[a3]
+            \\ mov x4, %[a4]
+            \\ mov x5, %[a5]
+            \\ mov x16, %[nr]
+            \\ svc #0x80
+            \\ b.cc 1f
+            \\ neg x0, x0
+            \\ 1:
+            : [ret] "={x0}" (-> i64),
+            : [nr] "r" (nr),
+              [a0] "{x0}" (a0),
+              [a1] "r" (a1),
+              [a2] "r" (a2),
+              [a3] "r" (a3),
+              [a4] "r" (a4),
+              [a5] "r" (a5),
+            : "x1", "x2", "x3", "x4", "x5", "x16", "cc", "memory"
+        );
+    } else {
+        // The arg registers are also clobbers (the kernel writes a second result
+        // into rdx for some calls), so the args ride flexible regs and are moved
+        // into the syscall ABI registers here.
+        return asm volatile (
+            \\ movq %[a0], %%rdi
+            \\ movq %[a1], %%rsi
+            \\ movq %[a2], %%rdx
+            \\ movq %[a3], %%r10
+            \\ movq %[a4], %%r8
+            \\ movq %[a5], %%r9
+            \\ movq %[nr], %%rax
+            \\ orq $0x2000000, %%rax
+            \\ syscall
+            \\ jnc 1f
+            \\ negq %%rax
+            \\ 1:
+            : [ret] "={rax}" (-> i64),
+            : [nr] "r" (nr),
+              [a0] "r" (a0),
+              [a1] "r" (a1),
+              [a2] "r" (a2),
+              [a3] "r" (a3),
+              [a4] "r" (a4),
+              [a5] "r" (a5),
+            : "rdi", "rsi", "rdx", "r10", "r8", "r9", "rcx", "r11", "cc", "memory"
+        );
+    }
 }
 
 pub fn close(fd: i32) void {
