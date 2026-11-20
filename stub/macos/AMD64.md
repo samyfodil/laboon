@@ -81,10 +81,15 @@ probe with `export fn`, since the accessors are `inline`).
       deferrals: the guest-`rip` out-of-line translation (arm64's `ool.guestPc`)
       waits on the x86-64 OOL layer (phase 3); the FXSAVE FIP/FDP form wants
       confirming on the mac.
-   d. `onFault`'s arm64-only body — `es.esr` / `es.far` decode (`faultSignal`),
-      `wx.fault(esr,far,pc)`, `idReg` (the sysreg-read islands — no x86-64
-      analogue), `jit.Fault{esr,far}` — goes behind `if (tstate.arm64)`; the
-      x86-64 fault path reads `es.trapno` / `es.err` / `es.faultvaddr`.
+   d. `onFault`'s arm64-only body. The self-contained leaf functions are
+      **DONE** (probe-verified for `x86_64-macos`, arm64 `stub.bin` unchanged):
+      `faultSignal` (x86-64 reads the trap vector + the #PF present bit instead
+      of the ESR) and `pthreadKill` (the Darwin BSD-class `syscall`). The rest —
+      the structural split of `onFault` itself, gating `wx.fault`, `idReg` (the
+      sysreg islands, no x86-64 analogue) and `jit.Fault` behind `if
+      (tstate.arm64)` and routing the x86-64 syscall trap to the trampolines —
+      is coupled to the x86-64 `wx` layer (phase 3) and the trampoline frame
+      (1f), so it lands with them, not before.
    e. Single-step: arm64 `step()` sets SPSR.SS; x86-64 sets RFLAGS.TF (bit 8) via
       `tstate.setFlags`. `step` / `doSwitch` / `trapEnter` / `trapReturn`
       arch-split (arm64 frame stride 816 and the x16/x17 pushes vs the x86-64

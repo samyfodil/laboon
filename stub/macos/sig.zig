@@ -1075,14 +1075,26 @@ fn kickSelf(ctx: ?*anyopaque) void {
 }
 
 fn pthreadKill(port: u32, sig: c_int) void {
-    _ = asm volatile (
-        \\ mov x16, #328
-        \\ svc #0x80
-        : [ret] "={x0}" (-> u64),
-        : [p] "{x0}" (port),
-          [s] "{x1}" (sig),
-        : "x16", "cc", "memory"
-    );
+    if (tstate.arm64) {
+        _ = asm volatile (
+            \\ mov x16, #328
+            \\ svc #0x80
+            : [ret] "={x0}" (-> u64),
+            : [p] "{x0}" (port),
+              [s] "{x1}" (sig),
+            : "x16", "cc", "memory"
+        );
+    } else {
+        // Darwin BSD-class syscall: rax = 0x2000000 | nr, result in rax, syscall
+        // clobbers rcx and r11.
+        _ = asm volatile ("syscall"
+            : [ret] "={rax}" (-> u64),
+            : [nr] "{rax}" (@as(u64, 0x2000000 | 328)),
+              [p] "{rdi}" (port),
+              [s] "{rsi}" (sig),
+            : "rcx", "r11", "cc", "memory"
+        );
+    }
 }
 
 fn onRoute(_: c_int, _: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) void {
@@ -1103,64 +1115,119 @@ fn onKick(_: c_int, _: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) void {
 
 // faultSignal translates a Darwin fault into Linux's signal and si_code. Darwin
 // reports a write to a read-only page as SIGBUS; Linux calls every permission
-// or translation fault SIGSEGV and keeps SIGBUS for alignment, so the ESR
-// decides the signal.
+// or translation fault SIGSEGV and keeps SIGBUS for alignment. arm64 reads the
+// ESR exception class; x86-64 reads the trap vector and, for a page fault, the
+// error code's present bit.
 fn faultSignal(dsig: c_int, mc: *const std.c.mcontext_t, info: *Info) u32 {
-    const esr = mc.es.esr;
-    const far = mc.es.far;
-    const pc = mc.ss.pc;
-    var sig: u32 = SIGSEGV;
-    var code: i32 = SEGV_MAPERR;
-    var addr = far;
-    switch (esr >> 26) {
-        0x20, 0x21, 0x24, 0x25 => {
-            const dfsc = esr & 0x3f;
-            // As Linux, a mapping at the address makes it a protection failure,
-            // none an unmapped address; Darwin's own code says ACCERR for
-            // addresses it reserves without a mapping. The low 4 GiB is the
-            // stub's __PAGEZERO, a mapping the guest never sees.
-            if (dfsc == 0x21) {
+    if (tstate.arm64) {
+        const esr = mc.es.esr;
+        const far = mc.es.far;
+        const pc = mc.ss.pc;
+        var sig: u32 = SIGSEGV;
+        var code: i32 = SEGV_MAPERR;
+        var addr = far;
+        switch (esr >> 26) {
+            0x20, 0x21, 0x24, 0x25 => {
+                const dfsc = esr & 0x3f;
+                // As Linux, a mapping at the address makes it a protection failure,
+                // none an unmapped address; Darwin's own code says ACCERR for
+                // addresses it reserves without a mapping. The low 4 GiB is the
+                // stub's __PAGEZERO, a mapping the guest never sees.
+                if (dfsc == 0x21) {
+                    sig = SIGBUS;
+                    code = BUS_ADRALN;
+                } else if (far >= PAGEZERO_END and mem.mapped(far, far + 1)) {
+                    code = SEGV_ACCERR;
+                }
+            },
+            0x22, 0x26 => {
                 sig = SIGBUS;
                 code = BUS_ADRALN;
-            } else if (far >= PAGEZERO_END and mem.mapped(far, far + 1)) {
-                code = SEGV_ACCERR;
-            }
-        },
-        0x22, 0x26 => {
-            sig = SIGBUS;
-            code = BUS_ADRALN;
-            if (esr >> 26 == 0x22) addr = pc;
-        },
-        0x3c => {
-            sig = SIGTRAP;
-            code = TRAP_BRKPT;
-            addr = pc;
-        },
-        else => switch (dsig) {
-            DW_SIGILL => {
-                sig = SIGILL;
-                code = ILL_ILLOPC;
-                addr = pc;
+                if (esr >> 26 == 0x22) addr = pc;
             },
-            DW_SIGTRAP => {
+            0x3c => {
                 sig = SIGTRAP;
                 code = TRAP_BRKPT;
                 addr = pc;
             },
-            DW_SIGFPE => {
-                sig = SIGFPE;
-                code = 0;
+            else => switch (dsig) {
+                DW_SIGILL => {
+                    sig = SIGILL;
+                    code = ILL_ILLOPC;
+                    addr = pc;
+                },
+                DW_SIGTRAP => {
+                    sig = SIGTRAP;
+                    code = TRAP_BRKPT;
+                    addr = pc;
+                },
+                DW_SIGFPE => {
+                    sig = SIGFPE;
+                    code = 0;
+                    addr = pc;
+                },
+                DW_SIGBUS => {
+                    sig = SIGBUS;
+                    code = BUS_ADRERR;
+                },
+                else => {},
+            },
+        }
+        info.* = .{ .signo = @intCast(sig), .errno = 0, .code = code, .pad = 0, .a = addr, .b = 0 };
+        return sig;
+    } else {
+        const trapno = mc.es.trapno;
+        const err = mc.es.err;
+        const pc = mc.ss.rip;
+        var sig: u32 = SIGSEGV;
+        var code: i32 = SEGV_MAPERR;
+        var addr: u64 = mc.es.faultvaddr;
+        switch (trapno) {
+            14 => if (err & 1 != 0) {
+                // #PF: present bit set means a protection violation at a mapped
+                // page; clear means not-present, which keeps SEGV_MAPERR.
+                code = SEGV_ACCERR;
+            },
+            17 => { // #AC alignment check
+                sig = SIGBUS;
+                code = BUS_ADRALN;
+            },
+            6 => { // #UD invalid opcode
+                sig = SIGILL;
+                code = ILL_ILLOPC;
                 addr = pc;
             },
-            DW_SIGBUS => {
-                sig = SIGBUS;
-                code = BUS_ADRERR;
+            1, 3 => { // #DB debug/single-step, #BP int3
+                sig = SIGTRAP;
+                code = TRAP_BRKPT;
+                addr = pc;
             },
-            else => {},
-        },
+            else => switch (dsig) {
+                DW_SIGILL => {
+                    sig = SIGILL;
+                    code = ILL_ILLOPC;
+                    addr = pc;
+                },
+                DW_SIGTRAP => {
+                    sig = SIGTRAP;
+                    code = TRAP_BRKPT;
+                    addr = pc;
+                },
+                DW_SIGFPE => {
+                    sig = SIGFPE;
+                    code = 0;
+                    addr = pc;
+                },
+                DW_SIGBUS => {
+                    sig = SIGBUS;
+                    code = BUS_ADRERR;
+                },
+                else => {},
+            },
+        }
+        info.* = .{ .signo = @intCast(sig), .errno = 0, .code = code, .pad = 0, .a = addr, .b = 0 };
+        return sig;
     }
-    info.* = .{ .signo = @intCast(sig), .errno = 0, .code = code, .pad = 0, .a = addr, .b = 0 };
-    return sig;
 }
 
 // idReg serves an mrs of an AArch64 ID register that Darwin traps at EL0
