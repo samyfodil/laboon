@@ -180,3 +180,5 @@ func (f *testDirFile) Stat() (Info, error) {
 	}
 	return FileInfo(path.Base(f.n.p), a, f.n.id), nil
 }
+
+func (f *testDirFile) SetAttr(u AttrUpdate) error { return f.n.SetAttr(u) }

@@ -284,7 +284,8 @@ func (f *wbFile) Truncate(size int64) error {
 	}
 	return nil
 }
-func (f *wbFile) Close() error { return nil }
+func (f *wbFile) SetAttr(u core.AttrUpdate) error { return f.n.SetAttr(u) }
+func (f *wbFile) Close() error                    { return nil }
 func (f *wbFile) Stat() (core.Info, error) {
 	a, err := f.n.Stat()
 	if err != nil {

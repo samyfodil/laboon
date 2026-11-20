@@ -401,6 +401,59 @@ func (h hostFile) Stat() (core.Info, error) {
 	return core.FileInfo(h.name, a, id), nil
 }
 
+// SetAttr changes the open file's metadata on the descriptor itself — the
+// fd-level twin of HostNode.SetAttr (which works by path). The mode goes on the
+// host file to the owner-rw floor; bits the host cannot hold and a non-root owner
+// are recorded in the shared MetaStore under the open object's identity, the same
+// key Stat reads back. A standalone backend (no MetaStore) keeps only what the
+// host file itself can hold.
+func (h hostFile) SetAttr(u core.AttrUpdate) error {
+	fi, err := h.File.Stat()
+	if err != nil {
+		return err
+	}
+	st, _ := StatOf(fi)
+	id := core.NodeID{Dev: st.Dev(), Ino: st.Ino()}
+	if u.Mode != nil {
+		hm := uint32(core.HostMode(*u.Mode, fi.IsDir()))
+		if err := FchmodOf(h.File, hm); err != nil {
+			return err
+		}
+		if h.meta != nil {
+			sub := hm&0o7777 != *u.Mode&0o7777
+			h.meta.Update(id, func(o *core.Override) {
+				if sub {
+					o.Mode, o.HasMode = *u.Mode&0o7777, true
+				} else {
+					o.HasMode = false
+				}
+			})
+		}
+	}
+	if (u.Uid != nil || u.Gid != nil) && h.meta != nil {
+		h.meta.Update(id, func(o *core.Override) {
+			if u.Uid != nil {
+				o.Uid = *u.Uid
+			}
+			if u.Gid != nil {
+				o.Gid = *u.Gid
+			}
+			o.HasOwner = o.Uid != 0 || o.Gid != 0
+		})
+	}
+	if u.Atime != nil || u.Mtime != nil {
+		ats, mts := st.Atime(), st.Mtime()
+		if u.Atime != nil {
+			ats = syscall.NsecToTimespec(*u.Atime)
+		}
+		if u.Mtime != nil {
+			mts = syscall.NsecToTimespec(*u.Mtime)
+		}
+		return FutimesOf(h.File, ats, mts)
+	}
+	return nil
+}
+
 // HostFile is the descriptor behind h, for a host-backed fast path that needs it
 // directly; ordinary callers use the File interface.
 func (h hostFile) HostFile() *os.File { return h.File }

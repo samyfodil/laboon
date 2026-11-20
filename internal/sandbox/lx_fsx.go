@@ -740,21 +740,34 @@ func (g *dguest) mknodat(dirfd int64, pathAddr uint64, mode uint32, dev uint64) 
 	return 0
 }
 
-// attrTarget returns the host object a metadata change on gp (or on the open
-// file d) applies to, copying it up first: an open upper or unnamed file is
-// changed through its descriptor so the change follows the inode.
+// attrTarget is a supervisor-owned anonymous file's descriptor and a stat of it,
+// the in-place target for a metadata change on an O_TMPFILE or memfd (which has
+// no vfs handle to route through). A backend file is changed through its vfs
+// handle instead (inPlaceSetAttr), not this.
 type attrTarget struct {
 	f  *os.File
 	fi os.FileInfo
 }
 
 // fdInPlace reports whether a metadata change on the open file d applies to its
-// descriptor directly: an unnamed (O_TMPFILE) file, a rootless run, or a file
-// already in the writable upper. Any other target (a lower-backed or O_PATH fd,
-// or a pathname) resolves through the Namespace, which copies it up.
+// own object directly. An unnamed (O_TMPFILE/memfd) file is always its own
+// object. A backend regular file (d.hf set) is changed in place when it is the
+// writable top — opened for writing, which the overlay has already copied up, or
+// a rootless run where the host is the authority. Everything else routes through
+// the Namespace: a read-only lower-backed fd (so it copies up), an O_PATH fd, a
+// pathname, and a host device or other special (d.hf nil but named), whose mode
+// and owner live on the overlay placeholder, never on the shared host device.
 func (g *dguest) fdInPlace(d *dfile) bool {
-	return d != nil && d.f != nil &&
-		(d.fx.unnamed || g.upperAbs == "" || strings.HasPrefix(d.f.Name(), g.upperAbs+string(filepath.Separator)))
+	if d == nil || d.f == nil {
+		return false
+	}
+	if d.fx.unnamed {
+		return true
+	}
+	if d.hf == nil {
+		return false
+	}
+	return g.upperAbs == "" || d.writable()
 }
 
 // inPlaceTarget is the in-place target for an open file (see fdInPlace).
@@ -766,18 +779,52 @@ func (g *dguest) inPlaceTarget(d *dfile) (attrTarget, lxErrno) {
 	return attrTarget{f: d.f, fi: fi}, 0
 }
 
-// setMode gives the target guest permission bits perm (and touches its ctime).
-// The target is always an open descriptor in place (fchmodat/fchownat route a
-// pathname through loc.Node.SetAttr instead), so the mode goes on the fd.
-func (g *dguest) setMode(t attrTarget, perm uint32) lxErrno {
-	if err := hostfs.FchmodOf(t.f, hostPerm(perm, t.fi.IsDir())); err != nil {
-		return osErrno(err)
+// inPlaceSetAttr applies u to an open file's own object without re-resolving a
+// path. A backend file goes through its vfs handle d.hf, which owns the host
+// change and the shared override store (and, for the overlay, copy-up); a
+// supervisor-owned anonymous file (O_TMPFILE, memfd) has no vfs handle, so its
+// host temp and the override store are changed directly, as d.hf would. t is a
+// prior stat of the owned file, unused for a backend file.
+func (g *dguest) inPlaceSetAttr(d *dfile, t attrTarget, u core.AttrUpdate) lxErrno {
+	if d.hf != nil {
+		if err := d.hf.SetAttr(u); err != nil {
+			return osErrno(err)
+		}
+		return 0
 	}
-	k := inodeKey(t.fi)
-	g.ov.update(k, func(m *imeta) {
-		m.hasMode = perm&0o7777 != hostPerm(perm, t.fi.IsDir())
-		m.mode = perm & 0o7777
-	})
+	if u.Mode != nil {
+		if err := hostfs.FchmodOf(t.f, hostPerm(*u.Mode, t.fi.IsDir())); err != nil {
+			return osErrno(err)
+		}
+		g.ov.update(inodeKey(t.fi), func(m *imeta) {
+			m.hasMode = *u.Mode&0o7777 != hostPerm(*u.Mode, t.fi.IsDir())
+			m.mode = *u.Mode & 0o7777
+		})
+	}
+	if u.Uid != nil || u.Gid != nil {
+		g.ov.update(inodeKey(t.fi), func(m *imeta) {
+			if u.Uid != nil {
+				m.uid = *u.Uid
+			}
+			if u.Gid != nil {
+				m.gid = *u.Gid
+			}
+			m.hasOwner = m.uid != 0 || m.gid != 0
+		})
+	}
+	if u.Atime != nil || u.Mtime != nil {
+		st, _ := hostfs.StatOf(t.fi)
+		ats, mts := st.Atime(), st.Mtime()
+		if u.Atime != nil {
+			ats = syscall.NsecToTimespec(*u.Atime)
+		}
+		if u.Mtime != nil {
+			mts = syscall.NsecToTimespec(*u.Mtime)
+		}
+		if err := hostfs.FutimesOf(t.f, ats, mts); err != nil {
+			return osErrno(err)
+		}
+	}
 	return 0
 }
 
@@ -819,7 +866,8 @@ func (g *dguest) fchmodat(dirfd int64, pathAddr uint64, mode uint32, flags int64
 	if t.fi.Mode()&os.ModeSymlink != 0 {
 		return sErr(lxEOPNOTSUPP)
 	}
-	if e := g.setMode(t, mode&0o7777); e != 0 {
+	perm := mode & 0o7777
+	if e := g.inPlaceSetAttr(d, t, core.AttrUpdate{Mode: &perm}); e != 0 {
 		return sErr(e)
 	}
 	g.notify(gp, inAttrib, 0)
@@ -867,7 +915,8 @@ func (g *dguest) fchmod(fd int64, mode uint32) int64 {
 	if e != 0 {
 		return sErr(e)
 	}
-	if e := g.setMode(t, mode&0o7777); e != 0 {
+	perm := mode & 0o7777
+	if e := g.inPlaceSetAttr(d, t, core.AttrUpdate{Mode: &perm}); e != 0 {
 		return sErr(e)
 	}
 	g.notify(d.name(), inAttrib, 0)
@@ -952,15 +1001,13 @@ func (g *dguest) fchownat(dirfd int64, pathAddr uint64, uid, gid uint32, flags i
 	if gid == ^uint32(0) {
 		gid = cur.gid
 	}
+	u := core.AttrUpdate{Uid: &uid, Gid: &gid}
 	if t.fi.Mode()&os.ModeSymlink == 0 {
-		if e := g.setMode(t, perm); e != 0 {
-			return sErr(e)
-		}
+		u.Mode = &perm
 	}
-	g.ov.update(inodeKey(t.fi), func(m *imeta) {
-		m.uid, m.gid = uid, gid
-		m.hasOwner = uid != 0 || gid != 0
-	})
+	if e := g.inPlaceSetAttr(d, t, u); e != 0 {
+		return sErr(e)
+	}
 	g.notify(gp, inAttrib, 0)
 	return 0
 }
@@ -1037,15 +1084,17 @@ func (g *dguest) utimensat(dirfd int64, pathAddr, timesAddr uint64, flags int64)
 	if e != 0 {
 		return sErr(e)
 	}
-	st, _ := hostfs.StatOf(t.fi)
-	if omit[0] {
-		ts[0] = st.Atime()
+	var u core.AttrUpdate
+	if !omit[0] {
+		a := TsNano(ts[0])
+		u.Atime = &a
 	}
-	if omit[1] {
-		ts[1] = st.Mtime()
+	if !omit[1] {
+		m := TsNano(ts[1])
+		u.Mtime = &m
 	}
-	if err := hostfs.FutimesOf(t.f, ts[0], ts[1]); err != nil {
-		return sErr(osErrno(err))
+	if e := g.inPlaceSetAttr(d, t, u); e != 0 {
+		return sErr(e)
 	}
 	g.notify(gp, inAttrib, 0)
 	return 0
@@ -1079,16 +1128,13 @@ func (g *dguest) truncate(pathAddr uint64, length int64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	of, ok := hostOf(f)
-	if !ok {
-		f.Close()
-		return sErr(lxEINVAL)
-	}
-	err = of.Truncate(length)
+	err = f.Truncate(length)
 	if err == nil {
-		g.fileModified(of)
+		if of, ok := hostOf(f); ok {
+			g.fileModified(of) // cool any shared, executable mappings of this file
+		}
 	}
-	of.Close()
+	f.Close()
 	if err != nil {
 		return sErr(osErrno(err))
 	}
@@ -1134,7 +1180,14 @@ func (g *dguest) ftruncate(fd int64, length int64) int64 {
 	if e := d.checkSeals(size, length, false); e != 0 {
 		return sErr(e)
 	}
-	if err := d.f.Truncate(length); err != nil {
+	// A backend file is truncated through its vfs handle (ftruncate needs a
+	// writable fd, so the overlay has already copied it up); a supervisor-owned
+	// anonymous file (O_TMPFILE, memfd) has no handle, so its host temp directly.
+	if d.hf != nil {
+		if err := d.hf.Truncate(length); err != nil {
+			return sErr(osErrno(err))
+		}
+	} else if err := d.f.Truncate(length); err != nil {
 		return sErr(osErrno(err))
 	}
 	g.modified(d)

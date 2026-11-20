@@ -32,6 +32,13 @@ type File interface {
 	io.ReaderAt
 	io.WriterAt
 	Truncate(size int64) error
+	// SetAttr applies the changes in u to the open object, the fd-level twin of
+	// Node.SetAttr: it acts on the handle, not a re-resolved path, so it follows
+	// the inode across a rename or unlink and the sandbox never reaches past the
+	// File to a raw descriptor to change host metadata itself. A backend with a
+	// writable-upper discipline (the overlay) copies up as needed; a read-only
+	// backend reports it cannot. A nil field is left unchanged.
+	SetAttr(u AttrUpdate) error
 	Close() error
 	// Stat reports the open handle's attributes — fstat on this File, not a
 	// re-resolution of any path, so it stays correct after the file is renamed or

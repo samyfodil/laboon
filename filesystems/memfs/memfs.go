@@ -423,4 +423,8 @@ func (h *memFile) Truncate(size int64) error {
 	return nil
 }
 
+// SetAttr changes the open file's metadata on its node, the in-memory inode the
+// handle is a view of.
+func (h *memFile) SetAttr(u AttrUpdate) error { return h.n.SetAttr(u) }
+
 func (h *memFile) Close() error { return nil }
