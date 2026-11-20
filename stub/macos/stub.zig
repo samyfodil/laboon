@@ -30,7 +30,15 @@ const proc = @import("proc.zig");
 const sbcache = @import("sbcache.zig");
 const builtin = @import("builtin");
 const sig = @import("sig.zig");
+const tstate = @import("tstate.zig");
 const life = @import("life.zig");
+
+// The guest syscall instruction the rewriter traps: arm64 `svc` is 4 bytes and
+// is branch-rewritten to an island; x86-64 `syscall` is 2 bytes (too small for a
+// branch) and is overwritten with `ud2` (0f 0b) in place, serviced from the
+// SIGILL mcontext. SITE_DELTA is that instruction's length, so the resume pc
+// minus it is the syscall site (for restart).
+const SITE_DELTA: u64 = if (tstate.arm64) 4 else 2;
 const sfork = @import("sfork.zig");
 const service = @import("service.zig");
 const smaps = @import("smaps.zig");
@@ -76,6 +84,19 @@ const NR_FUTEX: u64 = 98;
 const NR_SET_ROBUST_LIST: u64 = 99;
 const NR_GETTID: u64 = 178;
 const NR_MUNMAP: u64 = 215;
+// x86-64 arch_prctl subfunctions. On x86-64 glibc keeps its thread pointer in
+// %fs, which the stub virtualizes (wrfsbase faults under Rosetta), so the stub
+// serves arch_prctl itself rather than forwarding it.
+const X64_ARCH_PRCTL: u64 = 158;
+const X64_GETTID: u64 = 186;
+const ARCH_SET_GS: u64 = 0x1001;
+const ARCH_SET_FS: u64 = 0x1002;
+const ARCH_GET_FS: u64 = 0x1003;
+const ARCH_GET_GS: u64 = 0x1004;
+// NO_LOCAL is x64gen's answer for a call the stub does not serve in-guest: it
+// matches no local handler, so the call forwards to the supervisor by its raw
+// x86-64 number.
+const NO_LOCAL: u64 = ~@as(u64, 0);
 const STDIO_TRACED: u64 = 1 << 63; // the supervisor set this thread as ptrace-traced
 const NR_VFORK_WAIT: u64 = 0x1_0000_0001; // stub->supervisor only, not a Linux number
 const NR_THREAD_GONE: u64 = 0x1_0000_0002; // a thread ended; no reply expected
@@ -119,6 +140,11 @@ extern "c" fn pthread_exit(value: ?*anyopaque) noreturn;
 extern "c" fn pthread_key_create(key: *c_ulong, destructor: ?*const anyopaque) c_int;
 extern "c" fn pthread_getspecific(key: c_ulong) ?*anyopaque;
 extern "c" fn pthread_setspecific(key: c_ulong, value: ?*const anyopaque) c_int;
+extern "c" fn pthread_sigmask(how: c_int, set: ?*const u32, old: ?*u32) c_int;
+const SIG_UNBLOCK: c_int = 2;
+// The Darwin signals the stub handles (install): SIGILL(4) SIGTRAP(5) SIGFPE(8)
+// SIGBUS(10) SIGSEGV(11) SIGUSR1(30) SIGUSR2(31), as a sigset bitmask (bit n-1).
+const stubSignals: u32 = (1 << 3) | (1 << 4) | (1 << 7) | (1 << 9) | (1 << 10) | (1 << 29) | (1 << 30);
 
 const SIGCHLD: c_int = 20;
 const SIG_IGN: usize = 1; // auto-reap exited children (no zombies) on BSD/macOS
@@ -126,13 +152,23 @@ const SIG_IGN: usize = 1; // auto-reap exited children (no zombies) on BSD/macOS
 // rawGetpid issues the Darwin getpid syscall directly: libc's getpid caches
 // the pid, and the forked child reports its own to the supervisor.
 fn rawGetpid() u64 {
-    return asm volatile (
-        \\ mov x16, #20
-        \\ svc #0x80
-        : [ret] "={x0}" (-> u64),
-        :
-        : "x16", "memory"
-    );
+    if (tstate.arm64) {
+        return asm volatile (
+            \\ mov x16, #20
+            \\ svc #0x80
+            : [ret] "={x0}" (-> u64),
+            :
+            : "x16", "memory"
+        );
+    } else {
+        return asm volatile (
+            \\ movl $0x2000014, %%eax
+            \\ syscall
+            : [ret] "={rax}" (-> u64),
+            :
+            : "rcx", "r11", "memory"
+        );
+    }
 }
 
 const O_RDWR: c_int = 0x0002;
@@ -190,7 +226,20 @@ const seatbelt_profile: [*:0]const u8 =
     \\  (syscall-number SYS_psynch_cvsignal SYS_psynch_cvwait SYS_psynch_cvclrprepost)
     \\  (syscall-number SYS_ulock_wait SYS_ulock_wake SYS_ulock_wait2)
     \\  (syscall-number SYS_fileport_makeport SYS_fileport_makefd SYS_dup2))
-    ++ "\n(deny syscall-mach" ++ sb_kill ++ ")\n" ++
+    ++ mach_profile;
+
+// The Mach allowlist is per-arch. arm64 traps the guest's missed `svc` as the
+// kernel's EXC_BAD_INSTRUCTION backstop and needs only the Mach calls the stub
+// itself makes. x86-64 runs under Rosetta on Apple Silicon, and Rosetta's own
+// exception server delivers the guest's `ud2` trap -- to do so it suspends the
+// faulting thread, reads/writes its state and allocates reply ports, a set an
+// arm64-tuned allowlist omits (the failure is "failed to suspend thread that
+// generated exception" / "failed to allocate runtime msg port"). Allow the Mach
+// layer there; the deny-default and the BSD allowlist still bound file, network,
+// signal and process reach. A native x86-64 mac (no Rosetta) can later use the
+// tight arm64-style list.
+const mach_profile = if (tstate.arm64)
+    "\n(deny syscall-mach" ++ sb_kill ++ ")\n" ++
     \\(allow syscall-mach
     \\  (machtrap-number MSC__kernelrpc_mach_vm_allocate_trap MSC__kernelrpc_mach_vm_deallocate_trap)
     \\  (machtrap-number MSC__kernelrpc_mach_vm_protect_trap MSC__kernelrpc_mach_vm_map_trap)
@@ -205,6 +254,10 @@ const seatbelt_profile: [*:0]const u8 =
     \\  (kernel-mig-routine host_get_clock_service semaphore_create mach_ports_register)
     \\  (kernel-mig-routine mach_ports_lookup task_get_special_port_from_user task_set_special_port)
     \\  (kernel-mig-routine _mach_make_memory_entry mach_vm_map_external))
+else
+    \\
+    \\(allow syscall-mach)
+    \\(allow syscall-mig)
 ;
 
 // noCore drops the core-size limit, soft and hard, to 0: a crashing stub
@@ -273,26 +326,47 @@ fn window(ch: *chan.Chan) [*]u8 {
 // `svc #0x80`; carry set on error with errno in x0.
 fn svc6(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) u64 {
     // Darwin reports a BSD syscall error by setting the carry flag with the
-    // positive errno in x0; Linux returns a negative errno. Negate on carry so
-    // the guest (which expects the Linux convention) detects failures. The
+    // positive errno in x0/rax; Linux returns a negative errno. Negate on carry
+    // so the guest (which expects the Linux convention) detects failures. The
     // errno numbering mostly matches for the calls we forward (EINVAL/ENOMEM/
     // EACCES); a full Darwin->Linux errno map is a later refinement.
-    return asm volatile (
-        \\ mov x16, %[nr]
-        \\ svc #0x80
-        \\ b.cc 1f
-        \\ neg x0, x0
-        \\ 1:
-        : [ret] "={x0}" (-> u64),
-        : [nr] "r" (nr),
-          [a0] "{x0}" (a0),
-          [a1] "{x1}" (a1),
-          [a2] "{x2}" (a2),
-          [a3] "{x3}" (a3),
-          [a4] "{x4}" (a4),
-          [a5] "{x5}" (a5),
-        : "x16", "cc", "memory"
-    );
+    if (tstate.arm64) {
+        return asm volatile (
+            \\ mov x16, %[nr]
+            \\ svc #0x80
+            \\ b.cc 1f
+            \\ neg x0, x0
+            \\ 1:
+            : [ret] "={x0}" (-> u64),
+            : [nr] "r" (nr),
+              [a0] "{x0}" (a0),
+              [a1] "{x1}" (a1),
+              [a2] "{x2}" (a2),
+              [a3] "{x3}" (a3),
+              [a4] "{x4}" (a4),
+              [a5] "{x5}" (a5),
+            : "x16", "cc", "memory"
+        );
+    } else {
+        // x86-64 Darwin BSD syscall: rax = 0x2000000 | nr, args in
+        // rdi/rsi/rdx/r10/r8/r9, result in rax, carry set on error.
+        return asm volatile (
+            \\ orq $0x2000000, %%rax
+            \\ syscall
+            \\ jnc 1f
+            \\ negq %%rax
+            \\ 1:
+            : [ret] "={rax}" (-> u64),
+            : [nr] "{rax}" (nr),
+              [a0] "{rdi}" (a0),
+              [a1] "{rsi}" (a1),
+              [a2] "{rdx}" (a2),
+              [a3] "{r10}" (a3),
+              [a4] "{r8}" (a4),
+              [a5] "{r9}" (a5),
+            : "rcx", "r11", "cc", "memory"
+        );
+    }
 }
 
 // tramp_handler posts the trapped Linux syscall over the channel and services
@@ -308,6 +382,67 @@ export fn tramp_handler(frame: [*]u64) callconv(.C) u64 {
     }
 }
 
+// serveTrap is the x86-64 equivalent of the arm64 island -> tramp_common ->
+// tramp_handler path. There is no saved-register frame or island: the SIGILL
+// from a rewritten `syscall` (now `ud2`) already carried the full guest context
+// in the signal's mcontext. onFault calls this with that mcontext. It projects
+// the registers into the arm64-shaped `frame` the dispatch reads -- args at
+// 0..5, the number at 8, the resume pc at 33 -- serves the syscall, then writes
+// the result into rax and advances past the 2-byte ud2.
+pub fn serveTrap(mc: *std.c.mcontext_t) void {
+    var frame = std.mem.zeroes([proc.FRAME_BYTES / 8]u64);
+    frame[0] = mc.ss.rdi;
+    frame[1] = mc.ss.rsi;
+    frame[2] = mc.ss.rdx;
+    frame[3] = mc.ss.r10;
+    frame[4] = mc.ss.r8;
+    frame[5] = mc.ss.r9;
+    frame[8] = mc.ss.rax; // the syscall number
+    frame[33] = mc.ss.rip + 2; // resume just past the ud2
+    // Capture the full guest register image for the clone/fork child resume
+    // paths (proc.resumeFrame/resumeIsland). XR_RIP is the resume pc, past the
+    // 2-byte ud2, so the child continues after the trapped syscall.
+    frame[proc.XR_RAX] = mc.ss.rax;
+    frame[proc.XR_RBX] = mc.ss.rbx;
+    frame[proc.XR_RCX] = mc.ss.rcx;
+    frame[proc.XR_RDX] = mc.ss.rdx;
+    frame[proc.XR_RSI] = mc.ss.rsi;
+    frame[proc.XR_RDI] = mc.ss.rdi;
+    frame[proc.XR_RBP] = mc.ss.rbp;
+    frame[proc.XR_RSP] = mc.ss.rsp;
+    frame[proc.XR_R8] = mc.ss.r8;
+    frame[proc.XR_R9] = mc.ss.r9;
+    frame[proc.XR_R10] = mc.ss.r10;
+    frame[proc.XR_R11] = mc.ss.r11;
+    frame[proc.XR_R12] = mc.ss.r12;
+    frame[proc.XR_R13] = mc.ss.r13;
+    frame[proc.XR_R14] = mc.ss.r14;
+    frame[proc.XR_R15] = mc.ss.r15;
+    frame[proc.XR_RIP] = mc.ss.rip + 2;
+    frame[proc.XR_RFLAGS] = mc.ss.rflags;
+    // The signal path delivers handlers and applies sigreturn straight onto this
+    // mcontext (there is no arm64 brk-trap context switch); g_sig_delivered then
+    // means the mcontext already holds the handler or restored context.
+    sig.g_sigmc = mc;
+    sig.enter();
+    while (true) {
+        const r = serveSyscall(&frame);
+        if (sig.g_sig_delivered) {
+            sig.g_sig_delivered = false;
+            return; // a sigreturn restored the interrupted context onto mc
+        }
+        if (sig.afterSyscall(&frame, r)) |v| {
+            if (sig.g_sig_delivered) {
+                sig.g_sig_delivered = false;
+                return; // a signal handler was delivered onto mc
+            }
+            mc.ss.rax = v; // the syscall result
+            mc.ss.rip = frame[33]; // resume (a restart leaves frame[33] at the site)
+            return;
+        }
+    }
+}
+
 // localTraced reports a syscall the stub just served in-guest to the supervisor
 // so a traced thread's ptrace stops still fire. Untraced (the common case) it is
 // a no-op returning the result unchanged. Otherwise it publishes the entry
@@ -316,12 +451,13 @@ export fn tramp_handler(frame: [*]u64) callconv(.C) u64 {
 // The call has already run, so a tracer can observe it and rewrite its result,
 // but cannot edit the arguments or suppress it.
 fn localTraced(frame: [*]u64, r: u64) u64 {
+    if (!tstate.arm64) return r; // x86-64 ptrace deferred (not on the startup path)
     const ch = g_chan;
     if (ch.stdio & STDIO_TRACED == 0) return r;
     sig.publishFrame(frame, frame[33]);
     ch.kind = chan.MSG_TRACE_LOCAL;
     ch.nr = frame[8];
-    ch.guest_rip = frame[33] -% 4;
+    ch.guest_rip = frame[33] -% SITE_DELTA;
     ch.args[0] = frame[0];
     ch.args[1] = frame[1];
     ch.args[2] = frame[2];
@@ -332,53 +468,163 @@ fn localTraced(frame: [*]u64, r: u64) u64 {
     return serveReplies(ch, frame);
 }
 
+// x64gen maps an x86-64 syscall number to the asm-generic number the stub's
+// local handlers are keyed by, for the calls the stub serves in-guest (memory,
+// clocks, stdio, futex, thread and process control). It is the in-stub dual of
+// the supervisor's toGeneric; a call the stub does not serve maps to NO_LOCAL
+// and forwards to the supervisor under its raw x86-64 number, which the
+// supervisor translates (so the open-flag and legacy->at argument rewrites
+// happen there, not here). A number the stub serves but x64gen misses forwards
+// and ENOSYSes loudly rather than being mis-served -- the intended failure.
+fn x64gen(nr: u64) u64 {
+    return switch (nr) {
+        0 => 63, // read
+        1 => 64, // write
+        17 => 67, // pread64
+        18 => 68, // pwrite64
+        19 => 65, // readv
+        20 => 66, // writev
+        295 => 69, // preadv
+        296 => 70, // pwritev
+        9 => 222, // mmap
+        10 => 226, // mprotect
+        11 => 215, // munmap
+        12 => 214, // brk
+        25 => 216, // mremap
+        26 => 227, // msync
+        27 => 232, // mincore
+        28 => 233, // madvise
+        149 => 228, // mlock
+        150 => 229, // munlock
+        151 => 230, // mlockall
+        152 => 231, // munlockall
+        325 => 284, // mlock2
+        30 => 196, // shmat
+        67 => 197, // shmdt
+        35 => 101, // nanosleep
+        24 => 124, // sched_yield
+        219 => 128, // restart_syscall
+        228 => 113, // clock_gettime
+        229 => 114, // clock_getres
+        230 => 115, // clock_nanosleep
+        96 => 169, // gettimeofday
+        318 => 278, // getrandom
+        98 => 165, // getrusage
+        309 => 168, // getcpu
+        324 => 283, // membarrier
+        281 => 22, // epoll_pwait
+        202 => 98, // futex
+        273 => 99, // set_robust_list
+        60 => 93, // exit
+        218 => 96, // set_tid_address
+        186 => 178, // gettid
+        // The signal syscalls the stub serves in-guest (sig.handle): the
+        // per-thread mask/altstack/pending/suspend/timedwait/return state.
+        // rt_sigaction (13) is deliberately absent — it forwards to the
+        // supervisor, which records the disposition, on both arches.
+        131 => 132, // sigaltstack
+        130 => 133, // rt_sigsuspend
+        14 => 135, // rt_sigprocmask
+        127 => 136, // rt_sigpending
+        128 => 137, // rt_sigtimedwait
+        15 => 139, // rt_sigreturn
+        else => NO_LOCAL,
+    };
+}
+
+// The guest's x86-64 %fs (and %gs) base. glibc sets %fs through arch_prctl and
+// then reads its TLS as %fs:disp; the physical %fs base cannot be set under
+// Rosetta (wrfsbase faults), so these hold the value the %fs-site handling
+// resolves against. Per thread, like the segment base they stand in for.
+pub threadlocal var g_guest_fsbase: u64 = 0;
+threadlocal var g_guest_gsbase: u64 = 0;
+
+// archPrctl serves an x86-64 arch_prctl(code, addr): it stores or returns the
+// guest's virtual %fs/%gs base. frame[0] is the code, frame[1] the address.
+fn archPrctl(frame: [*]u64) u64 {
+    const addr = frame[1];
+    switch (frame[0]) {
+        ARCH_SET_FS => {
+            g_guest_fsbase = addr;
+            return 0;
+        },
+        ARCH_SET_GS => {
+            g_guest_gsbase = addr;
+            return 0;
+        },
+        ARCH_GET_FS => {
+            @as(*align(1) u64, @ptrFromInt(addr)).* = g_guest_fsbase;
+            return 0;
+        },
+        ARCH_GET_GS => {
+            @as(*align(1) u64, @ptrFromInt(addr)).* = g_guest_gsbase;
+            return 0;
+        },
+        else => return @bitCast(@as(i64, -22)), // EINVAL
+    }
+}
+
 fn serveSyscall(frame: [*]u64) u64 {
     // No tpidr_el0 juggling: the guest's thread pointer lives in a TSD slot (see
     // g_tp_key), reached by the rewritten mrs/msr sites, and libSystem's own TLS
     // rides tpidrro_el0, which the kernel keeps per-thread. The physical
     // tpidr_el0 belongs entirely to Darwin here.
-    if (frame[8] -% sig.NR_SIGALTSTACK <= sig.NR_RT_SIGRETURN - sig.NR_SIGALTSTACK) {
-        if (sig.handle(frame[8], frame)) |r| return localTraced(frame, r);
+    // gen is the asm-generic number the local handlers key on; on arm64 the
+    // guest already issues it, on x86-64 x64gen translates. frame[8] stays the
+    // raw guest number, which the forward path hands the supervisor.
+    const gen = if (tstate.arm64) frame[8] else x64gen(frame[8]);
+    if (!tstate.arm64 and frame[8] == X64_ARCH_PRCTL) return archPrctl(frame);
+    // The signal syscalls that touch only this thread's/process's signal state
+    // are served in-guest on both arches (sigaltstack..rt_sigreturn); x64gen
+    // maps the x86-64 numbers into this asm-generic range. rt_sigaction forwards
+    // to the supervisor (it records the disposition).
+    if (gen -% sig.NR_SIGALTSTACK <= sig.NR_RT_SIGRETURN - sig.NR_SIGALTSTACK) {
+        if (sig.handle(gen, frame)) |r| return localTraced(frame, r);
     }
-    if (frame[8] == NR_MUNMAP and g_exit_sp != 0 and @intFromPtr(frame) -% frame[0] < frame[1]) {
+    if (gen == NR_MUNMAP and g_exit_sp != 0 and @intFromPtr(frame) -% frame[0] < frame[1]) {
         g_unmap = .{ frame[0], frame[1] };
         return 0;
     }
-    switch (frame[8]) {
+    switch (gen) {
         NR_FUTEX => return localTraced(frame, futex.handle(frame[0..6].*)),
         NR_SET_ROBUST_LIST => return localTraced(frame, 0),
         NR_EXIT => if (g_is_thread or g_threads.load(.seq_cst) > 1) threadExit(frame[0]),
         else => {
-            if (stdio.handle(g_chan, frame[8], frame)) |r| return localTraced(frame, r);
-            if (local.handle(frame[8], frame)) |r| return localTraced(frame, r);
+            if (stdio.handle(g_chan, gen, frame)) |r| return localTraced(frame, r);
+            if (local.handle(gen, frame)) |r| return localTraced(frame, r);
             g_frame = frame;
-            if (mem.handle(frame[8], frame)) |r| return localTraced(frame, r);
+            if (mem.handle(gen, frame)) |r| return localTraced(frame, r);
         },
     }
     const ch = g_chan;
     // A traced thread publishes its register frame before posting, so the
     // supervisor's syscall-entry stop and GETREGS see the guest state.
-    if (ch.stdio & STDIO_TRACED != 0) sig.publishFrame(frame, frame[33]);
-    ch.kind = chan.MSG_SYSCALL;
-    ch.nr = frame[8];
-    if (ch.nr == NR_SET_TID_ADDRESS) {
-        // Record the clear-on-exit word here; the supervisor only supplies the
-        // tid, which is what set_tid_address returns.
-        g_ctid = frame[0];
-        ch.nr = NR_GETTID;
+    if (tstate.arm64) {
+        if (ch.stdio & STDIO_TRACED != 0) sig.publishFrame(frame, frame[33]);
     }
-    ch.guest_rip = frame[33] -% 4; // resume pc is at [sp,#264]; the svc site is -4
+    ch.kind = chan.MSG_SYSCALL;
+    ch.nr = frame[8]; // the raw guest number; the supervisor translates it
+    if (gen == NR_SET_TID_ADDRESS) {
+        // Record the clear-on-exit word here; the supervisor only supplies the
+        // tid, which is what set_tid_address returns. Forward as gettid in the
+        // guest's own ABI so the supervisor's translation lands on gettid.
+        g_ctid = frame[0];
+        ch.nr = if (tstate.arm64) NR_GETTID else X64_GETTID;
+    }
+    ch.guest_rip = frame[33] -% SITE_DELTA; // the syscall site is one instruction back
     ch.args[0] = frame[0];
     ch.args[1] = frame[1];
     ch.args[2] = frame[2];
     ch.args[3] = frame[3];
     ch.args[4] = frame[4];
     ch.args[5] = frame[5];
-    ch.ret = mem.outPrefix(ch.nr, frame);
+    ch.ret = mem.outPrefix(gen, frame);
     const r = serveReplies(ch, frame);
     // A tracer may have edited the registers during a stop; apply them before
     // the guest resumes, overriding the syscall result in x0.
-    if (ch.stdio & STDIO_TRACED != 0 and sig.traceState().dirty != 0) return sig.traceRestore(frame);
+    if (tstate.arm64) {
+        if (ch.stdio & STDIO_TRACED != 0 and sig.traceState().dirty != 0) return sig.traceRestore(frame);
+    }
     return r;
 }
 
@@ -470,7 +716,9 @@ fn lcFork(ch: *chan.Chan, frame: [*]u64) u64 {
     const child_off = ch.args[0];
     const flags = ch.args[1];
     const cc: *chan.Chan = @ptrCast(@alignCast(g_base + child_off));
-    const tp = @intFromPtr(pthread_getspecific(g_tp_key));
+    // The guest thread pointer to carry to the child: arm64 keeps it in the
+    // host TSD, x86-64 in the virtualized %fs base (g_guest_fsbase).
+    const tp = if (tstate.arm64) @intFromPtr(pthread_getspecific(g_tp_key)) else g_guest_fsbase;
     const pid = sfork.parent(@intFromPtr(frame), flags, ch.args[2], ch.args[4], ch.args[5], tp);
     if (pid <= 0) {
         // No child: retire the slot the supervisor set up for it.
@@ -505,7 +753,14 @@ fn forkChild(base: [*]u8, child_off: u64, parent_pid: u64, gpid: u64) noreturn {
     g_threads.store(1, .seq_cst);
     g_is_thread = false;
     g_ctid = if (t.flags & CLONE_CHILD_CLEARTID != 0) t.ctid else 0;
-    _ = pthread_setspecific(g_tp_key, @ptrFromInt(if (t.flags & CLONE_SETTLS != 0) t.tls else t.tp));
+    // Restore the guest thread pointer where this arch keeps it: the host TSD
+    // on arm64, the virtualized %fs base on x86-64 (as cloneBootstrap does).
+    const gtls = if (t.flags & CLONE_SETTLS != 0) t.tls else t.tp;
+    if (tstate.arm64) {
+        _ = pthread_setspecific(g_tp_key, @ptrFromInt(gtls));
+    } else {
+        g_guest_fsbase = gtls;
+    }
     cc.kind = chan.MSG_FORKED;
     cc.args[0] = rawGetpid();
     chan.exchange(cc); // supervisor records the pid and replies
@@ -570,8 +825,8 @@ fn lcClone(ch: *chan.Chan, frame: [*]u64) u64 {
     const flags = ch.args[1];
     const h: *CloneHandoff = @ptrCast(@alignCast(malloc(@sizeOf(CloneHandoff)) orelse return cloneFailed(ch.args[0], flags, ch)));
     h.slot = @intFromPtr(g_base) + ch.args[0];
-    h.tls = if (flags & CLONE_SETTLS != 0) ch.args[4] else @intFromPtr(pthread_getspecific(g_tp_key));
-    h.child_stack = if (ch.args[2] != 0) ch.args[2] else @intFromPtr(frame) + FRAME_TOP;
+    h.tls = if (flags & CLONE_SETTLS != 0) ch.args[4] else if (tstate.arm64) @intFromPtr(pthread_getspecific(g_tp_key)) else g_guest_fsbase;
+    h.child_stack = if (ch.args[2] != 0) ch.args[2] else if (tstate.arm64) @intFromPtr(frame) + FRAME_TOP else frame[proc.XR_RSP];
     h.ctid = if (flags & CLONE_CHILD_CLEARTID != 0) ch.args[5] else 0;
     @memcpy(h.frame[0..], frame[0 .. proc.FRAME_BYTES / 8]);
     if (flags & CLONE_PARENT_SETTID != 0) @as(*u32, @ptrFromInt(ch.args[3])).* = @truncate(tid);
@@ -631,7 +886,7 @@ fn vforkSpawn(ch: *chan.Chan, h: *CloneHandoff, tid: u64, frame: [*]u64) u64 {
     const top = @intFromPtr(frame) + FRAME_TOP;
     const stk = malloc(PARK_STACK) orelse return cloneFailed(h.slot - @intFromPtr(g_base), CLONE_VFORK, ch);
     var v = VforkPark{ .ch = ch, .h = h, .lo = 0, .len = 0, .save = undefined, .ok = false };
-    v.lo = asm volatile ("mov %[o], sp"
+    v.lo = asm volatile (if (tstate.arm64) "mov %[o], sp" else "movq %%rsp, %[o]"
         : [o] "=r" (-> u64),
     );
     v.len = top - v.lo;
@@ -650,7 +905,7 @@ fn vforkSpawn(ch: *chan.Chan, h: *CloneHandoff, tid: u64, frame: [*]u64) u64 {
 // return state on that stack rather than the caller's.
 extern fn lc_call_on_stack(arg: *VforkPark, f: *const fn (*VforkPark) callconv(.C) void, sp: u64) void;
 comptime {
-    asm (
+    if (tstate.arm64) asm (
         \\ .text
         \\ .p2align 2
         \\ .globl _lc_call_on_stack
@@ -662,6 +917,13 @@ comptime {
         \\ ldp x9, x30, [sp], #16
         \\ mov sp, x9
         \\ ret
+    ) else asm (
+        // vfork path; not on the x86-64 startup milestone. Trap if ever reached.
+        \\ .text
+        \\ .p2align 4
+        \\ .globl _lc_call_on_stack
+        \\_lc_call_on_stack:
+        \\ ud2
     );
 }
 
@@ -705,6 +967,16 @@ fn lcRewrite(ch: *chan.Chan) void {
 // rewriteSite turns the svc, tpidr_el0 or ctr_el0 access at pc into a b to its
 // island. A word that is none of them (a stray site, or data) is left as it is.
 fn rewriteSite(isl: *Islands, pc: u64) void {
+    if (!tstate.arm64) {
+        // x86-64: the supervisor sends the guest's syscall (0f 05) site
+        // addresses; overwrite each 2-byte syscall in place with ud2 (0f 0b),
+        // which onFault traps and serves (serveTrap). No islands, no sysreg
+        // rewrites (x86-64 TLS is arch_prctl, a serviced syscall). The rewrite
+        // precedes guest execution, so no icache flush is needed.
+        const u: *align(1) u16 = @ptrFromInt(pc);
+        if (u.* == 0x050f) u.* = 0x0b0f;
+        return;
+    }
     const w: *u32 = @ptrFromInt(pc);
     const insn = w.*;
     const n = insn & 0x1f;
@@ -797,6 +1069,23 @@ pub fn threadExit(code: u64) noreturn {
     // The main thread runs on the stack the stub built for the program, which
     // no joiner frees; it finishes where it is.
     if (g_exit_sp == 0) threadExitFinish(g_ctid, code);
+    if (!tstate.arm64) {
+        // Switch to this thread's own libc stack (16-align it, then call pushes
+        // the return slot) and run the teardown there. ctid/code are pinned to
+        // the C-ABI arg registers of threadExitFinish.
+        asm volatile (
+            \\ movq %%rax, %%rsp
+            \\ andq $-16, %%rsp
+            \\ callq *%%rdx
+            :
+            : [sp] "{rax}" (g_exit_sp),
+              [ctid] "{rdi}" (g_ctid),
+              [code] "{rsi}" (code),
+              [f] "{rdx}" (&threadExitFinish),
+            : "memory", "cc"
+        );
+        unreachable;
+    }
     asm volatile (
         \\ mov sp, %[sp]
         \\ mov x0, %[ctid]
@@ -818,6 +1107,18 @@ pub fn threadExit(code: u64) noreturn {
 // A guest thread finishes on its own libc stack, as threadExit does.
 pub fn deadThread() noreturn {
     if (g_exit_sp == 0) deadThreadFinish();
+    if (!tstate.arm64) {
+        asm volatile (
+            \\ movq %%rax, %%rsp
+            \\ andq $-16, %%rsp
+            \\ callq *%%rdx
+            :
+            : [sp] "{rax}" (g_exit_sp),
+              [f] "{rdx}" (&deadThreadFinish),
+            : "memory", "cc"
+        );
+        unreachable;
+    }
     asm volatile (
         \\ mov sp, %[sp]
         \\ bl %[f]
@@ -869,15 +1170,31 @@ fn cloneBootstrap(arg: ?*anyopaque) callconv(.C) ?*anyopaque {
     g_ctid = h.ctid;
     jit.initThread();
     sig.startThread((h.slot - @intFromPtr(g_base)) / chan.SLOT_SIZE);
-    // The guest thread pointer goes in this thread's TSD slot (not the physical
-    // tpidr_el0, which Darwin overwrites on every reschedule). On Linux the
-    // kernel does this from clone's CLONE_SETTLS arg; here we do it explicitly.
-    // The guest's rewritten mrs tpidr_el0 then reads it back.
-    _ = pthread_setspecific(g_tp_key, @ptrFromInt(h.tls));
+    // A clone is served inside onFault (the x86-64 syscall trap is a SIGILL),
+    // so this pthread was created with the handler's mask: SIGILL blocked (plus
+    // the handler sa_mask, USR1/USR2). A guest thread must have the stub's trap
+    // and control signals unblocked at the host level -- the guest's own signal
+    // blocking is virtual (tl.mask), separate from this -- or its ud2 syscall
+    // traps (SIGILL) are never delivered. Reset to a clean host mask. arm64
+    // serves the clone outside any handler, so it is unaffected.
+    if (!tstate.arm64) {
+        var unb: u32 = stubSignals;
+        _ = pthread_sigmask(SIG_UNBLOCK, &unb, null);
+    }
+    // Install the guest thread pointer. On arm64 it goes in this thread's TSD
+    // slot (not the physical tpidr_el0, which Darwin overwrites on every
+    // reschedule); the rewritten mrs tpidr_el0 reads it back. On x86-64 it is
+    // the %fs base this thread's %fs accesses resolve against (clone's
+    // CLONE_SETTLS arg carried it). On Linux the kernel does this from clone.
+    if (tstate.arm64) {
+        _ = pthread_setspecific(g_tp_key, @ptrFromInt(h.tls));
+    } else {
+        g_guest_fsbase = h.tls;
+    }
     // Save this pthread's own stack pointer before switching to the guest's, so
     // thread exit can return to it (see lcThreadExit). The libc stack is left
     // untouched for the thread's whole life and stays valid for pthread_exit.
-    g_exit_sp = asm volatile ("mov %[o], sp"
+    g_exit_sp = asm volatile (if (tstate.arm64) "mov %[o], sp" else "movq %%rsp, %[o]"
         : [o] "=r" (-> u64),
     );
     if (g_chan.stdio & STDIO_TRACED != 0) {
@@ -1011,7 +1328,10 @@ var g_auxids: [4]u64 = .{ 0, 0, 0, 0 };
 // packed FPCR|FPSR<<32 at 256; resume at 264; q0..q31 at 272..784. The island
 // pushed guest x16/x17 at the old sp, now [sp,#784]/[sp,#792].
 pub export fn tramp_common() callconv(.Naked) void {
-    asm volatile (
+    // x86-64 has no island/tramp_common path: a rewritten syscall is a ud2
+    // serviced from the SIGILL mcontext (serveTrap), so this symbol is unused
+    // there and kept as a trap. The arm64 body saves the full guest frame.
+    if (!tstate.arm64) asm volatile ("ud2") else asm volatile (
         \\ sub sp, sp, #784
         \\ stp x0,  x1,  [sp, #0]
         \\ stp x2,  x3,  [sp, #16]
@@ -1450,8 +1770,19 @@ fn mapElf(f: std.fs.File, sites: []const u32, hint: u64) Image {
             if (p_memsz > p_filesz and end % PAGE != 0) @memset(region[end - rb ..][0..@intCast(rdUp(end) - end)], 0);
             continue;
         }
+        // A non-congruent segment is read in rather than mapped. An earlier
+        // congruent segment's mmap, whose length rounds up to Darwin's 16 KiB
+        // page, can leave this segment's first page file-backed by the same fd
+        // (the ELF's 4 KiB segments straddle the coarser page). preadAll copies
+        // straight into place, and a copyout that faults such a page deadlocks:
+        // the read holds the file's vnode lock while servicing the fault needs
+        // it. Read into a heap buffer, then copy in, where the COW fault is
+        // serviced normally (the read lock is already released).
         const seg = region[dst - rb ..][0..@intCast(p_filesz)];
-        if ((f.preadAll(seg, p_off) catch _exit(3)) != seg.len) _exit(3);
+        const tmp = std.heap.page_allocator.alloc(u8, seg.len) catch _exit(3);
+        if ((f.preadAll(tmp, p_off) catch _exit(3)) != tmp.len) _exit(3);
+        @memcpy(seg, tmp);
+        std.heap.page_allocator.free(tmp);
         if (rd32(d, @intCast(ph + 4)) & 1 != 0) syncCode(dst, p_filesz);
     }
     const entry = bias + e_entry;
@@ -1467,10 +1798,20 @@ fn mapElf(f: std.fs.File, sites: []const u32, hint: u64) Image {
     for (sites) |s| rewriteSite(&isl, rb + s);
     isl.seal();
 
-    // Per-segment W^X: each PT_LOAD gets R, R+W or R+X from its flags; the
-    // island area after the image is R+X. These libc/ld.so binaries keep
-    // segments on their own (>=64 KiB-aligned) pages, so 16 KiB Darwin pages
-    // never straddle a permission boundary here.
+    // Per-page W^X. Each 16 KiB Darwin page gets the union of the flags of every
+    // PT_LOAD overlapping it, so a page two segments share -- e.g. the end of
+    // .text and the start of .rodata, only 4 KiB apart in a static-PIE glibc
+    // guest -- keeps every permission either needs, exec included. Darwin's
+    // 16 KiB pages are coarser than the ELF's 4 KiB segment alignment, so this
+    // straddle is normal; protecting segments independently let a later r--
+    // segment drop exec from the shared page (then a never-yet-run instruction
+    // there, like _fini at exit, faulted -- only once the process had threads,
+    // as Rosetta tolerates running a non-exec page single-threaded). The island
+    // area after the image is R+X.
+    const npages: usize = @intCast(imageLen / PAGE);
+    const protmap = std.heap.page_allocator.alloc(u8, npages) catch _exit(6);
+    defer std.heap.page_allocator.free(protmap);
+    @memset(protmap, 0);
     i = 0;
     while (i < e_phnum) : (i += 1) {
         const ph = e_phoff + @as(u64, i) * e_phentsize;
@@ -1478,15 +1819,23 @@ fn mapElf(f: std.fs.File, sites: []const u32, hint: u64) Image {
         const p_flags = rd32(d, @intCast(ph + 4));
         const p_vaddr = rd64(d, @intCast(ph + 16));
         const p_memsz = rd64(d, @intCast(ph + 40));
-        var prot: c_int = PROT_READ;
-        if (p_flags & 1 != 0) {
-            prot |= PROT_EXEC;
-        } else if (p_flags & 2 != 0) {
-            prot |= PROT_WRITE;
+        var prot: u8 = @intCast(PROT_READ);
+        if (p_flags & 1 != 0) prot |= @intCast(PROT_EXEC);
+        if (p_flags & 2 != 0) prot |= @intCast(PROT_WRITE);
+        var pg: usize = @intCast((rdDown(p_vaddr) - minbase) / PAGE);
+        const pgEnd: usize = @intCast((rdUp(p_vaddr + p_memsz) - minbase) / PAGE);
+        while (pg < pgEnd) : (pg += 1) protmap[pg] |= prot;
+    }
+    var pg: usize = 0;
+    while (pg < npages) {
+        if (protmap[pg] == 0) {
+            pg += 1;
+            continue; // a gap between segments: left R+W, as the initial mmap
         }
-        const segLo = bias + rdDown(p_vaddr);
-        const segLen = rdUp(p_vaddr + p_memsz) - rdDown(p_vaddr);
-        if (mprotect(@ptrFromInt(segLo), segLen, prot) != 0) _exit(6);
+        var run = pg + 1;
+        while (run < npages and protmap[run] == protmap[pg]) run += 1;
+        if (mprotect(@ptrFromInt(rb + pg * PAGE), (run - pg) * PAGE, @intCast(protmap[pg])) != 0) _exit(6);
+        pg = run;
     }
     if (mprotect(@ptrFromInt(rb + imageLen), ISLAND_CAP, PROT_READ | PROT_EXEC) != 0) _exit(6);
 
@@ -1578,17 +1927,34 @@ const LC_EXEC_STOP: u64 = 0x4c430018; // sandbox/lx_signal.go lxExecStop
 // target, matching the Linux stub's enter (stub/zig/aarch64.zig).
 fn enterGuest(entry: u64, sp: u64) noreturn {
     sig.enterGuest();
-    asm volatile (
-        \\ mov sp, x1
-        \\ mov x0, xzr
-        \\ mov x29, xzr
-        \\ mov x30, xzr
-        \\ br x2
-        :
-        : [sp] "{x1}" (sp),
-          [entry] "{x2}" (entry),
-        : "memory"
-    );
+    if (tstate.arm64) {
+        asm volatile (
+            \\ mov sp, x1
+            \\ mov x0, xzr
+            \\ mov x29, xzr
+            \\ mov x30, xzr
+            \\ br x2
+            :
+            : [sp] "{x1}" (sp),
+              [entry] "{x2}" (entry),
+            : "memory"
+        );
+    } else {
+        // x86-64 exec ABI: %rdx is the dynamic linker's rtld_fini, which glibc's
+        // _start registers as an exit callback when nonzero -- a stale host value
+        // there faults at exit (as x0 did on arm64; see [[macos-port]]). sp and
+        // entry ride r8/r9 so zeroing rdx/rbp cannot clobber the branch target.
+        asm volatile (
+            \\ movq %%r8, %%rsp
+            \\ xorl %%edx, %%edx
+            \\ xorl %%ebp, %%ebp
+            \\ jmpq *%%r9
+            :
+            : [sp] "{r8}" (sp),
+              [entry] "{r9}" (entry),
+            : "memory"
+        );
+    }
     unreachable;
 }
 

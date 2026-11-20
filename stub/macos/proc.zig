@@ -4,6 +4,43 @@
 // other thread of this task).
 
 const std = @import("std");
+const tstate = @import("tstate.zig");
+
+// x86-64 full register image, captured by serveTrap into the dispatch frame so a
+// clone/fork child (resumeFrame/resumeIsland) can restore the exact guest
+// register state. The arm64-shaped dispatch uses frame[0..5]=args, [8]=nr,
+// [33]=resume; these higher slots are free on x86-64 (arm64 keeps q0..q31
+// there). The asm below uses literal byte offsets (slot*8) — kept in sync by
+// the comptime checks.
+pub const XR_RAX = 50;
+pub const XR_RBX = 51;
+pub const XR_RCX = 52;
+pub const XR_RDX = 53;
+pub const XR_RSI = 54;
+pub const XR_RDI = 55;
+pub const XR_RBP = 56;
+pub const XR_RSP = 57;
+pub const XR_R8 = 58;
+pub const XR_R9 = 59;
+pub const XR_R10 = 60;
+pub const XR_R11 = 61;
+pub const XR_R12 = 62;
+pub const XR_R13 = 63;
+pub const XR_R14 = 64;
+pub const XR_R15 = 65;
+pub const XR_RIP = 66;
+pub const XR_RFLAGS = 67;
+
+comptime {
+    if (!tstate.arm64) {
+        if (XR_RBX * 8 != 408 or XR_RDX * 8 != 424 or XR_RSI * 8 != 432 or
+            XR_RDI * 8 != 440 or XR_RBP * 8 != 448 or XR_RSP * 8 != 456 or
+            XR_R8 * 8 != 464 or XR_R9 * 8 != 472 or XR_R10 * 8 != 480 or
+            XR_R12 * 8 != 496 or XR_R13 * 8 != 504 or XR_R14 * 8 != 512 or
+            XR_R15 * 8 != 520 or XR_RIP * 8 != 528)
+            @compileError("XR_* slot offsets diverged from the resume asm literals");
+    }
+}
 
 const NR_GETRUSAGE: u64 = 165;
 const NR_GETCPU: u64 = 168;
@@ -23,6 +60,35 @@ fn neg(e: i64) u64 {
 // x0 = 0: what a clone child sees on Linux. x16 carries the branch and is not
 // restored, as on the trampoline's own return path.
 pub fn resumeFrame(frame: [*]const u64, sp: u64) callconv(.C) noreturn {
+    if (!tstate.arm64) {
+        // x86-64 clone child: restore the captured register image (r11 = frame
+        // base, scratch; the guest treats rcx/r11 as syscall-clobbered), switch
+        // to the child stack, zero rax (the clone return the child sees) and
+        // jump past the trapped syscall. The child stack is not touched (the
+        // jump is indirect through memory), so glibc's fn/arg at its top survive.
+        asm volatile (
+            \\ movq %%rcx, %%rsp
+            \\ movq 408(%%r11), %%rbx
+            \\ movq 424(%%r11), %%rdx
+            \\ movq 432(%%r11), %%rsi
+            \\ movq 440(%%r11), %%rdi
+            \\ movq 448(%%r11), %%rbp
+            \\ movq 464(%%r11), %%r8
+            \\ movq 472(%%r11), %%r9
+            \\ movq 480(%%r11), %%r10
+            \\ movq 496(%%r11), %%r12
+            \\ movq 504(%%r11), %%r13
+            \\ movq 512(%%r11), %%r14
+            \\ movq 520(%%r11), %%r15
+            \\ xorl %%eax, %%eax
+            \\ cld
+            \\ jmpq *528(%%r11)
+            :
+            : [frame] "{r11}" (frame),
+              [sp] "{rcx}" (sp),
+        );
+        unreachable;
+    }
     asm volatile (
         \\ mov x16, x0
         \\ ldp q0,  q1,  [x16, #272]
@@ -83,6 +149,32 @@ pub const FRAME_BYTES: usize = 784;
 // fresh stub resumes this way at the fork's return.
 pub fn resumeIsland(frame: [*]u64) callconv(.C) noreturn {
     frame[0] = 0;
+    if (!tstate.arm64) {
+        // x86-64 fork child (a fresh stub): restore the captured image and
+        // resume on the guest's own rsp at the fork (the child shares the
+        // parent's address space layout), with rax = 0.
+        asm volatile (
+            \\ movq 456(%%r11), %%rsp
+            \\ movq 408(%%r11), %%rbx
+            \\ movq 424(%%r11), %%rdx
+            \\ movq 432(%%r11), %%rsi
+            \\ movq 440(%%r11), %%rdi
+            \\ movq 448(%%r11), %%rbp
+            \\ movq 464(%%r11), %%r8
+            \\ movq 472(%%r11), %%r9
+            \\ movq 480(%%r11), %%r10
+            \\ movq 496(%%r11), %%r12
+            \\ movq 504(%%r11), %%r13
+            \\ movq 512(%%r11), %%r14
+            \\ movq 520(%%r11), %%r15
+            \\ xorl %%eax, %%eax
+            \\ cld
+            \\ jmpq *528(%%r11)
+            :
+            : [frame] "{r11}" (frame),
+        );
+        unreachable;
+    }
     asm volatile (
         \\ mov sp, x0
         \\ ldp q0,  q1,  [sp, #272]
@@ -165,7 +257,7 @@ pub fn resetOnExec() void {
 // save its state), the same trick .NET's FlushProcessWriteBuffers uses on
 // Apple Silicon, where a TLB shootdown sends no IPI.
 fn barrierAllThreads() bool {
-    asm volatile ("dmb ish" ::: "memory");
+    asm volatile (if (tstate.arm64) "dmb ish" else "mfence" ::: "memory");
     const task = mach_task_self();
     var list: [*]mach_port_t = undefined;
     var count: c_uint = 0;
@@ -183,7 +275,7 @@ fn barrierAllThreads() bool {
     }
     _ = mach_port_deallocate(task, self);
     _ = vm_deallocate(task, @intFromPtr(list), count * @sizeOf(mach_port_t));
-    asm volatile ("dmb ish" ::: "memory");
+    asm volatile (if (tstate.arm64) "dmb ish" else "mfence" ::: "memory");
     return true;
 }
 

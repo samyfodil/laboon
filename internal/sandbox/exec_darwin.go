@@ -124,8 +124,21 @@ func (g *dguest) execve(dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	return true
 }
 
-// elfMachine is the guest's machine: the darwin backend runs arm64 Linux.
+// elfMachine is the darwin backend's native guest machine. The backend also
+// hosts the other architecture's guest (an x86-64 guest under Rosetta on Apple
+// Silicon), detected per guest by guestIsX64, not by this constant.
 const elfMachine = elf.EM_AARCH64
+
+// guestIsX64 reports whether the guest ELF at path is x86-64 (so it runs in the
+// x86-64 stub, under Rosetta on an arm64 host), rather than the native machine.
+func guestIsX64(path string) (bool, error) {
+	f, err := elf.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	return f.Machine == elf.EM_X86_64, nil
+}
 
 // execSrc is the host path of the ELF an execve runs.
 type execSrc = string
@@ -180,7 +193,8 @@ func execHead(host string) ([]byte, lxErrno) {
 // shared channel file, the run's process group (teardown kills it whole) and
 // the run's stdio.
 type runInfo struct {
-	stub, hvfStub, chanPath string // stub = native (map+rewrite); hvfStub = VM (HVF)
+	stub, hvfStub, chanPath string // stub = the guest's map+rewrite stub; hvfStub = VM (HVF)
+	x64                     bool   // the guest is x86-64 (runs in the x86-64 stub, under Rosetta on Apple Silicon)
 	pgid                    int
 	stdin, stdout, stderr   *os.File
 	mainGone                func(error) // pid 1's stub is gone: the run is over

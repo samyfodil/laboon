@@ -28,6 +28,9 @@ const wx = @import("wx.zig");
 const ool = @import("ool.zig");
 const hwcap = @import("hwcap.zig");
 const service = @import("service.zig");
+const tstate = @import("tstate.zig");
+const proc = @import("proc.zig");
+const fsmem = @import("fsmem.zig");
 
 pub const AREA_OFF: usize = chan.SLOT_SIZE * chan.MAX_SLOTS;
 pub const STRIDE: usize = 0x4000;
@@ -86,11 +89,13 @@ pub const NR_RT_SIGPENDING: u64 = 136;
 pub const NR_RT_SIGTIMEDWAIT: u64 = 137;
 pub const NR_RT_SIGRETURN: u64 = 139;
 const NR_RESTART_SYSCALL: u64 = 128;
-const NR_WRITE: u64 = 64;
-const NR_WRITEV: u64 = 66;
-const NR_SENDTO: u64 = 206;
-const NR_SENDMSG: u64 = 211;
-const NR_SENDMMSG: u64 = 269;
+// epipeRaises matches these against frame[8], which is the raw guest number
+// (asm-generic on arm64, x86-64 on x86-64), not the translated dispatch number.
+const NR_WRITE: u64 = if (tstate.arm64) 64 else 1;
+const NR_WRITEV: u64 = if (tstate.arm64) 66 else 20;
+const NR_SENDTO: u64 = if (tstate.arm64) 206 else 44;
+const NR_SENDMSG: u64 = if (tstate.arm64) 211 else 46;
+const NR_SENDMMSG: u64 = if (tstate.arm64) 269 else 307;
 const LC_SIGDIE: u64 = 0x4c430010; // after mem.zig's 0x4c4300xx
 const LC_SIGSTOP: u64 = 0x4c430011;
 const LC_SIGTAKE: u64 = 0x4c430012;
@@ -154,7 +159,7 @@ const ERESTART_RESTARTBLOCK: i64 = 516;
 
 const KILLSTOP: u64 = bit(SIGKILL) | bit(SIGSTOP);
 
-// rt_sigframe: siginfo (128) + ucontext (4560); the sigcontext sits at
+// arm64 rt_sigframe: siginfo (128) + ucontext (4560); the sigcontext sits at
 // ucontext+176 and its __reserved area at sigcontext+288.
 const FRAME_SIZE: u64 = 128 + 4560;
 const UC_MCONTEXT: u64 = 176;
@@ -162,6 +167,12 @@ const SC_RESERVED: u64 = 288;
 const FPSIMD_MAGIC: u32 = 0x46508001;
 const FPSIMD_SIZE: u32 = 528;
 const ESR_MAGIC: u32 = 0x45535201;
+
+// x86-64 Linux user segment selectors (__USER_CS / __USER_DS); the stub's
+// sigreturn forces them, as the kernel does, so they are only cosmetic in the
+// frame.
+const USER_CS: u16 = 0x33;
+const USER_SS: u16 = 0x2b;
 
 // Darwin.
 const DW_SIGILL: c_int = 4;
@@ -186,6 +197,10 @@ const DwStack = extern struct { sp: u64, size: u64, flags: c_int };
 extern "c" fn sigaction(sig: c_int, act: *const DwSigaction, old: ?*DwSigaction) c_int;
 extern "c" fn signal(sig: c_int, handler: usize) usize;
 extern "c" fn sigaltstack(ss: *const DwStack, old: ?*DwStack) c_int;
+extern "c" fn pthread_sigmask(how: c_int, set: ?*const u32, old: ?*u32) c_int;
+const SIG_UNBLOCK: c_int = 2;
+const SIG_SETMASK: c_int = 3;
+const KICK_MASK: u32 = (1 << (DW_SIGUSR1 - 1)) | (1 << (DW_SIGUSR2 - 1));
 extern "c" fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) ?*anyopaque;
 extern "c" fn pthread_self() usize;
 extern "c" fn pthread_mach_thread_np(t: usize) c_uint;
@@ -193,8 +208,13 @@ extern "c" fn _exit(code: c_int) noreturn;
 extern "c" fn sched_yield() c_int;
 
 // Ctx is a guest thread's full user state, the currency between the trap frame,
-// the Darwin signal context and the Linux sigcontext.
-pub const Ctx = extern struct {
+// the Darwin signal context and the Linux sigcontext. Its shape is per-arch (the
+// register file and FP state differ); fromMc/toMc/deliverOnto map it to the
+// Darwin mcontext and the Linux sigcontext field by field, so its own layout is
+// private to the stub.
+pub const Ctx = if (tstate.arm64) CtxArm else CtxX64;
+
+const CtxArm = extern struct {
     x: [31]u64,
     sp: u64,
     pc: u64,
@@ -204,6 +224,37 @@ pub const Ctx = extern struct {
     fpcr: u32,
     fault: u64,
     esr: u64,
+};
+
+const CtxX64 = extern struct {
+    rax: u64,
+    rbx: u64,
+    rcx: u64,
+    rdx: u64,
+    rsi: u64,
+    rdi: u64,
+    rbp: u64,
+    rsp: u64,
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    rip: u64,
+    rflags: u64,
+    // FP/SSE state as the 512-byte FXSAVE image, the common currency between
+    // Darwin's x86_float_state64 and Linux's _fpstate (both FXSAVE-derived);
+    // fromMc/toMc (phase 1c) convert at the edges.
+    fx: [512]u8 align(16),
+    // Fault detail for a delivered SIGSEGV/SIGBUS/SIGILL, the x86-64 analogue of
+    // arm64's fault/esr: the faulting address and the trap number / error code
+    // (es.faultvaddr / es.trapno / es.err).
+    fault: u64,
+    trapno: u64,
+    err: u64,
 };
 
 var g_area: [*]u8 = undefined;
@@ -270,9 +321,39 @@ fn procOf(t: *Thread) *Proc {
 // Trace frame: the guest register image a tracer reads, published at offset 256
 // of this thread's record (past the Thread struct, before PROC_OFF). The layout
 // matches the Linux stub's trace.State and the supervisor's traceFrame: a kind
-// and dirty word, then the arm64 NT_PRSTATUS registers (x0..x30, sp, pc,
-// pstate).
-pub const TraceRegs = extern struct { x: [31]u64, sp: u64, pc: u64, pstate: u64 };
+// and dirty word, then the arch's ptrace register image — arm64 NT_PRSTATUS
+// (x0..x30, sp, pc, pstate) or the x86-64 user_regs_struct.
+pub const TraceRegs = if (tstate.arm64) TraceRegsArm else TraceRegsX64;
+const TraceRegsArm = extern struct { x: [31]u64, sp: u64, pc: u64, pstate: u64 };
+const TraceRegsX64 = extern struct {
+    r15: u64,
+    r14: u64,
+    r13: u64,
+    r12: u64,
+    rbp: u64,
+    rbx: u64,
+    r11: u64,
+    r10: u64,
+    r9: u64,
+    r8: u64,
+    rax: u64,
+    rcx: u64,
+    rdx: u64,
+    rsi: u64,
+    rdi: u64,
+    orig_rax: u64,
+    rip: u64,
+    cs: u64,
+    eflags: u64,
+    rsp: u64,
+    ss: u64,
+    fs_base: u64,
+    gs_base: u64,
+    ds: u64,
+    es: u64,
+    fs: u64,
+    gs: u64,
+};
 pub const TraceState = extern struct { kind: u64, dirty: u64, regs: TraceRegs };
 
 comptime {
@@ -288,6 +369,7 @@ pub fn traceState() *TraceState {
 // plus the island's two 16-byte pushes), the resume pc, and NZCV. The
 // supervisor reads this for the syscall stop and GETREGS.
 pub fn publishFrame(frame: [*]u64, pc: u64) void {
+    if (!tstate.arm64) @compileError("publishFrame: x86-64 frame image pending the trampoline register frame (AMD64.md 1e/1f)");
     const s = traceState();
     s.kind = 1;
     s.dirty = 0;
@@ -304,6 +386,7 @@ pub fn publishFrame(frame: [*]u64, pc: u64) void {
 // The guest sp cannot be moved here (the frame sits on it), matching the
 // supervisor's refusal to relocate it.
 pub fn traceRestore(frame: [*]u64) u64 {
+    if (!tstate.arm64) @compileError("traceRestore: x86-64 frame image pending the trampoline register frame (AMD64.md 1e/1f)");
     const s = traceState();
     s.dirty = 0;
     for (1..31) |i| frame[i] = s.regs.x[i];
@@ -386,7 +469,7 @@ pub fn cpSys(nr: u64, a: [6]u64) i64 {
 }
 
 comptime {
-    asm (
+    if (tstate.arm64) asm (
         \\ .text
         \\ .p2align 2
         \\ .globl _lc_cp_sys
@@ -408,6 +491,36 @@ comptime {
         \\2:
         \\ mov x0, #-4
         \\ ret
+    ) else asm (
+        // x86-64: C args a0..a5 in rdi,rsi,rdx,rcx,r8,r9; kicked at 8(%rsp), nr
+        // at 16(%rsp). A Darwin BSD syscall wants rax=class|nr and arg4 in r10
+        // (not rcx). On return CF=error, rax=errno; negate it as the arm64 path
+        // does. VERIFY ON MAC.
+        \\ .text
+        \\ .p2align 4
+        \\ .globl _lc_cp_sys
+        \\ .globl _lc_cp_begin
+        \\ .globl _lc_cp_end
+        \\ .globl _lc_cp_cancel
+        \\_lc_cp_sys:
+        \\ movq 16(%rsp), %rax
+        \\ orq $0x2000000, %rax
+        \\ movq %rcx, %r10
+        \\ movq 8(%rsp), %rcx
+        \\_lc_cp_begin:
+        \\ cmpl $0, (%rcx)
+        \\ jne 2f
+        \\ syscall
+        \\_lc_cp_end:
+        \\ jc 1f
+        \\ ret
+        \\1:
+        \\ negq %rax
+        \\ ret
+        \\_lc_cp_cancel:
+        \\2:
+        \\ movq $-4, %rax
+        \\ ret
     );
 }
 extern fn lc_cp_sys(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, kicked: *const u32, nr: u64) callconv(.C) i64;
@@ -417,9 +530,9 @@ extern fn lc_cp_cancel() callconv(.C) void;
 
 // cpCancel moves a kick that interrupted lc_cp_sys before its svc to the
 // cancelled exit.
-fn cpCancel(mc: anytype) void {
-    const pc = mc.ss.pc;
-    if (pc >= @intFromPtr(&lc_cp_begin) and pc < @intFromPtr(&lc_cp_end)) mc.ss.pc = @intFromPtr(&lc_cp_cancel);
+fn cpCancel(mc: *std.c.mcontext_t) void {
+    const pc = tstate.pc(mc);
+    if (pc >= @intFromPtr(&lc_cp_begin) and pc < @intFromPtr(&lc_cp_end)) tstate.setPc(mc, @intFromPtr(&lc_cp_cancel));
 }
 
 // setBusy orders busy against this thread's own signal handlers only, which
@@ -550,6 +663,7 @@ fn stopSelf(sig: u32) void {
 // 248, FPCR|FPSR<<32 at 256, q0..q31 at 272; the guest sp is the frame plus the
 // 784-byte frame and the island's two 16-byte pushes.
 fn fromFrame(c: *Ctx, frame: [*]u64, x0: u64, pc: u64) void {
+    if (!tstate.arm64) return; // x86-64 serves from the mcontext, not a saved frame
     for (0..31) |i| c.x[i] = frame[i];
     c.x[0] = x0;
     c.sp = @intFromPtr(frame) + 816;
@@ -564,30 +678,85 @@ fn fromFrame(c: *Ctx, frame: [*]u64, x0: u64, pc: u64) void {
 }
 
 fn fromMc(c: *Ctx, mc: *const std.c.mcontext_t) void {
-    for (0..29) |i| c.x[i] = mc.ss.regs[i];
-    c.x[29] = mc.ss.fp;
-    c.x[30] = mc.ss.lr;
-    c.sp = mc.ss.sp;
-    c.pc = ool.guestPc(tl.slot, mc.ss.pc); // run out of line: the guest's own
-    for (ool.release(tl.slot, mc.ss.pc)) |h| wx.letGo(h);
-    c.pstate = mc.ss.cpsr & 0xf0000000;
-    c.v = mc.ns.q;
-    c.fpsr = mc.ns.fpsr;
-    c.fpcr = mc.ns.fpcr;
-    c.fault = mc.es.far;
-    c.esr = mc.es.esr;
+    if (tstate.arm64) {
+        for (0..29) |i| c.x[i] = mc.ss.regs[i];
+        c.x[29] = mc.ss.fp;
+        c.x[30] = mc.ss.lr;
+        c.sp = mc.ss.sp;
+        c.pc = ool.guestPc(tl.slot, mc.ss.pc); // run out of line: the guest's own
+        for (ool.release(tl.slot, mc.ss.pc)) |h| wx.letGo(h);
+        c.pstate = mc.ss.cpsr & 0xf0000000;
+        c.v = mc.ns.q;
+        c.fpsr = mc.ns.fpsr;
+        c.fpcr = mc.ns.fpcr;
+        c.fault = mc.es.far;
+        c.esr = mc.es.esr;
+    } else {
+        c.rax = mc.ss.rax;
+        c.rbx = mc.ss.rbx;
+        c.rcx = mc.ss.rcx;
+        c.rdx = mc.ss.rdx;
+        c.rsi = mc.ss.rsi;
+        c.rdi = mc.ss.rdi;
+        c.rbp = mc.ss.rbp;
+        c.rsp = mc.ss.rsp;
+        c.r8 = mc.ss.r8;
+        c.r9 = mc.ss.r9;
+        c.r10 = mc.ss.r10;
+        c.r11 = mc.ss.r11;
+        c.r12 = mc.ss.r12;
+        c.r13 = mc.ss.r13;
+        c.r14 = mc.ss.r14;
+        c.r15 = mc.ss.r15;
+        // The guest's own rip: the x86-64 out-of-line layer (phase 3) must map a
+        // relocated copy's rip back here, as arm64's ool.guestPc does above;
+        // until it exists the Darwin rip is the guest rip.
+        c.rip = mc.ss.rip;
+        c.rflags = mc.ss.rflags;
+        // Darwin's float_state is the FXSAVE image behind an 8-byte reserved
+        // prefix (fcw onward is 512 bytes); Linux's _fpstate is FXSAVE-shaped
+        // too. The FIP/FDP form wants confirming on the mac.
+        const fxsrc: *const [512]u8 = @ptrCast(@as([*]const u8, @ptrCast(&mc.fs)) + 8);
+        c.fx = fxsrc.*;
+        c.fault = mc.es.faultvaddr;
+        c.trapno = mc.es.trapno;
+        c.err = mc.es.err;
+    }
 }
 
 fn toMc(mc: *std.c.mcontext_t, c: *const Ctx) void {
-    for (0..29) |i| mc.ss.regs[i] = c.x[i];
-    mc.ss.fp = c.x[29];
-    mc.ss.lr = c.x[30];
-    mc.ss.sp = c.sp;
-    mc.ss.pc = c.pc;
-    mc.ss.cpsr = (mc.ss.cpsr & 0x0fffffff) | @as(u32, @truncate(c.pstate & 0xf0000000));
-    mc.ns.q = c.v;
-    mc.ns.fpsr = c.fpsr;
-    mc.ns.fpcr = c.fpcr;
+    if (tstate.arm64) {
+        for (0..29) |i| mc.ss.regs[i] = c.x[i];
+        mc.ss.fp = c.x[29];
+        mc.ss.lr = c.x[30];
+        mc.ss.sp = c.sp;
+        mc.ss.pc = c.pc;
+        mc.ss.cpsr = (mc.ss.cpsr & 0x0fffffff) | @as(u32, @truncate(c.pstate & 0xf0000000));
+        mc.ns.q = c.v;
+        mc.ns.fpsr = c.fpsr;
+        mc.ns.fpcr = c.fpcr;
+    } else {
+        mc.ss.rax = c.rax;
+        mc.ss.rbx = c.rbx;
+        mc.ss.rcx = c.rcx;
+        mc.ss.rdx = c.rdx;
+        mc.ss.rsi = c.rsi;
+        mc.ss.rdi = c.rdi;
+        mc.ss.rbp = c.rbp;
+        mc.ss.rsp = c.rsp;
+        mc.ss.r8 = c.r8;
+        mc.ss.r9 = c.r9;
+        mc.ss.r10 = c.r10;
+        mc.ss.r11 = c.r11;
+        mc.ss.r12 = c.r12;
+        mc.ss.r13 = c.r13;
+        mc.ss.r14 = c.r14;
+        mc.ss.r15 = c.r15;
+        mc.ss.rip = c.rip;
+        mc.ss.rflags = c.rflags;
+        const fxdst: *[512]u8 = @ptrCast(@as([*]u8, @ptrCast(&mc.fs)) + 8);
+        fxdst.* = c.fx;
+    }
 }
 
 fn onStack(t: *Thread, sp: u64) bool {
@@ -606,7 +775,7 @@ fn rd(comptime T: type, addr: u64) T {
 // the rest, and returns 0, or 1 when a guest address faults: onFault resumes a
 // fault inside it at lc_copy_fault.
 comptime {
-    asm (
+    if (tstate.arm64) asm (
         \\ .text
         \\ .p2align 2
         \\ .globl _lc_copy
@@ -640,6 +809,31 @@ comptime {
         \\ .globl _lc_load32_fault
         \\_lc_load32_fault:
         \\ mov x0, #-1
+        \\ ret
+    ) else asm (
+        // x86-64: dst=rdi, src=rsi, n=rdx. rep movsb, DF cleared (a guest may
+        // have set it). The _fault labels are the resume points onFault uses
+        // when a copy touches an unmapped guest address.
+        \\ .text
+        \\ .p2align 4
+        \\ .globl _lc_copy
+        \\_lc_copy:
+        \\ cld
+        \\ movq %rdx, %rcx
+        \\ rep movsb
+        \\ xorl %eax, %eax
+        \\ ret
+        \\ .globl _lc_copy_fault
+        \\_lc_copy_fault:
+        \\ movq $1, %rax
+        \\ ret
+        \\ .globl _lc_load32
+        \\_lc_load32:
+        \\ movl (%rdi), %eax
+        \\ ret
+        \\ .globl _lc_load32_fault
+        \\_lc_load32_fault:
+        \\ movq $-1, %rax
         \\ ret
     );
 }
@@ -684,75 +878,158 @@ pub fn putTimespec(addr: u64, ts: [2]i64) bool {
 // does. uc_mask is the mask the handler's sigreturn restores.
 fn deliverOnto(c: *Ctx, sig: u32, info: *const Info, act: Act, uc_mask: u64, fault: bool) void {
     const t = thr();
-    var sp = c.sp;
-    const on = onStack(t, sp);
-    const ss_sp = t.ss_sp;
-    const ss_size = t.ss_size;
-    var ss_flags: u32 = if (ss_size == 0) SS_DISABLE else if (on) SS_ONSTACK else 0;
-    ss_flags |= t.ss_flags;
-    if (act.flags & SA_ONSTACK != 0 and ss_size != 0 and !on) {
-        sp = ss_sp + ss_size;
-        if (t.ss_flags & SS_AUTODISARM != 0) {
-            t.ss_sp = 0;
-            t.ss_size = 0;
-            t.ss_flags = 0;
+    if (tstate.arm64) {
+        var sp = c.sp;
+        const on = onStack(t, sp);
+        const ss_sp = t.ss_sp;
+        const ss_size = t.ss_size;
+        var ss_flags: u32 = if (ss_size == 0) SS_DISABLE else if (on) SS_ONSTACK else 0;
+        ss_flags |= t.ss_flags;
+        if (act.flags & SA_ONSTACK != 0 and ss_size != 0 and !on) {
+            sp = ss_sp + ss_size;
+            if (t.ss_flags & SS_AUTODISARM != 0) {
+                t.ss_sp = 0;
+                t.ss_size = 0;
+                t.ss_flags = 0;
+            }
         }
+        sp = (sp - 16) & ~@as(u64, 15);
+        const rec = sp;
+        wr(u64, rec, c.x[29]);
+        wr(u64, rec + 8, c.x[30]);
+        const fr = (sp - FRAME_SIZE) & ~@as(u64, 15);
+
+        @memset(@as([*]u8, @ptrFromInt(fr))[0..128], 0);
+        wr(i32, fr, @intCast(sig));
+        wr(i32, fr + 4, info.errno);
+        wr(i32, fr + 8, info.code);
+        wr(u64, fr + 16, info.a);
+        wr(u64, fr + 24, info.b);
+
+        const uc = fr + 128;
+        wr(u64, uc, 0); // uc_flags
+        wr(u64, uc + 8, 0); // uc_link
+        wr(u64, uc + 16, ss_sp);
+        wr(u32, uc + 24, ss_flags);
+        wr(u32, uc + 28, 0);
+        wr(u64, uc + 32, ss_size);
+        wr(u64, uc + 40, uc_mask);
+        @memset(@as([*]u8, @ptrFromInt(uc + 48))[0 .. UC_MCONTEXT - 48], 0);
+        const mc = uc + UC_MCONTEXT;
+        wr(u64, mc, if (fault) c.fault else 0);
+        for (0..31) |i| wr(u64, mc + 8 + i * 8, c.x[i]);
+        wr(u64, mc + 256, c.sp);
+        wr(u64, mc + 264, c.pc);
+        wr(u64, mc + 272, c.pstate);
+        wr(u64, mc + 280, 0);
+        var r = mc + SC_RESERVED;
+        wr(u32, r, FPSIMD_MAGIC);
+        wr(u32, r + 4, FPSIMD_SIZE);
+        wr(u32, r + 8, c.fpsr);
+        wr(u32, r + 12, c.fpcr);
+        for (0..32) |i| wr(u128, r + 16 + i * 16, c.v[i]);
+        r += FPSIMD_SIZE;
+        if (fault and c.esr != 0) {
+            wr(u32, r, ESR_MAGIC);
+            wr(u32, r + 4, 16);
+            wr(u64, r + 8, c.esr);
+            r += 16;
+        }
+        wr(u64, r, 0); // terminator {magic 0, size 0}
+
+        var nm = t.mask | act.mask;
+        if (act.flags & SA_NODEFER == 0) nm |= bit(sig);
+        @atomicStore(u64, &t.mask, nm & ~KILLSTOP, .release);
+
+        c.x[0] = sig;
+        c.x[1] = fr;
+        c.x[2] = uc;
+        c.x[29] = rec;
+        c.x[30] = if (act.flags & SA_RESTORER != 0) act.restorer else g_restorer;
+        c.sp = fr;
+        c.pc = act.handler;
+    } else {
+        // x86-64 Linux rt_sigframe: [pretcode(8)][ucontext(304)][siginfo(128)],
+        // with the 512-byte FXSAVE _fpstate placed above and pointed to by
+        // sigcontext.fpstate. The handler runs with rsp = &frame (pretcode is
+        // its return address, so rsp must be 8 mod 16), rdi=sig, rsi=&info,
+        // rdx=&uc. Offsets are the kernel UAPI sigcontext_64 / ucontext layout.
+        // VERIFY ON MAC: the frame offsets, the 8-mod-16 entry alignment and the
+        // _fpstate placement.
+        var sp = c.rsp;
+        const on = onStack(t, sp);
+        const ss_sp = t.ss_sp;
+        const ss_size = t.ss_size;
+        var ss_flags: u32 = if (ss_size == 0) SS_DISABLE else if (on) SS_ONSTACK else 0;
+        ss_flags |= t.ss_flags;
+        if (act.flags & SA_ONSTACK != 0 and ss_size != 0 and !on) {
+            sp = ss_sp + ss_size;
+            if (t.ss_flags & SS_AUTODISARM != 0) {
+                t.ss_sp = 0;
+                t.ss_size = 0;
+                t.ss_flags = 0;
+            }
+        }
+        const fpst = (sp - 512) & ~@as(u64, 63);
+        @as(*[512]u8, @ptrFromInt(fpst)).* = c.fx;
+        const fr = ((fpst - 440) & ~@as(u64, 15)) - 8;
+        wr(u64, fr, if (act.flags & SA_RESTORER != 0) act.restorer else g_restorer); // pretcode
+        const uc = fr + 8;
+        wr(u64, uc, 0); // uc_flags
+        wr(u64, uc + 8, 0); // uc_link
+        wr(u64, uc + 16, ss_sp); // uc_stack.ss_sp
+        wr(u32, uc + 24, ss_flags);
+        wr(u32, uc + 28, 0);
+        wr(u64, uc + 32, ss_size);
+        const sc = uc + 40; // sigcontext_64
+        wr(u64, sc + 0, c.r8);
+        wr(u64, sc + 8, c.r9);
+        wr(u64, sc + 16, c.r10);
+        wr(u64, sc + 24, c.r11);
+        wr(u64, sc + 32, c.r12);
+        wr(u64, sc + 40, c.r13);
+        wr(u64, sc + 48, c.r14);
+        wr(u64, sc + 56, c.r15);
+        wr(u64, sc + 64, c.rdi);
+        wr(u64, sc + 72, c.rsi);
+        wr(u64, sc + 80, c.rbp);
+        wr(u64, sc + 88, c.rbx);
+        wr(u64, sc + 96, c.rdx);
+        wr(u64, sc + 104, c.rax);
+        wr(u64, sc + 112, c.rcx);
+        wr(u64, sc + 120, c.rsp);
+        wr(u64, sc + 128, c.rip);
+        wr(u64, sc + 136, c.rflags);
+        wr(u16, sc + 144, USER_CS);
+        wr(u16, sc + 146, 0); // gs
+        wr(u16, sc + 148, 0); // fs
+        wr(u16, sc + 150, USER_SS);
+        wr(u64, sc + 152, if (fault) c.err else 0);
+        wr(u64, sc + 160, if (fault) c.trapno else 0);
+        wr(u64, sc + 168, uc_mask); // oldmask
+        wr(u64, sc + 176, if (fault) c.fault else 0); // cr2
+        wr(u64, sc + 184, fpst); // fpstate pointer
+        @memset(@as([*]u8, @ptrFromInt(sc + 192))[0..64], 0); // reserved1[8]
+        wr(u64, uc + 296, uc_mask); // uc_sigmask (first 8 bytes = the active mask)
+        const si = uc + 304; // siginfo
+        @memset(@as([*]u8, @ptrFromInt(si))[0..128], 0);
+        wr(i32, si, @intCast(sig));
+        wr(i32, si + 4, info.errno);
+        wr(i32, si + 8, info.code);
+        wr(u64, si + 16, info.a);
+        wr(u64, si + 24, info.b);
+
+        var nm = t.mask | act.mask;
+        if (act.flags & SA_NODEFER == 0) nm |= bit(sig);
+        @atomicStore(u64, &t.mask, nm & ~KILLSTOP, .release);
+
+        c.rdi = sig;
+        c.rsi = si;
+        c.rdx = uc;
+        c.rax = 0; // varargs ABI: no vector registers passed
+        c.rsp = fr;
+        c.rip = act.handler;
     }
-    sp = (sp - 16) & ~@as(u64, 15);
-    const rec = sp;
-    wr(u64, rec, c.x[29]);
-    wr(u64, rec + 8, c.x[30]);
-    const fr = (sp - FRAME_SIZE) & ~@as(u64, 15);
-
-    @memset(@as([*]u8, @ptrFromInt(fr))[0..128], 0);
-    wr(i32, fr, @intCast(sig));
-    wr(i32, fr + 4, info.errno);
-    wr(i32, fr + 8, info.code);
-    wr(u64, fr + 16, info.a);
-    wr(u64, fr + 24, info.b);
-
-    const uc = fr + 128;
-    wr(u64, uc, 0); // uc_flags
-    wr(u64, uc + 8, 0); // uc_link
-    wr(u64, uc + 16, ss_sp);
-    wr(u32, uc + 24, ss_flags);
-    wr(u32, uc + 28, 0);
-    wr(u64, uc + 32, ss_size);
-    wr(u64, uc + 40, uc_mask);
-    @memset(@as([*]u8, @ptrFromInt(uc + 48))[0 .. UC_MCONTEXT - 48], 0);
-    const mc = uc + UC_MCONTEXT;
-    wr(u64, mc, if (fault) c.fault else 0);
-    for (0..31) |i| wr(u64, mc + 8 + i * 8, c.x[i]);
-    wr(u64, mc + 256, c.sp);
-    wr(u64, mc + 264, c.pc);
-    wr(u64, mc + 272, c.pstate);
-    wr(u64, mc + 280, 0);
-    var r = mc + SC_RESERVED;
-    wr(u32, r, FPSIMD_MAGIC);
-    wr(u32, r + 4, FPSIMD_SIZE);
-    wr(u32, r + 8, c.fpsr);
-    wr(u32, r + 12, c.fpcr);
-    for (0..32) |i| wr(u128, r + 16 + i * 16, c.v[i]);
-    r += FPSIMD_SIZE;
-    if (fault and c.esr != 0) {
-        wr(u32, r, ESR_MAGIC);
-        wr(u32, r + 4, 16);
-        wr(u64, r + 8, c.esr);
-        r += 16;
-    }
-    wr(u64, r, 0); // terminator {magic 0, size 0}
-
-    var nm = t.mask | act.mask;
-    if (act.flags & SA_NODEFER == 0) nm |= bit(sig);
-    @atomicStore(u64, &t.mask, nm & ~KILLSTOP, .release);
-
-    c.x[0] = sig;
-    c.x[1] = fr;
-    c.x[2] = uc;
-    c.x[29] = rec;
-    c.x[30] = if (act.flags & SA_RESTORER != 0) act.restorer else g_restorer;
-    c.sp = fr;
-    c.pc = act.handler;
 }
 
 // dispatchAll takes every signal deliverable to this thread and acts on it:
@@ -780,12 +1057,36 @@ fn dispatchAll(c: *Ctx) bool {
 // lc_sig_switch is the trap a syscall return uses to load tl.switch_ctx (and deliver
 // tl.first_sig onto it) from a Darwin signal context.
 export fn lc_sig_switch() callconv(.Naked) noreturn {
-    asm volatile ("brk #0x5c");
+    asm volatile (if (tstate.arm64) "brk #0x5c" else "ud2");
 }
 
 fn switchNow() noreturn {
     asm volatile ("b _lc_sig_switch");
     unreachable;
+}
+
+// x86-64 signal delivery. There is no arm64 brk-trap context switch: serveTrap
+// stores the trap's mcontext in g_sigmc, and the handler / sigsuspend /
+// sigreturn paths build tl.switch_ctx and apply it -- with any pending handlers
+// stacked by doSwitch -- straight onto that mcontext. g_sig_delivered tells
+// serveTrap the mcontext now holds the handler or restored context, so it
+// resumes there instead of writing the syscall result past the trap.
+pub threadlocal var g_sigmc: *std.c.mcontext_t = undefined;
+pub threadlocal var g_sig_delivered: bool = false;
+
+// x64SaveCtx seeds tl.switch_ctx from the trapped mcontext (GPRs + FP) with the
+// syscall's result in rax and the resume pc -- frame[33] (just past the trapped
+// syscall) normally, or the syscall site itself for a restart, where rax keeps
+// the call number so the re-executed syscall reissues with its arguments.
+fn x64SaveCtx(rax: u64, rip: u64) void {
+    fromMc(&tl.switch_ctx, g_sigmc);
+    tl.switch_ctx.rax = rax;
+    tl.switch_ctx.rip = rip;
+}
+
+fn x64Deliver() void {
+    doSwitch(g_sigmc);
+    g_sig_delivered = true;
 }
 
 // A trap wx.zig placed for an svc is served as the svc's island would serve
@@ -806,11 +1107,15 @@ fn trapEnter(mc: *std.c.mcontext_t) void {
 }
 
 export fn lc_trap_ret() callconv(.Naked) noreturn {
-    asm volatile (
-        \\ ldr x17, [sp, #136]
-        \\ ldr x16, [sp, #128]
-        \\ brk #0x5d
-    );
+    if (tstate.arm64) {
+        asm volatile (
+            \\ ldr x17, [sp, #136]
+            \\ ldr x16, [sp, #128]
+            \\ brk #0x5d
+        );
+    } else {
+        asm volatile ("ud2");
+    }
 }
 
 fn trapReturn(mc: *std.c.mcontext_t) void {
@@ -899,17 +1204,26 @@ noinline fn pendingAfter(frame: [*]u64, r0: u64) ?u64 {
                 .handler => {
                     const rv: i64 = @bitCast(r0);
                     const restart = rv == -ERESTARTNOINTR or (rv == -ERESTARTSYS and act.flags & SA_RESTART != 0);
-                    if (restart) {
-                        fromFrame(&tl.switch_ctx, frame, frame[0], frame[33] - 4);
-                    } else {
-                        if (rv == -ERESTART_RESTARTBLOCK) @import("local.zig").forgetRestart();
-                        fromFrame(&tl.switch_ctx, frame, if (isRestart(r0)) neg(EINTR) else r0, frame[33]);
-                    }
+                    if (!restart and rv == -ERESTART_RESTARTBLOCK) @import("local.zig").forgetRestart();
                     tl.first_sig = s;
                     tl.first_info = info;
                     tl.first_act = act;
                     tl.first_mask = real orelse ld(&thr().mask);
-                    switchNow();
+                    if (tstate.arm64) {
+                        if (restart) {
+                            fromFrame(&tl.switch_ctx, frame, frame[0], frame[33] - 4);
+                        } else {
+                            fromFrame(&tl.switch_ctx, frame, if (isRestart(r0)) neg(EINTR) else r0, frame[33]);
+                        }
+                        switchNow();
+                    }
+                    if (restart) {
+                        x64SaveCtx(g_sigmc.ss.rax, frame[33] - 2); // re-run the syscall after the handler
+                    } else {
+                        x64SaveCtx(if (isRestart(r0)) neg(EINTR) else r0, frame[33]);
+                    }
+                    x64Deliver();
+                    return r0;
                 },
             }
         }
@@ -951,14 +1265,26 @@ fn kickSelf(ctx: ?*anyopaque) void {
 }
 
 fn pthreadKill(port: u32, sig: c_int) void {
-    _ = asm volatile (
-        \\ mov x16, #328
-        \\ svc #0x80
-        : [ret] "={x0}" (-> u64),
-        : [p] "{x0}" (port),
-          [s] "{x1}" (sig),
-        : "x16", "cc", "memory"
-    );
+    if (tstate.arm64) {
+        _ = asm volatile (
+            \\ mov x16, #328
+            \\ svc #0x80
+            : [ret] "={x0}" (-> u64),
+            : [p] "{x0}" (port),
+              [s] "{x1}" (sig),
+            : "x16", "cc", "memory"
+        );
+    } else {
+        // Darwin BSD-class syscall: rax = 0x2000000 | nr, result in rax, syscall
+        // clobbers rcx and r11.
+        _ = asm volatile ("syscall"
+            : [ret] "={rax}" (-> u64),
+            : [nr] "{rax}" (@as(u64, 0x2000000 | 328)),
+              [p] "{rdi}" (port),
+              [s] "{rsi}" (sig),
+            : "rcx", "r11", "cc", "memory"
+        );
+    }
 }
 
 fn onRoute(_: c_int, _: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) void {
@@ -979,64 +1305,119 @@ fn onKick(_: c_int, _: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) void {
 
 // faultSignal translates a Darwin fault into Linux's signal and si_code. Darwin
 // reports a write to a read-only page as SIGBUS; Linux calls every permission
-// or translation fault SIGSEGV and keeps SIGBUS for alignment, so the ESR
-// decides the signal.
+// or translation fault SIGSEGV and keeps SIGBUS for alignment. arm64 reads the
+// ESR exception class; x86-64 reads the trap vector and, for a page fault, the
+// error code's present bit.
 fn faultSignal(dsig: c_int, mc: *const std.c.mcontext_t, info: *Info) u32 {
-    const esr = mc.es.esr;
-    const far = mc.es.far;
-    const pc = mc.ss.pc;
-    var sig: u32 = SIGSEGV;
-    var code: i32 = SEGV_MAPERR;
-    var addr = far;
-    switch (esr >> 26) {
-        0x20, 0x21, 0x24, 0x25 => {
-            const dfsc = esr & 0x3f;
-            // As Linux, a mapping at the address makes it a protection failure,
-            // none an unmapped address; Darwin's own code says ACCERR for
-            // addresses it reserves without a mapping. The low 4 GiB is the
-            // stub's __PAGEZERO, a mapping the guest never sees.
-            if (dfsc == 0x21) {
+    if (tstate.arm64) {
+        const esr = mc.es.esr;
+        const far = mc.es.far;
+        const pc = mc.ss.pc;
+        var sig: u32 = SIGSEGV;
+        var code: i32 = SEGV_MAPERR;
+        var addr = far;
+        switch (esr >> 26) {
+            0x20, 0x21, 0x24, 0x25 => {
+                const dfsc = esr & 0x3f;
+                // As Linux, a mapping at the address makes it a protection failure,
+                // none an unmapped address; Darwin's own code says ACCERR for
+                // addresses it reserves without a mapping. The low 4 GiB is the
+                // stub's __PAGEZERO, a mapping the guest never sees.
+                if (dfsc == 0x21) {
+                    sig = SIGBUS;
+                    code = BUS_ADRALN;
+                } else if (far >= PAGEZERO_END and mem.mapped(far, far + 1)) {
+                    code = SEGV_ACCERR;
+                }
+            },
+            0x22, 0x26 => {
                 sig = SIGBUS;
                 code = BUS_ADRALN;
-            } else if (far >= PAGEZERO_END and mem.mapped(far, far + 1)) {
-                code = SEGV_ACCERR;
-            }
-        },
-        0x22, 0x26 => {
-            sig = SIGBUS;
-            code = BUS_ADRALN;
-            if (esr >> 26 == 0x22) addr = pc;
-        },
-        0x3c => {
-            sig = SIGTRAP;
-            code = TRAP_BRKPT;
-            addr = pc;
-        },
-        else => switch (dsig) {
-            DW_SIGILL => {
-                sig = SIGILL;
-                code = ILL_ILLOPC;
-                addr = pc;
+                if (esr >> 26 == 0x22) addr = pc;
             },
-            DW_SIGTRAP => {
+            0x3c => {
                 sig = SIGTRAP;
                 code = TRAP_BRKPT;
                 addr = pc;
             },
-            DW_SIGFPE => {
-                sig = SIGFPE;
-                code = 0;
+            else => switch (dsig) {
+                DW_SIGILL => {
+                    sig = SIGILL;
+                    code = ILL_ILLOPC;
+                    addr = pc;
+                },
+                DW_SIGTRAP => {
+                    sig = SIGTRAP;
+                    code = TRAP_BRKPT;
+                    addr = pc;
+                },
+                DW_SIGFPE => {
+                    sig = SIGFPE;
+                    code = 0;
+                    addr = pc;
+                },
+                DW_SIGBUS => {
+                    sig = SIGBUS;
+                    code = BUS_ADRERR;
+                },
+                else => {},
+            },
+        }
+        info.* = .{ .signo = @intCast(sig), .errno = 0, .code = code, .pad = 0, .a = addr, .b = 0 };
+        return sig;
+    } else {
+        const trapno = mc.es.trapno;
+        const err = mc.es.err;
+        const pc = mc.ss.rip;
+        var sig: u32 = SIGSEGV;
+        var code: i32 = SEGV_MAPERR;
+        var addr: u64 = mc.es.faultvaddr;
+        switch (trapno) {
+            14 => if (err & 1 != 0) {
+                // #PF: present bit set means a protection violation at a mapped
+                // page; clear means not-present, which keeps SEGV_MAPERR.
+                code = SEGV_ACCERR;
+            },
+            17 => { // #AC alignment check
+                sig = SIGBUS;
+                code = BUS_ADRALN;
+            },
+            6 => { // #UD invalid opcode
+                sig = SIGILL;
+                code = ILL_ILLOPC;
                 addr = pc;
             },
-            DW_SIGBUS => {
-                sig = SIGBUS;
-                code = BUS_ADRERR;
+            1, 3 => { // #DB debug/single-step, #BP int3
+                sig = SIGTRAP;
+                code = TRAP_BRKPT;
+                addr = pc;
             },
-            else => {},
-        },
+            else => switch (dsig) {
+                DW_SIGILL => {
+                    sig = SIGILL;
+                    code = ILL_ILLOPC;
+                    addr = pc;
+                },
+                DW_SIGTRAP => {
+                    sig = SIGTRAP;
+                    code = TRAP_BRKPT;
+                    addr = pc;
+                },
+                DW_SIGFPE => {
+                    sig = SIGFPE;
+                    code = 0;
+                    addr = pc;
+                },
+                DW_SIGBUS => {
+                    sig = SIGBUS;
+                    code = BUS_ADRERR;
+                },
+                else => {},
+            },
+        }
+        info.* = .{ .signo = @intCast(sig), .errno = 0, .code = code, .pad = 0, .a = addr, .b = 0 };
+        return sig;
     }
-    info.* = .{ .signo = @intCast(sig), .errno = 0, .code = code, .pad = 0, .a = addr, .b = 0 };
-    return sig;
 }
 
 // idReg serves an mrs of an AArch64 ID register that Darwin traps at EL0
@@ -1069,32 +1450,56 @@ fn idReg(mc: *std.c.mcontext_t) bool {
 fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) void {
     const uc: *std.c.ucontext_t = @ptrCast(@alignCast(ctx.?));
     const mc = uc.mcontext;
-    if (dsig_in == DW_SIGTRAP and mc.ss.pc == @intFromPtr(&lc_sig_switch)) return doSwitch(mc);
-    if (dsig_in == DW_SIGTRAP and mc.ss.pc == @intFromPtr(&lc_trap_ret) + 8) return trapReturn(mc);
-    if (dsig_in == DW_SIGTRAP and tl.ready) {
-        if (ool.exit(tl.slot, mc)) |e| {
-            if (e.jit) jit.initThread(); // back to execute mode
-            for (e.holds) |h| wx.letGo(h);
-            return;
+    // The arm64 trampoline-return and OOL-exit traps (brk/svc-return landmarks
+    // and the out-of-line window exits) have no x86-64 analogue: x86-64 serves
+    // syscalls from the SIGILL/mcontext path below and has no in-guest JIT
+    // windows, so a SIGTRAP falls through to the generic delivery.
+    if (tstate.arm64) {
+        if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_sig_switch)) return doSwitch(mc);
+        if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_trap_ret) + 8) return trapReturn(mc);
+        if (dsig_in == DW_SIGTRAP and tl.ready) {
+            if (ool.exit(tl.slot, mc)) |e| {
+                if (e.jit) jit.initThread(); // back to execute mode
+                for (e.holds) |h| wx.letGo(h);
+                return;
+            }
         }
     }
     if (dsig_in == DW_SIGILL and tl.ready and !tl.busy) {
-        switch (wx.isTrap(mc.ss.pc)) {
-            .trap => return trapEnter(mc),
-            .again => return,
-            .excl => {
-                var st: wx.Step = .{};
-                switch (wx.exclTrap(mc.ss.pc, &st)) {
-                    .handled => return,
-                    .step => if (step(mc, &st)) return,
-                    else => {},
-                }
-            },
-            .no => {},
+        if (tstate.arm64) {
+            switch (wx.isTrap(mc.ss.pc)) {
+                .trap => return trapEnter(mc),
+                .again => return,
+                .excl => {
+                    var st: wx.Step = .{};
+                    switch (wx.exclTrap(mc.ss.pc, &st)) {
+                        .handled => return,
+                        .step => if (step(mc, &st)) return,
+                        else => {},
+                    }
+                },
+                .no => {},
+            }
+            if (idReg(mc)) return;
+        } else {
+            // A rewritten guest syscall site is a 2-byte ud2 (0f 0b). Service it
+            // straight from the mcontext and resume past it (AMD64.md 1e/1f).
+            if (@as(*align(1) const u16, @ptrFromInt(tstate.pc(mc))).* == 0x0b0f) {
+                @import("root").serveTrap(mc);
+                return;
+            }
         }
-        if (idReg(mc)) return;
+    }
+    // x86-64 %fs is virtualized: glibc's %fs:disp TLS reads/writes fault (the
+    // physical %fs base is 0) and are emulated against the stored guest base.
+    if (!tstate.arm64 and dsig_in == DW_SIGSEGV and tl.ready and !tl.busy) {
+        if (fsmem.emulate(mc)) return;
     }
     var dsig = dsig_in;
+    // The arm64 W^X/OOL fault handling and the stub's copy-helper landmarks are
+    // arm64-only (x86-64 has no in-guest JIT window machinery on the syscall
+    // path); a guest fault falls through to the generic signal delivery below.
+    if (tstate.arm64) {
     if (dsig == DW_SIGSEGV or dsig == DW_SIGBUS) {
         const page = mc.es.far & ~@as(u64, 0x3fff);
         var st: wx.Step = .{ .from_slot = ool.inSlot(tl.slot, mc.ss.pc), .own = !tl.ready or tl.busy, .lost = ool.lost(tl.slot, mc.ss.pc, page) };
@@ -1136,13 +1541,14 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
             mc.es.far = f.far;
         }
     }
-    if (tl.busy and mc.ss.pc >= @intFromPtr(&lc_copy) and mc.ss.pc < @intFromPtr(&lc_copy_fault)) {
-        mc.ss.pc = @intFromPtr(&lc_copy_fault);
+    if (tl.busy and tstate.pc(mc) >= @intFromPtr(&lc_copy) and tstate.pc(mc) < @intFromPtr(&lc_copy_fault)) {
+        tstate.setPc(mc, @intFromPtr(&lc_copy_fault));
         return;
     }
-    if (tl.busy and mc.ss.pc == @intFromPtr(&lc_load32)) {
-        mc.ss.pc = @intFromPtr(&lc_load32_fault);
+    if (tl.busy and tstate.pc(mc) == @intFromPtr(&lc_load32)) {
+        tstate.setPc(mc, @intFromPtr(&lc_load32_fault));
         return;
+    }
     }
     if (!tl.ready or tl.busy) {
         _ = signal(dsig, DW_SIG_DFL); // a fault in the stub itself: crash for real
@@ -1160,7 +1566,7 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
     // A synchronous signal cannot be blocked or ignored: the supervisor
     // resets it to the default action, which kills.
     const t = thr();
-    _ = goCallArgs(LC_SIGFAULT, .{ sig, @intFromBool(ld(&t.mask) & bit(sig) != 0), info.a, @as(u32, @bitCast(info.code)), c.pc, 0 });
+    _ = goCallArgs(LC_SIGFAULT, .{ sig, @intFromBool(ld(&t.mask) & bit(sig) != 0), info.a, @as(u32, @bitCast(info.code)), if (tstate.arm64) c.pc else c.rip, 0 });
     const act = replyOf(myChan()).act;
     if (classify(sig, act) != .handler) die(sig);
     deliverOnto(&c, sig, &info, act, ld(&t.mask), true);
@@ -1196,7 +1602,7 @@ pub noinline fn handle(nr: u64, frame: [*]u64) ?u64 {
     return switch (nr) {
         NR_RT_SIGPROCMASK => sysSigprocmask(frame[0], frame[1], frame[2], frame[3]),
         NR_RT_SIGPENDING => sysSigpending(frame[0], frame[1]),
-        NR_SIGALTSTACK => sysSigaltstack(frame[0], frame[1], @intFromPtr(frame) + 816),
+        NR_SIGALTSTACK => sysSigaltstack(frame[0], frame[1], if (tstate.arm64) @intFromPtr(frame) + 816 else frame[proc.XR_RSP]),
         NR_RT_SIGRETURN => sysSigreturn(frame),
         NR_RT_SIGSUSPEND => sysSigsuspend(frame),
         NR_RT_SIGTIMEDWAIT => sysSigtimedwait(frame[0], frame[1], frame[2], frame[3]),
@@ -1264,6 +1670,7 @@ fn sysSigaltstack(ss: u64, oss: u64, sp: u64) u64 {
 // guest memory: a part of it that is not mapped, or a malformed record, kills
 // the process with SIGSEGV as the kernel's badframe path does.
 fn sysSigreturn(frame: [*]u64) u64 {
+    if (!tstate.arm64) return sysSigreturnX64(frame);
     const sp = @intFromPtr(frame) + 816;
     if (sp & 15 != 0) die(SIGSEGV);
     const uc = sp + 128;
@@ -1306,6 +1713,51 @@ fn sysSigreturn(frame: [*]u64) u64 {
     switchNow();
 }
 
+// sysSigreturnX64 restores the state deliverOnto saved in the x86-64
+// rt_sigframe. glibc's restorer (__restore_rt) enters rt_sigreturn with rsp at
+// the ucontext (fr+8), so the saved sigcontext is at uc+40, the alt-stack at
+// uc+16 and the mask at uc+296. A malformed or unmapped frame kills the process
+// with SIGSEGV, as the kernel's badframe path does.
+fn sysSigreturnX64(frame: [*]u64) u64 {
+    const uc = frame[proc.XR_RSP];
+    const sc = uc + 40;
+    const r = get([24]u64, sc) orelse die(SIGSEGV); // r8..cr2 then the fpstate ptr
+    var c: Ctx = undefined;
+    c.r8 = r[0];
+    c.r9 = r[1];
+    c.r10 = r[2];
+    c.r11 = r[3];
+    c.r12 = r[4];
+    c.r13 = r[5];
+    c.r14 = r[6];
+    c.r15 = r[7];
+    c.rdi = r[8];
+    c.rsi = r[9];
+    c.rbp = r[10];
+    c.rbx = r[11];
+    c.rdx = r[12];
+    c.rax = r[13];
+    c.rcx = r[14];
+    c.rsp = r[15];
+    c.rip = r[16];
+    c.rflags = r[17];
+    c.fault = 0;
+    c.trapno = 0;
+    c.err = 0;
+    const fpst = r[23];
+    c.fx = if (fpst != 0) (get([512]u8, fpst) orelse die(SIGSEGV)) else std.mem.zeroes([512]u8);
+    const head = get([3]u64, uc + 16) orelse die(SIGSEGV); // uc_stack: ss_sp, ss_flags|pad, ss_size
+    const mask = get(u64, uc + 296) orelse die(SIGSEGV); // uc_sigmask
+    const t = thr();
+    @atomicStore(u64, &t.mask, mask & ~KILLSTOP, .release);
+    var ss: [3]u64 = .{ head[0], head[1], head[2] };
+    _ = sysSigaltstack(@intFromPtr(&ss), 0, c.rsp);
+    tl.switch_ctx = c;
+    tl.first_sig = 0;
+    x64Deliver();
+    return 0;
+}
+
 // waitLocal sleeps until a kick or the deadline (CLOCK_MONOTONIC ns, 0 = none).
 // Returns false on timeout. Pending signals in allow end it at once.
 fn waitLocal(allow: u64, deadline: i64) bool {
@@ -1313,6 +1765,20 @@ fn waitLocal(allow: u64, deadline: i64) bool {
     @atomicStore(bool, &tl.waiting, true, .seq_cst);
     defer @atomicStore(bool, &tl.waiting, false, .seq_cst);
     if (pendingAllowed(allow) != 0) return true;
+    // x86-64 serves the blocking sig syscalls inside the fault handler, which
+    // runs with the kick signals (USR1/USR2) blocked, so the supervisor's kick
+    // cannot cut the wait short. Open them around it: a kick that landed while
+    // they were blocked is delivered on the unblock, and the handler sets the
+    // word so the wait returns at once. arm64 waits outside any handler, where
+    // they are already open, so it leaves the mask alone.
+    var saved: u32 = 0;
+    if (!tstate.arm64) {
+        var k: u32 = KICK_MASK;
+        _ = pthread_sigmask(SIG_UNBLOCK, &k, &saved);
+    }
+    defer if (!tstate.arm64) {
+        _ = pthread_sigmask(SIG_SETMASK, &saved, null);
+    };
     if (deadline == 0) {
         futex.waitWord(&tl.word, 0, 0);
         return true;
@@ -1378,12 +1844,17 @@ fn sysSigsuspend(frame: [*]u64) u64 {
             .stop => stopSelf(s),
             .term => die(s),
             .handler => {
-                fromFrame(&tl.switch_ctx, frame, neg(EINTR), frame[33]);
                 tl.first_sig = s;
                 tl.first_info = info;
                 tl.first_act = act;
                 tl.first_mask = old;
-                switchNow();
+                if (tstate.arm64) {
+                    fromFrame(&tl.switch_ctx, frame, neg(EINTR), frame[33]);
+                    switchNow();
+                }
+                x64SaveCtx(neg(EINTR), frame[33]);
+                x64Deliver();
+                return neg(EINTR);
             },
         }
     }

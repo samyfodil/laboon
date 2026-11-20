@@ -20,6 +20,8 @@ const mem = @import("mem.zig");
 const fdlink = @import("fdlink.zig");
 const procinfo = @import("procinfo.zig");
 const sig = @import("sig.zig");
+const proc = @import("proc.zig");
+const tstate = @import("tstate.zig");
 
 extern "c" fn mach_task_self() u32;
 extern "c" fn mach_reply_port() u32;
@@ -94,8 +96,17 @@ const Blob = extern struct {
     nregion: u64,
     nfile: u64,
     info: procinfo.Info,
+    // The forking guest's full register image. On arm64 the frame lives in the
+    // guest memory the child maps, so `frame` above suffices; on x86-64 it is a
+    // local on the signal stack serveTrap runs on, which the child does not
+    // have, so the image travels here and the child resumes from its own copy.
+    regs: [proc.FRAME_BYTES / 8]u64,
 };
 const MAGIC: u64 = 0x6b726f666e6f626c; // "lbonfork"
+
+// g_fork_regs holds the x86-64 child's copy of the forking register image,
+// outliving the (freed) blob that carried it, for resumeIsland to read.
+var g_fork_regs: [proc.FRAME_BYTES / 8]u64 = undefined;
 
 // mailbox is this stub's receive right for fork messages; supervisor is the
 // pid only the supervisor's messages come from.
@@ -172,6 +183,7 @@ pub fn parent(frame: u64, flags: u64, stack: u64, tls: u64, ctid: u64, tp: u64) 
         .nregion = 0,
         .nfile = 0,
         .info = procinfo.info,
+        .regs = @as(*const [proc.FRAME_BYTES / 8]u64, @ptrFromInt(frame)).*,
     });
     if (!ok) {
         for (entries.items) |e| _ = mach_port_deallocate(task, e);
@@ -334,7 +346,13 @@ fn take(task: u32, m: *const ForkMsg) ?Taken {
     if (!mem.forkLoad(&b) or !@import("wx.zig").forkLoad(&b)) return null;
     procinfo.info = h.info;
     sig.g_restorer = h.restorer;
-    return .{ .frame = h.frame, .stack = h.stack, .flags = h.flags, .tls = h.tls, .ctid = h.ctid, .tp = h.tp };
+    // arm64's frame is in the mapped guest memory; x86-64's was on the parent's
+    // signal stack, so resume from the image the blob carried, kept past it.
+    const frame_addr = if (tstate.arm64) h.frame else blk: {
+        g_fork_regs = h.regs;
+        break :blk @intFromPtr(&g_fork_regs);
+    };
+    return .{ .frame = frame_addr, .stack = h.stack, .flags = h.flags, .tls = h.tls, .ctid = h.ctid, .tp = h.tp };
 }
 
 fn drop(task: u32, ports: []const u32) void {
