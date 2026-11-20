@@ -97,6 +97,16 @@ probe with `export fn`, since the accessors are `inline`).
    f. x86-64 trampolines: `lc_sig_switch`, `lc_trap_ret`, `lc_cp_*`, `lc_copy`,
       `lc_load32` rewritten in x86-64 asm — same names and the same pc landmarks
       the handler compares against.
+   g. Signal-frame build/parse. `deliverOnto` (the Linux `rt_sigframe` builder)
+      is **DONE** — the x86-64 branch builds `[pretcode][ucontext][siginfo]` with
+      the 512-byte FXSAVE `_fpstate` above, grounded in the kernel UAPI
+      `sigcontext_64` (r8…r15, rdi…rsp at 0–127, rip@128, flags@136, cs/gs/fs/ss@144,
+      err/trapno/oldmask/cr2@152–176, fpstate@184) and `ucontext` (uc_mcontext@40,
+      uc_sigmask@296) offsets, handler entry rdi/rsi/rdx + rax=0, rsp≡8 (mod 16).
+      Probe-compiled for `x86_64-macos`; arm64 `__text` byte-identical. VERIFY ON
+      MAC: the exact offsets and entry alignment. Its reverse, `sysSigreturn`
+      (and `sysSigaltstack`/`sysSigsuspend`), reads the same frame back and is
+      **NEXT** (reuses these offsets).
 2. `proc.zig`: x86-64 fork/exec/thread context; zero `%rdx` at entry.
 3. `wx.zig`: x86-64 `MAP_JIT` W^X (drop the sysreg islands).
 4. `stub.zig`: x86-64 entry + syscall dispatch.

@@ -155,7 +155,7 @@ const ERESTART_RESTARTBLOCK: i64 = 516;
 
 const KILLSTOP: u64 = bit(SIGKILL) | bit(SIGSTOP);
 
-// rt_sigframe: siginfo (128) + ucontext (4560); the sigcontext sits at
+// arm64 rt_sigframe: siginfo (128) + ucontext (4560); the sigcontext sits at
 // ucontext+176 and its __reserved area at sigcontext+288.
 const FRAME_SIZE: u64 = 128 + 4560;
 const UC_MCONTEXT: u64 = 176;
@@ -163,6 +163,12 @@ const SC_RESERVED: u64 = 288;
 const FPSIMD_MAGIC: u32 = 0x46508001;
 const FPSIMD_SIZE: u32 = 528;
 const ESR_MAGIC: u32 = 0x45535201;
+
+// x86-64 Linux user segment selectors (__USER_CS / __USER_DS); the stub's
+// sigreturn forces them, as the kernel does, so they are only cosmetic in the
+// frame.
+const USER_CS: u16 = 0x33;
+const USER_SS: u16 = 0x2b;
 
 // Darwin.
 const DW_SIGILL: c_int = 4;
@@ -808,75 +814,158 @@ pub fn putTimespec(addr: u64, ts: [2]i64) bool {
 // does. uc_mask is the mask the handler's sigreturn restores.
 fn deliverOnto(c: *Ctx, sig: u32, info: *const Info, act: Act, uc_mask: u64, fault: bool) void {
     const t = thr();
-    var sp = c.sp;
-    const on = onStack(t, sp);
-    const ss_sp = t.ss_sp;
-    const ss_size = t.ss_size;
-    var ss_flags: u32 = if (ss_size == 0) SS_DISABLE else if (on) SS_ONSTACK else 0;
-    ss_flags |= t.ss_flags;
-    if (act.flags & SA_ONSTACK != 0 and ss_size != 0 and !on) {
-        sp = ss_sp + ss_size;
-        if (t.ss_flags & SS_AUTODISARM != 0) {
-            t.ss_sp = 0;
-            t.ss_size = 0;
-            t.ss_flags = 0;
+    if (tstate.arm64) {
+        var sp = c.sp;
+        const on = onStack(t, sp);
+        const ss_sp = t.ss_sp;
+        const ss_size = t.ss_size;
+        var ss_flags: u32 = if (ss_size == 0) SS_DISABLE else if (on) SS_ONSTACK else 0;
+        ss_flags |= t.ss_flags;
+        if (act.flags & SA_ONSTACK != 0 and ss_size != 0 and !on) {
+            sp = ss_sp + ss_size;
+            if (t.ss_flags & SS_AUTODISARM != 0) {
+                t.ss_sp = 0;
+                t.ss_size = 0;
+                t.ss_flags = 0;
+            }
         }
+        sp = (sp - 16) & ~@as(u64, 15);
+        const rec = sp;
+        wr(u64, rec, c.x[29]);
+        wr(u64, rec + 8, c.x[30]);
+        const fr = (sp - FRAME_SIZE) & ~@as(u64, 15);
+
+        @memset(@as([*]u8, @ptrFromInt(fr))[0..128], 0);
+        wr(i32, fr, @intCast(sig));
+        wr(i32, fr + 4, info.errno);
+        wr(i32, fr + 8, info.code);
+        wr(u64, fr + 16, info.a);
+        wr(u64, fr + 24, info.b);
+
+        const uc = fr + 128;
+        wr(u64, uc, 0); // uc_flags
+        wr(u64, uc + 8, 0); // uc_link
+        wr(u64, uc + 16, ss_sp);
+        wr(u32, uc + 24, ss_flags);
+        wr(u32, uc + 28, 0);
+        wr(u64, uc + 32, ss_size);
+        wr(u64, uc + 40, uc_mask);
+        @memset(@as([*]u8, @ptrFromInt(uc + 48))[0 .. UC_MCONTEXT - 48], 0);
+        const mc = uc + UC_MCONTEXT;
+        wr(u64, mc, if (fault) c.fault else 0);
+        for (0..31) |i| wr(u64, mc + 8 + i * 8, c.x[i]);
+        wr(u64, mc + 256, c.sp);
+        wr(u64, mc + 264, c.pc);
+        wr(u64, mc + 272, c.pstate);
+        wr(u64, mc + 280, 0);
+        var r = mc + SC_RESERVED;
+        wr(u32, r, FPSIMD_MAGIC);
+        wr(u32, r + 4, FPSIMD_SIZE);
+        wr(u32, r + 8, c.fpsr);
+        wr(u32, r + 12, c.fpcr);
+        for (0..32) |i| wr(u128, r + 16 + i * 16, c.v[i]);
+        r += FPSIMD_SIZE;
+        if (fault and c.esr != 0) {
+            wr(u32, r, ESR_MAGIC);
+            wr(u32, r + 4, 16);
+            wr(u64, r + 8, c.esr);
+            r += 16;
+        }
+        wr(u64, r, 0); // terminator {magic 0, size 0}
+
+        var nm = t.mask | act.mask;
+        if (act.flags & SA_NODEFER == 0) nm |= bit(sig);
+        @atomicStore(u64, &t.mask, nm & ~KILLSTOP, .release);
+
+        c.x[0] = sig;
+        c.x[1] = fr;
+        c.x[2] = uc;
+        c.x[29] = rec;
+        c.x[30] = if (act.flags & SA_RESTORER != 0) act.restorer else g_restorer;
+        c.sp = fr;
+        c.pc = act.handler;
+    } else {
+        // x86-64 Linux rt_sigframe: [pretcode(8)][ucontext(304)][siginfo(128)],
+        // with the 512-byte FXSAVE _fpstate placed above and pointed to by
+        // sigcontext.fpstate. The handler runs with rsp = &frame (pretcode is
+        // its return address, so rsp must be 8 mod 16), rdi=sig, rsi=&info,
+        // rdx=&uc. Offsets are the kernel UAPI sigcontext_64 / ucontext layout.
+        // VERIFY ON MAC: the frame offsets, the 8-mod-16 entry alignment and the
+        // _fpstate placement.
+        var sp = c.rsp;
+        const on = onStack(t, sp);
+        const ss_sp = t.ss_sp;
+        const ss_size = t.ss_size;
+        var ss_flags: u32 = if (ss_size == 0) SS_DISABLE else if (on) SS_ONSTACK else 0;
+        ss_flags |= t.ss_flags;
+        if (act.flags & SA_ONSTACK != 0 and ss_size != 0 and !on) {
+            sp = ss_sp + ss_size;
+            if (t.ss_flags & SS_AUTODISARM != 0) {
+                t.ss_sp = 0;
+                t.ss_size = 0;
+                t.ss_flags = 0;
+            }
+        }
+        const fpst = (sp - 512) & ~@as(u64, 63);
+        @as(*[512]u8, @ptrFromInt(fpst)).* = c.fx;
+        const fr = ((fpst - 440) & ~@as(u64, 15)) - 8;
+        wr(u64, fr, if (act.flags & SA_RESTORER != 0) act.restorer else g_restorer); // pretcode
+        const uc = fr + 8;
+        wr(u64, uc, 0); // uc_flags
+        wr(u64, uc + 8, 0); // uc_link
+        wr(u64, uc + 16, ss_sp); // uc_stack.ss_sp
+        wr(u32, uc + 24, ss_flags);
+        wr(u32, uc + 28, 0);
+        wr(u64, uc + 32, ss_size);
+        const sc = uc + 40; // sigcontext_64
+        wr(u64, sc + 0, c.r8);
+        wr(u64, sc + 8, c.r9);
+        wr(u64, sc + 16, c.r10);
+        wr(u64, sc + 24, c.r11);
+        wr(u64, sc + 32, c.r12);
+        wr(u64, sc + 40, c.r13);
+        wr(u64, sc + 48, c.r14);
+        wr(u64, sc + 56, c.r15);
+        wr(u64, sc + 64, c.rdi);
+        wr(u64, sc + 72, c.rsi);
+        wr(u64, sc + 80, c.rbp);
+        wr(u64, sc + 88, c.rbx);
+        wr(u64, sc + 96, c.rdx);
+        wr(u64, sc + 104, c.rax);
+        wr(u64, sc + 112, c.rcx);
+        wr(u64, sc + 120, c.rsp);
+        wr(u64, sc + 128, c.rip);
+        wr(u64, sc + 136, c.rflags);
+        wr(u16, sc + 144, USER_CS);
+        wr(u16, sc + 146, 0); // gs
+        wr(u16, sc + 148, 0); // fs
+        wr(u16, sc + 150, USER_SS);
+        wr(u64, sc + 152, if (fault) c.err else 0);
+        wr(u64, sc + 160, if (fault) c.trapno else 0);
+        wr(u64, sc + 168, uc_mask); // oldmask
+        wr(u64, sc + 176, if (fault) c.fault else 0); // cr2
+        wr(u64, sc + 184, fpst); // fpstate pointer
+        @memset(@as([*]u8, @ptrFromInt(sc + 192))[0..64], 0); // reserved1[8]
+        wr(u64, uc + 296, uc_mask); // uc_sigmask (first 8 bytes = the active mask)
+        const si = uc + 304; // siginfo
+        @memset(@as([*]u8, @ptrFromInt(si))[0..128], 0);
+        wr(i32, si, @intCast(sig));
+        wr(i32, si + 4, info.errno);
+        wr(i32, si + 8, info.code);
+        wr(u64, si + 16, info.a);
+        wr(u64, si + 24, info.b);
+
+        var nm = t.mask | act.mask;
+        if (act.flags & SA_NODEFER == 0) nm |= bit(sig);
+        @atomicStore(u64, &t.mask, nm & ~KILLSTOP, .release);
+
+        c.rdi = sig;
+        c.rsi = si;
+        c.rdx = uc;
+        c.rax = 0; // varargs ABI: no vector registers passed
+        c.rsp = fr;
+        c.rip = act.handler;
     }
-    sp = (sp - 16) & ~@as(u64, 15);
-    const rec = sp;
-    wr(u64, rec, c.x[29]);
-    wr(u64, rec + 8, c.x[30]);
-    const fr = (sp - FRAME_SIZE) & ~@as(u64, 15);
-
-    @memset(@as([*]u8, @ptrFromInt(fr))[0..128], 0);
-    wr(i32, fr, @intCast(sig));
-    wr(i32, fr + 4, info.errno);
-    wr(i32, fr + 8, info.code);
-    wr(u64, fr + 16, info.a);
-    wr(u64, fr + 24, info.b);
-
-    const uc = fr + 128;
-    wr(u64, uc, 0); // uc_flags
-    wr(u64, uc + 8, 0); // uc_link
-    wr(u64, uc + 16, ss_sp);
-    wr(u32, uc + 24, ss_flags);
-    wr(u32, uc + 28, 0);
-    wr(u64, uc + 32, ss_size);
-    wr(u64, uc + 40, uc_mask);
-    @memset(@as([*]u8, @ptrFromInt(uc + 48))[0 .. UC_MCONTEXT - 48], 0);
-    const mc = uc + UC_MCONTEXT;
-    wr(u64, mc, if (fault) c.fault else 0);
-    for (0..31) |i| wr(u64, mc + 8 + i * 8, c.x[i]);
-    wr(u64, mc + 256, c.sp);
-    wr(u64, mc + 264, c.pc);
-    wr(u64, mc + 272, c.pstate);
-    wr(u64, mc + 280, 0);
-    var r = mc + SC_RESERVED;
-    wr(u32, r, FPSIMD_MAGIC);
-    wr(u32, r + 4, FPSIMD_SIZE);
-    wr(u32, r + 8, c.fpsr);
-    wr(u32, r + 12, c.fpcr);
-    for (0..32) |i| wr(u128, r + 16 + i * 16, c.v[i]);
-    r += FPSIMD_SIZE;
-    if (fault and c.esr != 0) {
-        wr(u32, r, ESR_MAGIC);
-        wr(u32, r + 4, 16);
-        wr(u64, r + 8, c.esr);
-        r += 16;
-    }
-    wr(u64, r, 0); // terminator {magic 0, size 0}
-
-    var nm = t.mask | act.mask;
-    if (act.flags & SA_NODEFER == 0) nm |= bit(sig);
-    @atomicStore(u64, &t.mask, nm & ~KILLSTOP, .release);
-
-    c.x[0] = sig;
-    c.x[1] = fr;
-    c.x[2] = uc;
-    c.x[29] = rec;
-    c.x[30] = if (act.flags & SA_RESTORER != 0) act.restorer else g_restorer;
-    c.sp = fr;
-    c.pc = act.handler;
 }
 
 // dispatchAll takes every signal deliverable to this thread and acts on it:
