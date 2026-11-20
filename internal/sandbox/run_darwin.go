@@ -282,7 +282,11 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	// entry uses the one its binary needs; a later execve that crosses into the
 	// other -- a native tree running a non-PIE static tool (gcc -> cc1), say --
 	// respawns with it (see execve's per-exec handoff).
-	nativeStub, err := signedStub()
+	guestX64, err := guestIsX64(guestPath)
+	if err != nil {
+		return 0, err
+	}
+	guestStub, err := signedStubFor(guestX64)
 	if err != nil {
 		return 0, err
 	}
@@ -290,8 +294,8 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	entryHvf := needsHvf(guestPath)
-	stubPath := nativeStub
+	entryHvf := needsHvf(guestPath) // false for an x86-64 guest: it maps+rewrites, no HVF VM
+	stubPath := guestStub
 	if entryHvf {
 		stubPath = hvfStub
 	}
@@ -380,7 +384,7 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	fs.newInitProc(cmd.Process.Pid, path, cfg.User).hvf = entryHvf
 	fs.noteStub(cmd.Process.Pid)
 	fs.run = &runInfo{
-		stub: nativeStub, hvfStub: hvfStub, chanPath: chanFile.Name(), pgid: cmd.Process.Pid,
+		stub: guestStub, hvfStub: hvfStub, x64: guestX64, chanPath: chanFile.Name(), pgid: cmd.Process.Pid,
 		stdin: stdin, stdout: stdout, stderr: stderr,
 		life: lifeR, broker: brk,
 	}
@@ -547,9 +551,10 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 		}
 		nr, a = ch.page.nr, ch.page.args
 		// An x86-64 guest posts x86-64 numbers; translate to the shared table's
-		// asm-generic keys (identity on arm64). The stub sentinels are large
-		// private values that pass through unchanged, so they still match below.
-		gnr, ga, generic := toGeneric(nr, a)
+		// asm-generic keys (identity for an arm64 guest). The stub sentinels are
+		// large private values that pass through unchanged, so they still match
+		// below. The arch is the guest's, not the supervisor's build arch.
+		gnr, ga, generic := g.toGeneric(nr, a)
 		switch gnr {
 		case lxExit:
 			code := int(int32(a[0]))
@@ -723,7 +728,7 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 
 		default:
 			if h, ok := handler(gnr); ok && generic {
-				ch.page.ret = uint64(fromGeneric(nr, a, h(g, ga)))
+				ch.page.ret = uint64(g.fromGeneric(nr, a, h(g, ga)))
 				g.ptraceSyscallExit(int64(ch.page.ret))
 				ch.reply(repResult)
 				break
@@ -761,27 +766,40 @@ func writeSeatbeltPaths(chanPath, root string) error {
 	return os.WriteFile(chanPath+".paths", []byte(root+"\x00"+tmp+"\x00"), 0o600)
 }
 
-// signedStub returns the path of the embedded stub, ad-hoc codesigned (arm64
-// refuses to run an unsigned binary). The signed file is kept in the user cache
-// directory under its content hash and reused: the first exec of a newly
-// signed binary costs about 130 ms of signature checking, later execs of the
-// same file about 10 ms.
-func signedStub() (string, error) {
-	bin := legacyX18(macstub.Binary)
+// signedStubFor returns the path of the map+rewrite stub for the guest's
+// architecture, ad-hoc codesigned (arm64 refuses to run an unsigned binary):
+// the x86-64 stub for an x86-64 guest, which runs under Rosetta, else the arm64
+// stub. The supervisor's own architecture does not matter -- a native arm64
+// build hosts an x86-64 guest this way. Both get the legacyX18 Mach-O patch; it
+// matters only to the arm64 stub (the guest's GCC code uses x18 as scratch,
+// which Darwin preserves only for a legacy-versioned image) and is a harmless
+// build-version edit on the x86-64 one.
+func signedStubFor(x64 bool) (string, error) {
+	if x64 {
+		return signAdhoc(legacyX18(macstub.BinaryAmd64), "stubx64-")
+	}
+	return signAdhoc(legacyX18(macstub.BinaryArm64), "stub-")
+}
+
+// signAdhoc writes bin to the user cache directory under its content hash,
+// ad-hoc codesigns it and returns the path, reusing an already-signed copy: the
+// first exec of a newly signed binary costs about 130 ms of signature checking,
+// later execs of the same file about 10 ms.
+func signAdhoc(bin []byte, prefix string) (string, error) {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		dir = os.TempDir()
 	}
 	dir = filepath.Join(dir, "laboon")
 	sum := sha256.Sum256(bin)
-	path := filepath.Join(dir, "stub-"+hex.EncodeToString(sum[:8]))
+	path := filepath.Join(dir, prefix+hex.EncodeToString(sum[:8]))
 	if _, err := os.Stat(path); err == nil {
 		return path, nil
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	f, err := os.CreateTemp(dir, ".stub-*")
+	f, err := os.CreateTemp(dir, "."+prefix+"*")
 	if err != nil {
 		return "", err
 	}
@@ -871,6 +889,9 @@ func needsHvf(elfPath string) bool {
 		return false
 	}
 	defer f.Close()
+	if f.Machine == elf.EM_X86_64 {
+		return false // the x86-64 stub maps and rewrites the guest; there is no HVF backend for it
+	}
 	if f.Type != elf.ET_EXEC {
 		return false
 	}

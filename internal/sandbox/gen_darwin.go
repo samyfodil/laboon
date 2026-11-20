@@ -72,9 +72,9 @@ func init() {
 	}
 }
 
-// toGeneric maps an x86-64 syscall to the shared table's key; the result goes
-// back through fromGeneric.
-func toGeneric(nr uint64, a [6]uint64) (uint64, [6]uint64, bool) {
+// x64ToGeneric maps an x86-64 syscall to the shared table's key; the result
+// goes back through x64FromGeneric.
+func x64ToGeneric(nr uint64, a [6]uint64) (uint64, [6]uint64, bool) {
 	switch nr {
 	case 34: // pause: a ppoll on nothing
 		return lxPpoll, [6]uint64{}, true
@@ -88,4 +88,22 @@ func toGeneric(nr uint64, a [6]uint64) (uint64, [6]uint64, bool) {
 	return x64Generic(nr, a)
 }
 
-func fromGeneric(nr uint64, a [6]uint64, r int64) int64 { return x64Result(nr, a, r) }
+func x64FromGeneric(nr uint64, a [6]uint64, r int64) int64 { return x64Result(nr, a, r) }
+
+// toGeneric/fromGeneric dispatch on the guest's architecture, not the
+// supervisor's build arch: a native supervisor can host an x86-64 guest (under
+// Rosetta, in the x86-64 stub) alongside arm64 guests. An arm64 guest already
+// posts the asm-generic numbers, so its translation is the identity.
+func (g *dguest) toGeneric(nr uint64, a [6]uint64) (uint64, [6]uint64, bool) {
+	if g.run.x64 {
+		return x64ToGeneric(nr, a)
+	}
+	return nr, a, true
+}
+
+func (g *dguest) fromGeneric(nr uint64, a [6]uint64, r int64) int64 {
+	if g.run.x64 {
+		return x64FromGeneric(nr, a, r)
+	}
+	return r
+}

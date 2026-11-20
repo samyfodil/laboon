@@ -1,4 +1,4 @@
-//go:build darwin || linux || windows
+//go:build (amd64 && (darwin || linux || windows)) || (darwin && arm64)
 
 package sandbox
 
