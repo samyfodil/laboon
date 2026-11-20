@@ -195,6 +195,10 @@ const DwStack = extern struct { sp: u64, size: u64, flags: c_int };
 extern "c" fn sigaction(sig: c_int, act: *const DwSigaction, old: ?*DwSigaction) c_int;
 extern "c" fn signal(sig: c_int, handler: usize) usize;
 extern "c" fn sigaltstack(ss: *const DwStack, old: ?*DwStack) c_int;
+extern "c" fn pthread_sigmask(how: c_int, set: ?*const u32, old: ?*u32) c_int;
+const SIG_UNBLOCK: c_int = 2;
+const SIG_SETMASK: c_int = 3;
+const KICK_MASK: u32 = (1 << (DW_SIGUSR1 - 1)) | (1 << (DW_SIGUSR2 - 1));
 extern "c" fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) ?*anyopaque;
 extern "c" fn pthread_self() usize;
 extern "c" fn pthread_mach_thread_np(t: usize) c_uint;
@@ -1759,6 +1763,20 @@ fn waitLocal(allow: u64, deadline: i64) bool {
     @atomicStore(bool, &tl.waiting, true, .seq_cst);
     defer @atomicStore(bool, &tl.waiting, false, .seq_cst);
     if (pendingAllowed(allow) != 0) return true;
+    // x86-64 serves the blocking sig syscalls inside the fault handler, which
+    // runs with the kick signals (USR1/USR2) blocked, so the supervisor's kick
+    // cannot cut the wait short. Open them around it: a kick that landed while
+    // they were blocked is delivered on the unblock, and the handler sets the
+    // word so the wait returns at once. arm64 waits outside any handler, where
+    // they are already open, so it leaves the mask alone.
+    var saved: u32 = 0;
+    if (!tstate.arm64) {
+        var k: u32 = KICK_MASK;
+        _ = pthread_sigmask(SIG_UNBLOCK, &k, &saved);
+    }
+    defer if (!tstate.arm64) {
+        _ = pthread_sigmask(SIG_SETMASK, &saved, null);
+    };
     if (deadline == 0) {
         futex.waitWord(&tl.word, 0, 0);
         return true;

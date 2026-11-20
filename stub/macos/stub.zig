@@ -716,7 +716,9 @@ fn lcFork(ch: *chan.Chan, frame: [*]u64) u64 {
     const child_off = ch.args[0];
     const flags = ch.args[1];
     const cc: *chan.Chan = @ptrCast(@alignCast(g_base + child_off));
-    const tp = @intFromPtr(pthread_getspecific(g_tp_key));
+    // The guest thread pointer to carry to the child: arm64 keeps it in the
+    // host TSD, x86-64 in the virtualized %fs base (g_guest_fsbase).
+    const tp = if (tstate.arm64) @intFromPtr(pthread_getspecific(g_tp_key)) else g_guest_fsbase;
     const pid = sfork.parent(@intFromPtr(frame), flags, ch.args[2], ch.args[4], ch.args[5], tp);
     if (pid <= 0) {
         // No child: retire the slot the supervisor set up for it.
@@ -751,7 +753,14 @@ fn forkChild(base: [*]u8, child_off: u64, parent_pid: u64, gpid: u64) noreturn {
     g_threads.store(1, .seq_cst);
     g_is_thread = false;
     g_ctid = if (t.flags & CLONE_CHILD_CLEARTID != 0) t.ctid else 0;
-    _ = pthread_setspecific(g_tp_key, @ptrFromInt(if (t.flags & CLONE_SETTLS != 0) t.tls else t.tp));
+    // Restore the guest thread pointer where this arch keeps it: the host TSD
+    // on arm64, the virtualized %fs base on x86-64 (as cloneBootstrap does).
+    const gtls = if (t.flags & CLONE_SETTLS != 0) t.tls else t.tp;
+    if (tstate.arm64) {
+        _ = pthread_setspecific(g_tp_key, @ptrFromInt(gtls));
+    } else {
+        g_guest_fsbase = gtls;
+    }
     cc.kind = chan.MSG_FORKED;
     cc.args[0] = rawGetpid();
     chan.exchange(cc); // supervisor records the pid and replies
@@ -1761,8 +1770,19 @@ fn mapElf(f: std.fs.File, sites: []const u32, hint: u64) Image {
             if (p_memsz > p_filesz and end % PAGE != 0) @memset(region[end - rb ..][0..@intCast(rdUp(end) - end)], 0);
             continue;
         }
+        // A non-congruent segment is read in rather than mapped. An earlier
+        // congruent segment's mmap, whose length rounds up to Darwin's 16 KiB
+        // page, can leave this segment's first page file-backed by the same fd
+        // (the ELF's 4 KiB segments straddle the coarser page). preadAll copies
+        // straight into place, and a copyout that faults such a page deadlocks:
+        // the read holds the file's vnode lock while servicing the fault needs
+        // it. Read into a heap buffer, then copy in, where the COW fault is
+        // serviced normally (the read lock is already released).
         const seg = region[dst - rb ..][0..@intCast(p_filesz)];
-        if ((f.preadAll(seg, p_off) catch _exit(3)) != seg.len) _exit(3);
+        const tmp = std.heap.page_allocator.alloc(u8, seg.len) catch _exit(3);
+        if ((f.preadAll(tmp, p_off) catch _exit(3)) != tmp.len) _exit(3);
+        @memcpy(seg, tmp);
+        std.heap.page_allocator.free(tmp);
         if (rd32(d, @intCast(ph + 4)) & 1 != 0) syncCode(dst, p_filesz);
     }
     const entry = bias + e_entry;

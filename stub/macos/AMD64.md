@@ -5,7 +5,8 @@ on the M4 under Rosetta.** `testdata/startup.c` prints `STARTUP-OK` and exits 0;
 `testdata/hello.c` prints its uname/argv line and exits 7 (printf/stdio, uname,
 malloc's brk/mmap, argv, exit code). The x86-64 stub compiles, both darwin arches
 build with per-arch embed, and the syscall-number ABI, `%fs` TLS virtualization,
-guest threads and signal delivery are all done and mac-validated (below).
+guest threads, signal delivery and fork/wait are all done and mac-validated
+(below).
 
 Threads (DONE, mac-validated 2026-11-20): clone/thread-create and thread exit
 run — `testdata/threads.c` reports `counter=4000 joined_sum=60` and exits 0, and
@@ -18,21 +19,46 @@ PT_LOADs over it, so a page the end of .text and the start of .rodata share
 keeps exec — else a never-run instruction there (_fini at exit) faulted once the
 process had threads.
 
-Signals (CORE DONE, mac-validated 2026-11-20): `testdata/signals.c` passes
-handler, kill-self, mask-pending, nested and ppoll-sigmask. x86-64 delivers
-handlers and applies sigreturn straight onto the trap's mcontext (no arm64
-brk-trap switch): serveTrap stashes the mcontext, the handler/sigsuspend/
+Signals (DONE, mac-validated 2026-11-20): `testdata/signals.c` passes 22 of 23
+cases — handler, kill-self, mask-pending, nested, ppoll-sigmask, sigchld-
+sigsuspend, sigaltstack, sa-restart/eintr-read, segv-siglongjmp, timers,
+sigtimedwait, the fork cases (kill-child, vm-die) and pthread-kill. x86-64
+delivers handlers and applies sigreturn straight onto the trap's mcontext (no
+arm64 brk-trap switch): serveTrap stashes the mcontext, the handler/sigsuspend/
 sigreturn paths build the switch context and run doSwitch on it, and
-sysSigreturnX64 parses deliverOnto's frame back.
+sysSigreturnX64 parses deliverOnto's frame back. The one remaining failure,
+`sigpipe-default`, is a pre-existing non-fork gap first reached now that the
+suite runs to the end (the held-fd stdio fast path returns EPIPE without routing
+it through the afterSyscall SIGPIPE raise); it is not an x86-64 regression.
 
-fork (ENV-BLOCKED, not a code bug): the fork child resume (resumeIsland) and
-thread-exit asm are in place, but fork could not be validated — running an
-x86-64 **fork** binary wedges macOS `syspolicyd`: a Rosetta process's read of the
-binary then hangs (`arch -x86_64 cat <forkbin>` alone reproduces it, laboon
-uninvolved), likely the fork pool spawning Rosetta stub processes fast. A fresh
-fork binary runs once (reaches loadAndEnter) then its file wedges; the stuck
-assessments do not clear without a mac reboot. Validate fork on a freshly booted
-mac, one run at a time. Non-fork guests are unaffected.
+fork (DONE, mac-validated 2026-11-20): fork/wait, a fork loop, and the
+fork-dependent signal cases all run — `testdata/forktest.c` and the kill-child,
+sigsuspend-child and vm-die cases of `testdata/signals.c` pass. The earlier
+"syspolicyd env block" was a misread of a stub self-deadlock; four fixes, in the
+order found:
+ - mapElf read-into-mmap deadlock. A congruent PT_LOAD is mmap'd file-backed
+   with its length rounded up to Darwin's 16 KiB page; for a fork binary that
+   rounded tail overlapped the next (non-congruent) segment's preadAll
+   destination, so the read copied into a page file-backed by the same fd and
+   held the file's vnode while its copyout page-fault needed it — a self-deadlock
+   (even a native `cat` of the half-read file then hangs on the vnode). Fixed by
+   reading a non-congruent segment into a heap buffer and memcpy'ing it into
+   place, where the COW fault is serviced with the read lock already dropped.
+   Only fork binaries hit it: they are slightly larger, so .rodata's end crosses
+   the 16 KiB boundary where a no-fork binary's does not.
+ - the child's guest thread pointer. lcFork/forkChild captured and restored it
+   from the host TSD; on x86-64 it lives in the virtualized `%fs` base
+   (`g_guest_fsbase`), as cloneBootstrap already handled.
+ - the child's register image. serveTrap builds the dispatch frame on the signal
+   stack, which the fresh child stub does not have, so resumeIsland read garbage;
+   the image now travels in the fork blob (sfork.zig) and the x86-64 child
+   resumes from its own copy. arm64's frame is in the mapped guest memory, so it
+   keeps using the frame address.
+ - waking a child blocked in sigsuspend. x86-64 serves the blocking sig syscalls
+   inside the fault handler, which runs with the kick signals (USR1/USR2)
+   blocked, so the supervisor's kick could not cut a child's `waitLocal` short;
+   waitLocal now opens them around the wait (arm64 waits outside any handler,
+   where they are already open).
 
 `%fs` TLS (DONE, mac-validated 2026-11-20): glibc keeps its thread pointer in
 `%fs` and reads TLS as `%fs:disp`. The physical `%fs` base cannot be set under
