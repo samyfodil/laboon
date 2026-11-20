@@ -154,13 +154,24 @@ like gen_linux_arm64.go), and the x86-64 translation for amd64 (gen_darwin_amd64
 `x64Generic`/`x64Result`/`swapOFlags` already compile for darwin/amd64
 (lx_x64nr_amd64.go). The amd64 side also needs the x86-64-specific handlers
 gen_linux_amd64.go registers (arch_prctl, poll, select, time, the x64Memory
-calls) adapted to darwin host calls. The hard sub-piece is **arch_prctl(ARCH_SET_FS):
-on darwin x86-64 the guest's TLS is %fs while Darwin/libSystem TLS is %gs (so %fs
-is free), but setting the guest thread's %fs base under Rosetta needs a stub
-mechanism (wrfsbase if CR4.FSGSBASE is honored, else a Mach thread_set_state /
-Darwin TSD call) — experiment on the mac.** glibc sets up TLS before main, so
-startup.c cannot finish until arch_prctl works. The rewriter's AnalyzeFS/FSSite
-is the hook if %fs accesses must be virtualized instead.
+calls) adapted to darwin host calls. The hard sub-piece is **arch_prctl(ARCH_SET_FS) / %fs TLS.** Measured on the mac:
+**`wrfsbase` raises SIGILL under Rosetta** (CR4.FSGSBASE not honored), so the
+guest's %fs base cannot be set directly — the windows stub's wrfsbase fast path
+(stub/windows/x86_64.zig) is unavailable here. The guest's %fs TLS must be
+**virtualized by rewriting the %fs-relative instructions**, like the windows port
+does and like the arm64 stub virtualizes tpidr_el0:
+- Supervisor: `rewrite.AnalyzeFS`/`AnalyzeEntriesFS` already find %fs sites
+  (`FSSite`); pass them to the stub alongside the syscall sites (a second list,
+  or merged — see run_windows_amd64.go which emits "%fs islands").
+- Stub: rewrite each %fs site so the access computes from a stored guest thread
+  pointer (a slot field, the SLOT_TP analog in stub/windows/x86_64.zig) instead
+  of the real %fs base; serve arch_prctl(ARCH_SET_FS) locally by storing the tp
+  in that slot (no wrfsbase). A %fs site with no room for a branch faults and is
+  serviced by onFault (the real %fs base is 0, so it faults low) — the
+  ud2/SIGILL machinery already exists.
+This is the one substantial remaining subsystem; the windows x86-64 port is the
+direct reference. glibc sets up %fs TLS before main, so startup.c blocks until
+it works. (Darwin/libSystem TLS is %gs, so the guest's %fs is otherwise free.)
 
 ## Implementation status (serve path DONE)
 
