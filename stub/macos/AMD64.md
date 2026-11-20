@@ -90,13 +90,30 @@ probe with `export fn`, since the accessors are `inline`).
       (tstate.arm64)` and routing the x86-64 syscall trap to the trampolines —
       is coupled to the x86-64 `wx` layer (phase 3) and the trampoline frame
       (1f), so it lands with them, not before.
-   e. Single-step: arm64 `step()` sets SPSR.SS; x86-64 sets RFLAGS.TF (bit 8) via
-      `tstate.setFlags`. `step` / `doSwitch` / `trapEnter` / `trapReturn`
-      arch-split (arm64 frame stride 816 and the x16/x17 pushes vs the x86-64
-      frame).
-   f. x86-64 trampolines: `lc_sig_switch`, `lc_trap_ret`, `lc_cp_*`, `lc_copy`,
-      `lc_load32` rewritten in x86-64 asm — same names and the same pc landmarks
-      the handler compares against.
+   e/f. **The x86-64 trap core is NOT arm64's island/`tramp_common` model — it is
+      the Linux x86-64 stub's `ud2`+SIGILL trap** (see `stub/zig/x86_64.zig` and
+      `stub/zig/stub.zig`). Why: arm64 `svc` is 4 bytes, so a rewritten site
+      branches to an island that runs `tramp_common` (the 784-byte saved frame).
+      x86-64 `syscall` is 2 bytes (`0f 05`) — too small for a 5-byte jmp — but
+      `ud2` is also 2 bytes (`0f 0b`), so **`rewriteSite` replaces `syscall`→`ud2`
+      in place**; the guest hits `ud2` → SIGILL → `onFault`, which services the
+      syscall straight from the signal's mcontext (the kernel already saved the
+      full register file there — no `tramp_common`, no islands, no
+      `buildIsland`/`ISLAND_SIZE`, no `lc_cp_*`/`lc_copy`/`lc_load32` trampolines
+      for the syscall path). Flow: `onFault` sees a `ud2` at a known guest site →
+      read nr=`ss.rax`, args={rdi,rsi,rdx,r10,r8,r9} (Linux x86-64 `Frame`
+      mapping) → run the dispatch → write the result to `ss.rax` → advance
+      `ss.rip` by 2 → return. The arm64 `tramp_common`/island machinery stays
+      arm64-only behind `if (tstate.arm64)` / per-arch build; it is not ported.
+      The remaining x86-64 work is therefore: (1) `rewriteSite` writes `0f 0b`;
+      (2) `onFault`'s x86-64 SIGILL path builds a frame from the mcontext and
+      calls the dispatch; (3) the dispatch (`serveSyscall` & friends) gets a frame
+      abstraction so it reads nr/args/resume/result per-arch (the macOS stub now
+      uses a raw arm64-shaped `frame: [*]u64`; the clone/fork/exec full-context
+      paths need the x86-64 register set, like the Linux stub's typed `Frame`);
+      (4) `%gs`-based per-thread slot like the Linux stub (`setSlot`), virtualized
+      for guest `%gs`. Single-step (RFLAGS.TF) is only needed where the x86-64
+      `wx`/`ool` layer wants it (phase 3), not for the syscall path.
    g. Signal-frame build/parse. `deliverOnto` (the Linux `rt_sigframe` builder)
       is **DONE** — the x86-64 branch builds `[pretcode][ucontext][siginfo]` with
       the 512-byte FXSAVE `_fpstate` above, grounded in the kernel UAPI
@@ -123,3 +140,17 @@ guest (`testdata/hello.c`, `testdata/startup.c` — build with
 `zig cc -target x86_64-macos` or on an x86-64 toolchain) under `arch -x86_64`.
 Start with `startup` (libc init + clean exit — exercises the `%rdx` invariant),
 then `hello`, then the mmap matrix.
+
+Probes: cross-compile a Zig object or a C harness and run it on the mac. Note a
+plain Zig `build-exe` with `pub fn main` SIGSEGVs in Zig's `start` under Rosetta,
+so write mac probes in C and build them there: `arch -x86_64 clang -arch x86_64`.
+A freshly written Mach-O needs `codesign -s - -f <bin>` (clang signs adhoc
+itself); stdout over ssh is block-buffered, so `setvbuf(stdout,NULL,_IONBF,0)` or
+`fflush` before `_exit`.
+
+**Validated on the mac (2026-11-19, C harness, faulting program):** the Darwin
+x86-64 mcontext layout (`offsetof es=0, ss=16, fs=184`), the GPR field reads
+(`ss.r15` survives a fault), `es.trapno==14`/`faultvaddr` for a #PF, and the
+FXSAVE-prefix claim that `fromMc`/`toMc`/`deliverOnto` rely on — `fcw` at `fs+8`,
+`xmm0` at `fs+8+160`, hardware-populated. So those pieces are mac-verified, not
+just probe-compiled.
