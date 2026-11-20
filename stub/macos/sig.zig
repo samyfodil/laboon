@@ -28,6 +28,7 @@ const wx = @import("wx.zig");
 const ool = @import("ool.zig");
 const hwcap = @import("hwcap.zig");
 const service = @import("service.zig");
+const tstate = @import("tstate.zig");
 
 pub const AREA_OFF: usize = chan.SLOT_SIZE * chan.MAX_SLOTS;
 pub const STRIDE: usize = 0x4000;
@@ -417,9 +418,9 @@ extern fn lc_cp_cancel() callconv(.C) void;
 
 // cpCancel moves a kick that interrupted lc_cp_sys before its svc to the
 // cancelled exit.
-fn cpCancel(mc: anytype) void {
-    const pc = mc.ss.pc;
-    if (pc >= @intFromPtr(&lc_cp_begin) and pc < @intFromPtr(&lc_cp_end)) mc.ss.pc = @intFromPtr(&lc_cp_cancel);
+fn cpCancel(mc: *std.c.mcontext_t) void {
+    const pc = tstate.pc(mc);
+    if (pc >= @intFromPtr(&lc_cp_begin) and pc < @intFromPtr(&lc_cp_end)) tstate.setPc(mc, @intFromPtr(&lc_cp_cancel));
 }
 
 // setBusy orders busy against this thread's own signal handlers only, which
@@ -1069,8 +1070,8 @@ fn idReg(mc: *std.c.mcontext_t) bool {
 fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) void {
     const uc: *std.c.ucontext_t = @ptrCast(@alignCast(ctx.?));
     const mc = uc.mcontext;
-    if (dsig_in == DW_SIGTRAP and mc.ss.pc == @intFromPtr(&lc_sig_switch)) return doSwitch(mc);
-    if (dsig_in == DW_SIGTRAP and mc.ss.pc == @intFromPtr(&lc_trap_ret) + 8) return trapReturn(mc);
+    if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_sig_switch)) return doSwitch(mc);
+    if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_trap_ret) + 8) return trapReturn(mc);
     if (dsig_in == DW_SIGTRAP and tl.ready) {
         if (ool.exit(tl.slot, mc)) |e| {
             if (e.jit) jit.initThread(); // back to execute mode
@@ -1136,12 +1137,12 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
             mc.es.far = f.far;
         }
     }
-    if (tl.busy and mc.ss.pc >= @intFromPtr(&lc_copy) and mc.ss.pc < @intFromPtr(&lc_copy_fault)) {
-        mc.ss.pc = @intFromPtr(&lc_copy_fault);
+    if (tl.busy and tstate.pc(mc) >= @intFromPtr(&lc_copy) and tstate.pc(mc) < @intFromPtr(&lc_copy_fault)) {
+        tstate.setPc(mc, @intFromPtr(&lc_copy_fault));
         return;
     }
-    if (tl.busy and mc.ss.pc == @intFromPtr(&lc_load32)) {
-        mc.ss.pc = @intFromPtr(&lc_load32_fault);
+    if (tl.busy and tstate.pc(mc) == @intFromPtr(&lc_load32)) {
+        tstate.setPc(mc, @intFromPtr(&lc_load32_fault));
         return;
     }
     if (!tl.ready or tl.busy) {

@@ -58,8 +58,29 @@ probe with `export fn`, since the accessors are `inline`).
 
 ## Phased plan
 
-1. `sig.zig`: wire `tstate` into the arch-neutral pc/sp/faultAddr/flags sites;
-   add the x86-64 `Ctx`/`fromMc`/`toMc`; TF single-step; the x86-64 trampolines.
+1. `sig.zig` — the trap core. Sub-steps:
+   a. Route the arch-neutral fault-handler spine through `tstate` (the
+      `lc_sig_switch` / `lc_trap_ret` / `lc_copy` / `lc_load32` landmark checks
+      and `cpCancel`). **DONE** — arm64 `__text` rebuilds byte-identical (only the
+      content-hash `LC_UUID` and the symbol string table move).
+   b. Arch-split `Ctx` (arm64: 31 GPRs + `pstate` + NEON `v[32]`; x86-64: 16 GPRs
+      + `rflags` + SSE `xmm[16]`) and the `TraceRegs` / `publishFrame` /
+      `traceRestore` register image (it is arm64 NT_PRSTATUS-shaped now; x86-64
+      wants `user_regs_struct`).
+   c. Arch-split `fromMc` / `toMc`: pc/sp/flags/fault go through `tstate`; the GPR
+      copy and SIMD save/restore stay per-arch (x86-64 reads `ss.rN` and the `fs`
+      float state; arm64 reads `ss.regs` and `ns.q`).
+   d. `onFault`'s arm64-only body — `es.esr` / `es.far` decode (`faultSignal`),
+      `wx.fault(esr,far,pc)`, `idReg` (the sysreg-read islands — no x86-64
+      analogue), `jit.Fault{esr,far}` — goes behind `if (tstate.arm64)`; the
+      x86-64 fault path reads `es.trapno` / `es.err` / `es.faultvaddr`.
+   e. Single-step: arm64 `step()` sets SPSR.SS; x86-64 sets RFLAGS.TF (bit 8) via
+      `tstate.setFlags`. `step` / `doSwitch` / `trapEnter` / `trapReturn`
+      arch-split (arm64 frame stride 816 and the x16/x17 pushes vs the x86-64
+      frame).
+   f. x86-64 trampolines: `lc_sig_switch`, `lc_trap_ret`, `lc_cp_*`, `lc_copy`,
+      `lc_load32` rewritten in x86-64 asm — same names and the same pc landmarks
+      the handler compares against.
 2. `proc.zig`: x86-64 fork/exec/thread context; zero `%rdx` at entry.
 3. `wx.zig`: x86-64 `MAP_JIT` W^X (drop the sysreg islands).
 4. `stub.zig`: x86-64 entry + syscall dispatch.
