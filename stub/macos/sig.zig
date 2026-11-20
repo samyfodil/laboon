@@ -194,8 +194,13 @@ extern "c" fn _exit(code: c_int) noreturn;
 extern "c" fn sched_yield() c_int;
 
 // Ctx is a guest thread's full user state, the currency between the trap frame,
-// the Darwin signal context and the Linux sigcontext.
-pub const Ctx = extern struct {
+// the Darwin signal context and the Linux sigcontext. Its shape is per-arch (the
+// register file and FP state differ); fromMc/toMc/deliverOnto map it to the
+// Darwin mcontext and the Linux sigcontext field by field, so its own layout is
+// private to the stub.
+pub const Ctx = if (tstate.arm64) CtxArm else CtxX64;
+
+const CtxArm = extern struct {
     x: [31]u64,
     sp: u64,
     pc: u64,
@@ -205,6 +210,37 @@ pub const Ctx = extern struct {
     fpcr: u32,
     fault: u64,
     esr: u64,
+};
+
+const CtxX64 = extern struct {
+    rax: u64,
+    rbx: u64,
+    rcx: u64,
+    rdx: u64,
+    rsi: u64,
+    rdi: u64,
+    rbp: u64,
+    rsp: u64,
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    rip: u64,
+    rflags: u64,
+    // FP/SSE state as the 512-byte FXSAVE image, the common currency between
+    // Darwin's x86_float_state64 and Linux's _fpstate (both FXSAVE-derived);
+    // fromMc/toMc (phase 1c) convert at the edges.
+    fx: [512]u8 align(16),
+    // Fault detail for a delivered SIGSEGV/SIGBUS/SIGILL, the x86-64 analogue of
+    // arm64's fault/esr: the faulting address and the trap number / error code
+    // (es.faultvaddr / es.trapno / es.err).
+    fault: u64,
+    trapno: u64,
+    err: u64,
 };
 
 var g_area: [*]u8 = undefined;
@@ -271,9 +307,39 @@ fn procOf(t: *Thread) *Proc {
 // Trace frame: the guest register image a tracer reads, published at offset 256
 // of this thread's record (past the Thread struct, before PROC_OFF). The layout
 // matches the Linux stub's trace.State and the supervisor's traceFrame: a kind
-// and dirty word, then the arm64 NT_PRSTATUS registers (x0..x30, sp, pc,
-// pstate).
-pub const TraceRegs = extern struct { x: [31]u64, sp: u64, pc: u64, pstate: u64 };
+// and dirty word, then the arch's ptrace register image — arm64 NT_PRSTATUS
+// (x0..x30, sp, pc, pstate) or the x86-64 user_regs_struct.
+pub const TraceRegs = if (tstate.arm64) TraceRegsArm else TraceRegsX64;
+const TraceRegsArm = extern struct { x: [31]u64, sp: u64, pc: u64, pstate: u64 };
+const TraceRegsX64 = extern struct {
+    r15: u64,
+    r14: u64,
+    r13: u64,
+    r12: u64,
+    rbp: u64,
+    rbx: u64,
+    r11: u64,
+    r10: u64,
+    r9: u64,
+    r8: u64,
+    rax: u64,
+    rcx: u64,
+    rdx: u64,
+    rsi: u64,
+    rdi: u64,
+    orig_rax: u64,
+    rip: u64,
+    cs: u64,
+    eflags: u64,
+    rsp: u64,
+    ss: u64,
+    fs_base: u64,
+    gs_base: u64,
+    ds: u64,
+    es: u64,
+    fs: u64,
+    gs: u64,
+};
 pub const TraceState = extern struct { kind: u64, dirty: u64, regs: TraceRegs };
 
 comptime {
@@ -289,6 +355,7 @@ pub fn traceState() *TraceState {
 // plus the island's two 16-byte pushes), the resume pc, and NZCV. The
 // supervisor reads this for the syscall stop and GETREGS.
 pub fn publishFrame(frame: [*]u64, pc: u64) void {
+    if (!tstate.arm64) @compileError("publishFrame: x86-64 frame image pending the trampoline register frame (AMD64.md 1e/1f)");
     const s = traceState();
     s.kind = 1;
     s.dirty = 0;
@@ -305,6 +372,7 @@ pub fn publishFrame(frame: [*]u64, pc: u64) void {
 // The guest sp cannot be moved here (the frame sits on it), matching the
 // supervisor's refusal to relocate it.
 pub fn traceRestore(frame: [*]u64) u64 {
+    if (!tstate.arm64) @compileError("traceRestore: x86-64 frame image pending the trampoline register frame (AMD64.md 1e/1f)");
     const s = traceState();
     s.dirty = 0;
     for (1..31) |i| frame[i] = s.regs.x[i];

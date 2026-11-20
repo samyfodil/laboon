@@ -63,10 +63,15 @@ probe with `export fn`, since the accessors are `inline`).
       `lc_sig_switch` / `lc_trap_ret` / `lc_copy` / `lc_load32` landmark checks
       and `cpCancel`). **DONE** — arm64 `__text` rebuilds byte-identical (only the
       content-hash `LC_UUID` and the symbol string table move).
-   b. Arch-split `Ctx` (arm64: 31 GPRs + `pstate` + NEON `v[32]`; x86-64: 16 GPRs
-      + `rflags` + SSE `xmm[16]`) and the `TraceRegs` / `publishFrame` /
-      `traceRestore` register image (it is arm64 NT_PRSTATUS-shaped now; x86-64
-      wants `user_regs_struct`).
+   b. Arch-split `Ctx` and `TraceRegs` (both now `if (tstate.arm64) …Arm else …X64`).
+      **DONE.** `CtxX64` = 16 named GPRs + `rip` + `rflags` + the FP/SSE state as
+      the 512-byte FXSAVE image (`fx`, the common currency between Darwin's
+      `x86_float_state64` and Linux's `_fpstate`) + the fault triple
+      (`fault`/`trapno`/`err`). `TraceRegsX64` = the Linux `user_regs_struct`
+      (r15…gs, 27×u64). Both compile-checked standalone for `x86_64-macos`; arm64
+      `__text` byte-identical. `publishFrame`/`traceRestore` keep their arm64
+      bodies behind a `!tstate.arm64 → @compileError` guard — their x86-64 images
+      come from the trampoline frame (1e/1f), so they are filled then.
    c. Arch-split `fromMc` / `toMc`: pc/sp/flags/fault go through `tstate`; the GPR
       copy and SIMD save/restore stay per-arch (x86-64 reads `ss.rN` and the `fs`
       float state; arm64 reads `ss.regs` and `ns.q`).
