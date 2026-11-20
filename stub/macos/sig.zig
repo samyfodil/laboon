@@ -1055,12 +1055,32 @@ export fn lc_sig_switch() callconv(.Naked) noreturn {
 }
 
 fn switchNow() noreturn {
-    // x86-64 serves syscalls inside the SIGILL handler, where it delivers a
-    // signal straight into the mcontext (no brk-trap context switch); this path
-    // is not reached on the startup/no-signal path and is pending that port.
-    if (!tstate.arm64) die(SIGSEGV);
     asm volatile ("b _lc_sig_switch");
     unreachable;
+}
+
+// x86-64 signal delivery. There is no arm64 brk-trap context switch: serveTrap
+// stores the trap's mcontext in g_sigmc, and the handler / sigsuspend /
+// sigreturn paths build tl.switch_ctx and apply it -- with any pending handlers
+// stacked by doSwitch -- straight onto that mcontext. g_sig_delivered tells
+// serveTrap the mcontext now holds the handler or restored context, so it
+// resumes there instead of writing the syscall result past the trap.
+pub threadlocal var g_sigmc: *std.c.mcontext_t = undefined;
+pub threadlocal var g_sig_delivered: bool = false;
+
+// x64SaveCtx seeds tl.switch_ctx from the trapped mcontext (GPRs + FP) with the
+// syscall's result in rax and the resume pc -- frame[33] (just past the trapped
+// syscall) normally, or the syscall site itself for a restart, where rax keeps
+// the call number so the re-executed syscall reissues with its arguments.
+fn x64SaveCtx(rax: u64, rip: u64) void {
+    fromMc(&tl.switch_ctx, g_sigmc);
+    tl.switch_ctx.rax = rax;
+    tl.switch_ctx.rip = rip;
+}
+
+fn x64Deliver() void {
+    doSwitch(g_sigmc);
+    g_sig_delivered = true;
 }
 
 // A trap wx.zig placed for an svc is served as the svc's island would serve
@@ -1178,17 +1198,26 @@ noinline fn pendingAfter(frame: [*]u64, r0: u64) ?u64 {
                 .handler => {
                     const rv: i64 = @bitCast(r0);
                     const restart = rv == -ERESTARTNOINTR or (rv == -ERESTARTSYS and act.flags & SA_RESTART != 0);
-                    if (restart) {
-                        fromFrame(&tl.switch_ctx, frame, frame[0], frame[33] - 4);
-                    } else {
-                        if (rv == -ERESTART_RESTARTBLOCK) @import("local.zig").forgetRestart();
-                        fromFrame(&tl.switch_ctx, frame, if (isRestart(r0)) neg(EINTR) else r0, frame[33]);
-                    }
+                    if (!restart and rv == -ERESTART_RESTARTBLOCK) @import("local.zig").forgetRestart();
                     tl.first_sig = s;
                     tl.first_info = info;
                     tl.first_act = act;
                     tl.first_mask = real orelse ld(&thr().mask);
-                    switchNow();
+                    if (tstate.arm64) {
+                        if (restart) {
+                            fromFrame(&tl.switch_ctx, frame, frame[0], frame[33] - 4);
+                        } else {
+                            fromFrame(&tl.switch_ctx, frame, if (isRestart(r0)) neg(EINTR) else r0, frame[33]);
+                        }
+                        switchNow();
+                    }
+                    if (restart) {
+                        x64SaveCtx(g_sigmc.ss.rax, frame[33] - 2); // re-run the syscall after the handler
+                    } else {
+                        x64SaveCtx(if (isRestart(r0)) neg(EINTR) else r0, frame[33]);
+                    }
+                    x64Deliver();
+                    return r0;
                 },
             }
         }
@@ -1635,7 +1664,7 @@ fn sysSigaltstack(ss: u64, oss: u64, sp: u64) u64 {
 // guest memory: a part of it that is not mapped, or a malformed record, kills
 // the process with SIGSEGV as the kernel's badframe path does.
 fn sysSigreturn(frame: [*]u64) u64 {
-    if (!tstate.arm64) die(SIGSEGV); // x86-64 sigreturn pending x86-64 signal delivery
+    if (!tstate.arm64) return sysSigreturnX64(frame);
     const sp = @intFromPtr(frame) + 816;
     if (sp & 15 != 0) die(SIGSEGV);
     const uc = sp + 128;
@@ -1676,6 +1705,51 @@ fn sysSigreturn(frame: [*]u64) u64 {
     tl.switch_ctx = c;
     tl.first_sig = 0;
     switchNow();
+}
+
+// sysSigreturnX64 restores the state deliverOnto saved in the x86-64
+// rt_sigframe. glibc's restorer (__restore_rt) enters rt_sigreturn with rsp at
+// the ucontext (fr+8), so the saved sigcontext is at uc+40, the alt-stack at
+// uc+16 and the mask at uc+296. A malformed or unmapped frame kills the process
+// with SIGSEGV, as the kernel's badframe path does.
+fn sysSigreturnX64(frame: [*]u64) u64 {
+    const uc = frame[proc.XR_RSP];
+    const sc = uc + 40;
+    const r = get([24]u64, sc) orelse die(SIGSEGV); // r8..cr2 then the fpstate ptr
+    var c: Ctx = undefined;
+    c.r8 = r[0];
+    c.r9 = r[1];
+    c.r10 = r[2];
+    c.r11 = r[3];
+    c.r12 = r[4];
+    c.r13 = r[5];
+    c.r14 = r[6];
+    c.r15 = r[7];
+    c.rdi = r[8];
+    c.rsi = r[9];
+    c.rbp = r[10];
+    c.rbx = r[11];
+    c.rdx = r[12];
+    c.rax = r[13];
+    c.rcx = r[14];
+    c.rsp = r[15];
+    c.rip = r[16];
+    c.rflags = r[17];
+    c.fault = 0;
+    c.trapno = 0;
+    c.err = 0;
+    const fpst = r[23];
+    c.fx = if (fpst != 0) (get([512]u8, fpst) orelse die(SIGSEGV)) else std.mem.zeroes([512]u8);
+    const head = get([3]u64, uc + 16) orelse die(SIGSEGV); // uc_stack: ss_sp, ss_flags|pad, ss_size
+    const mask = get(u64, uc + 296) orelse die(SIGSEGV); // uc_sigmask
+    const t = thr();
+    @atomicStore(u64, &t.mask, mask & ~KILLSTOP, .release);
+    var ss: [3]u64 = .{ head[0], head[1], head[2] };
+    _ = sysSigaltstack(@intFromPtr(&ss), 0, c.rsp);
+    tl.switch_ctx = c;
+    tl.first_sig = 0;
+    x64Deliver();
+    return 0;
 }
 
 // waitLocal sleeps until a kick or the deadline (CLOCK_MONOTONIC ns, 0 = none).
@@ -1750,12 +1824,17 @@ fn sysSigsuspend(frame: [*]u64) u64 {
             .stop => stopSelf(s),
             .term => die(s),
             .handler => {
-                fromFrame(&tl.switch_ctx, frame, neg(EINTR), frame[33]);
                 tl.first_sig = s;
                 tl.first_info = info;
                 tl.first_act = act;
                 tl.first_mask = old;
-                switchNow();
+                if (tstate.arm64) {
+                    fromFrame(&tl.switch_ctx, frame, neg(EINTR), frame[33]);
+                    switchNow();
+                }
+                x64SaveCtx(neg(EINTR), frame[33]);
+                x64Deliver();
+                return neg(EINTR);
             },
         }
     }

@@ -420,10 +420,22 @@ pub fn serveTrap(mc: *std.c.mcontext_t) void {
     frame[proc.XR_R15] = mc.ss.r15;
     frame[proc.XR_RIP] = mc.ss.rip + 2;
     frame[proc.XR_RFLAGS] = mc.ss.rflags;
+    // The signal path delivers handlers and applies sigreturn straight onto this
+    // mcontext (there is no arm64 brk-trap context switch); g_sig_delivered then
+    // means the mcontext already holds the handler or restored context.
+    sig.g_sigmc = mc;
     sig.enter();
     while (true) {
         const r = serveSyscall(&frame);
+        if (sig.g_sig_delivered) {
+            sig.g_sig_delivered = false;
+            return; // a sigreturn restored the interrupted context onto mc
+        }
         if (sig.afterSyscall(&frame, r)) |v| {
+            if (sig.g_sig_delivered) {
+                sig.g_sig_delivered = false;
+                return; // a signal handler was delivered onto mc
+            }
             mc.ss.rax = v; // the syscall result
             mc.ss.rip = frame[33]; // resume (a restart leaves frame[33] at the site)
             return;
