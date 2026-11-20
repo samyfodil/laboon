@@ -208,7 +208,20 @@ const seatbelt_profile: [*:0]const u8 =
     \\  (syscall-number SYS_psynch_cvsignal SYS_psynch_cvwait SYS_psynch_cvclrprepost)
     \\  (syscall-number SYS_ulock_wait SYS_ulock_wake SYS_ulock_wait2)
     \\  (syscall-number SYS_fileport_makeport SYS_fileport_makefd SYS_dup2))
-    ++ "\n(deny syscall-mach" ++ sb_kill ++ ")\n" ++
+    ++ mach_profile;
+
+// The Mach allowlist is per-arch. arm64 traps the guest's missed `svc` as the
+// kernel's EXC_BAD_INSTRUCTION backstop and needs only the Mach calls the stub
+// itself makes. x86-64 runs under Rosetta on Apple Silicon, and Rosetta's own
+// exception server delivers the guest's `ud2` trap -- to do so it suspends the
+// faulting thread, reads/writes its state and allocates reply ports, a set an
+// arm64-tuned allowlist omits (the failure is "failed to suspend thread that
+// generated exception" / "failed to allocate runtime msg port"). Allow the Mach
+// layer there; the deny-default and the BSD allowlist still bound file, network,
+// signal and process reach. A native x86-64 mac (no Rosetta) can later use the
+// tight arm64-style list.
+const mach_profile = if (tstate.arm64)
+    "\n(deny syscall-mach" ++ sb_kill ++ ")\n" ++
     \\(allow syscall-mach
     \\  (machtrap-number MSC__kernelrpc_mach_vm_allocate_trap MSC__kernelrpc_mach_vm_deallocate_trap)
     \\  (machtrap-number MSC__kernelrpc_mach_vm_protect_trap MSC__kernelrpc_mach_vm_map_trap)
@@ -223,6 +236,10 @@ const seatbelt_profile: [*:0]const u8 =
     \\  (kernel-mig-routine host_get_clock_service semaphore_create mach_ports_register)
     \\  (kernel-mig-routine mach_ports_lookup task_get_special_port_from_user task_set_special_port)
     \\  (kernel-mig-routine _mach_make_memory_entry mach_vm_map_external))
+else
+    \\
+    \\(allow syscall-mach)
+    \\(allow syscall-mig)
 ;
 
 // noCore drops the core-size limit, soft and hard, to 0: a crashing stub
@@ -784,6 +801,16 @@ fn lcRewrite(ch: *chan.Chan) void {
 // rewriteSite turns the svc, tpidr_el0 or ctr_el0 access at pc into a b to its
 // island. A word that is none of them (a stray site, or data) is left as it is.
 fn rewriteSite(isl: *Islands, pc: u64) void {
+    if (!tstate.arm64) {
+        // x86-64: the supervisor sends the guest's syscall (0f 05) site
+        // addresses; overwrite each 2-byte syscall in place with ud2 (0f 0b),
+        // which onFault traps and serves (serveTrap). No islands, no sysreg
+        // rewrites (x86-64 TLS is arch_prctl, a serviced syscall). The rewrite
+        // precedes guest execution, so no icache flush is needed.
+        const u: *align(1) u16 = @ptrFromInt(pc);
+        if (u.* == 0x050f) u.* = 0x0b0f;
+        return;
+    }
     const w: *u32 = @ptrFromInt(pc);
     const insn = w.*;
     const n = insn & 0x1f;

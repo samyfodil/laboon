@@ -98,6 +98,9 @@ func imageBase(f *elf.File) uint64 {
 }
 
 func computeSitesELF(f *elf.File) ([]uint32, error) {
+	if f.Machine == elf.EM_X86_64 {
+		return computeSitesELFX64(f)
+	}
 	minbase := imageBase(f)
 	funcs := rewrite.A64ELFEntries(f)
 
@@ -133,6 +136,43 @@ func computeSitesELF(f *elf.File) ([]uint32, error) {
 				continue
 			}
 			sites = append(sites, uint32(base+uint64(off)))
+		}
+	}
+	return sites, nil
+}
+
+// computeSitesELFX64 finds the guest's syscall (0f 05) sites in an x86-64 ELF via
+// the recursive-descent decoder (rewrite.AnalyzeEntries), returning (vaddr -
+// minbase) offsets. The macOS x86-64 stub overwrites each 2-byte syscall with
+// ud2 in place (rewriteSite), so no byte-stealing cave is needed — only the site
+// offsets. x86-64 has no sysreg sites: its TLS is arch_prctl, a serviced syscall.
+func computeSitesELFX64(f *elf.File) ([]uint32, error) {
+	minbase := imageBase(f)
+	eh, sym := rewrite.ELFEntries(f)
+	entries := append(append([]uint64{}, eh...), sym...)
+	if f.Entry != 0 {
+		entries = append(entries, f.Entry)
+	}
+	ranges := rewrite.ExecRanges(f)
+	var sites []uint32
+	for _, p := range f.Progs {
+		if p.Type != elf.PT_LOAD || p.Flags&elf.PF_X == 0 {
+			continue
+		}
+		code := make([]byte, p.Filesz)
+		if _, err := io.ReadFull(p.Open(), code); err != nil {
+			return nil, err
+		}
+		base := p.Vaddr - minbase
+		var roots []int
+		for _, e := range entries {
+			if e >= p.Vaddr && e < p.Vaddr+p.Filesz {
+				roots = append(roots, int(e-p.Vaddr))
+			}
+		}
+		scav := rewrite.SegmentRanges(ranges, p.Vaddr, p.Filesz)
+		for _, s := range rewrite.AnalyzeEntries(code, roots, scav).Sites {
+			sites = append(sites, uint32(base+uint64(s.Off)))
 		}
 	}
 	return sites, nil
