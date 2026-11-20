@@ -30,7 +30,15 @@ const proc = @import("proc.zig");
 const sbcache = @import("sbcache.zig");
 const builtin = @import("builtin");
 const sig = @import("sig.zig");
+const tstate = @import("tstate.zig");
 const life = @import("life.zig");
+
+// The guest syscall instruction the rewriter traps: arm64 `svc` is 4 bytes and
+// is branch-rewritten to an island; x86-64 `syscall` is 2 bytes (too small for a
+// branch) and is overwritten with `ud2` (0f 0b) in place, serviced from the
+// SIGILL mcontext. SITE_DELTA is that instruction's length, so the resume pc
+// minus it is the syscall site (for restart).
+const SITE_DELTA: u64 = if (tstate.arm64) 4 else 2;
 const sfork = @import("sfork.zig");
 const service = @import("service.zig");
 const smaps = @import("smaps.zig");
@@ -308,6 +316,34 @@ export fn tramp_handler(frame: [*]u64) callconv(.C) u64 {
     }
 }
 
+// serveTrap is the x86-64 equivalent of the arm64 island -> tramp_common ->
+// tramp_handler path. There is no saved-register frame or island: the SIGILL
+// from a rewritten `syscall` (now `ud2`) already carried the full guest context
+// in the signal's mcontext. onFault calls this with that mcontext. It projects
+// the registers into the arm64-shaped `frame` the dispatch reads -- args at
+// 0..5, the number at 8, the resume pc at 33 -- serves the syscall, then writes
+// the result into rax and advances past the 2-byte ud2.
+pub fn serveTrap(mc: *std.c.mcontext_t) void {
+    var frame = std.mem.zeroes([proc.FRAME_BYTES / 8]u64);
+    frame[0] = mc.ss.rdi;
+    frame[1] = mc.ss.rsi;
+    frame[2] = mc.ss.rdx;
+    frame[3] = mc.ss.r10;
+    frame[4] = mc.ss.r8;
+    frame[5] = mc.ss.r9;
+    frame[8] = mc.ss.rax; // the syscall number
+    frame[33] = mc.ss.rip + 2; // resume just past the ud2
+    sig.enter();
+    while (true) {
+        const r = serveSyscall(&frame);
+        if (sig.afterSyscall(&frame, r)) |v| {
+            mc.ss.rax = v; // the syscall result
+            mc.ss.rip = frame[33]; // resume (a restart leaves frame[33] at the site)
+            return;
+        }
+    }
+}
+
 // localTraced reports a syscall the stub just served in-guest to the supervisor
 // so a traced thread's ptrace stops still fire. Untraced (the common case) it is
 // a no-op returning the result unchanged. Otherwise it publishes the entry
@@ -316,12 +352,13 @@ export fn tramp_handler(frame: [*]u64) callconv(.C) u64 {
 // The call has already run, so a tracer can observe it and rewrite its result,
 // but cannot edit the arguments or suppress it.
 fn localTraced(frame: [*]u64, r: u64) u64 {
+    if (!tstate.arm64) return r; // x86-64 ptrace deferred (not on the startup path)
     const ch = g_chan;
     if (ch.stdio & STDIO_TRACED == 0) return r;
     sig.publishFrame(frame, frame[33]);
     ch.kind = chan.MSG_TRACE_LOCAL;
     ch.nr = frame[8];
-    ch.guest_rip = frame[33] -% 4;
+    ch.guest_rip = frame[33] -% SITE_DELTA;
     ch.args[0] = frame[0];
     ch.args[1] = frame[1];
     ch.args[2] = frame[2];
@@ -358,7 +395,9 @@ fn serveSyscall(frame: [*]u64) u64 {
     const ch = g_chan;
     // A traced thread publishes its register frame before posting, so the
     // supervisor's syscall-entry stop and GETREGS see the guest state.
-    if (ch.stdio & STDIO_TRACED != 0) sig.publishFrame(frame, frame[33]);
+    if (tstate.arm64) {
+        if (ch.stdio & STDIO_TRACED != 0) sig.publishFrame(frame, frame[33]);
+    }
     ch.kind = chan.MSG_SYSCALL;
     ch.nr = frame[8];
     if (ch.nr == NR_SET_TID_ADDRESS) {
@@ -367,7 +406,7 @@ fn serveSyscall(frame: [*]u64) u64 {
         g_ctid = frame[0];
         ch.nr = NR_GETTID;
     }
-    ch.guest_rip = frame[33] -% 4; // resume pc is at [sp,#264]; the svc site is -4
+    ch.guest_rip = frame[33] -% SITE_DELTA; // the syscall site is one instruction back
     ch.args[0] = frame[0];
     ch.args[1] = frame[1];
     ch.args[2] = frame[2];
@@ -378,7 +417,9 @@ fn serveSyscall(frame: [*]u64) u64 {
     const r = serveReplies(ch, frame);
     // A tracer may have edited the registers during a stop; apply them before
     // the guest resumes, overriding the syscall result in x0.
-    if (ch.stdio & STDIO_TRACED != 0 and sig.traceState().dirty != 0) return sig.traceRestore(frame);
+    if (tstate.arm64) {
+        if (ch.stdio & STDIO_TRACED != 0 and sig.traceState().dirty != 0) return sig.traceRestore(frame);
+    }
     return r;
 }
 

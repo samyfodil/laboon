@@ -1359,20 +1359,29 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
         }
     }
     if (dsig_in == DW_SIGILL and tl.ready and !tl.busy) {
-        switch (wx.isTrap(mc.ss.pc)) {
-            .trap => return trapEnter(mc),
-            .again => return,
-            .excl => {
-                var st: wx.Step = .{};
-                switch (wx.exclTrap(mc.ss.pc, &st)) {
-                    .handled => return,
-                    .step => if (step(mc, &st)) return,
-                    else => {},
-                }
-            },
-            .no => {},
+        if (tstate.arm64) {
+            switch (wx.isTrap(mc.ss.pc)) {
+                .trap => return trapEnter(mc),
+                .again => return,
+                .excl => {
+                    var st: wx.Step = .{};
+                    switch (wx.exclTrap(mc.ss.pc, &st)) {
+                        .handled => return,
+                        .step => if (step(mc, &st)) return,
+                        else => {},
+                    }
+                },
+                .no => {},
+            }
+            if (idReg(mc)) return;
+        } else {
+            // A rewritten guest syscall site is a 2-byte ud2 (0f 0b). Service it
+            // straight from the mcontext and resume past it (AMD64.md 1e/1f).
+            if (@as(*align(1) const u16, @ptrFromInt(tstate.pc(mc))).* == 0x0b0f) {
+                @import("root").serveTrap(mc);
+                return;
+            }
         }
-        if (idReg(mc)) return;
     }
     var dsig = dsig_in;
     if (dsig == DW_SIGSEGV or dsig == DW_SIGBUS) {
