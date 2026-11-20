@@ -62,8 +62,9 @@ const sig = @import("sig.zig");
 const mem = @import("mem.zig");
 const ool = @import("ool.zig");
 const service = @import("service.zig");
+const tstate = @import("tstate.zig");
 
-const PAGE: u64 = 0x4000;
+const PAGE: u64 = tstate.page;
 const PROT_READ: u8 = 1;
 const PROT_WRITE: u8 = 2;
 const PROT_EXEC: u8 = 4;

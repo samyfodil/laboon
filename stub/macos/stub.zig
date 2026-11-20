@@ -74,7 +74,7 @@ pub var g_tp_key: c_ulong = 0;
 // exit_group) from the main thread while others run ends only that thread.
 var g_threads = std.atomic.Value(u32).init(1);
 
-const PAGE: u64 = 0x4000; // Darwin arm64: 16 KiB pages
+const PAGE: u64 = tstate.page; // arm64 16 KiB; x86-64 4 KiB under Rosetta
 const SVC0: u32 = 0xd4000001;
 
 // Linux arm64 syscalls and clone flags the stub serves itself.

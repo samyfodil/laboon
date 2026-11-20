@@ -16,6 +16,7 @@
 const std = @import("std");
 const mem = @import("mem.zig");
 const ool = @import("ool.zig");
+const tstate = @import("tstate.zig");
 
 extern "c" fn pthread_jit_write_protect_np(enabled: c_int) void;
 extern "c" fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) ?*anyopaque;
@@ -33,7 +34,7 @@ const MAP_ANON: c_int = 0x1000;
 const MAP_FAILED: usize = std.math.maxInt(usize);
 const DARWIN_EACCES: c_int = 13;
 
-const PAGE: u64 = 0x4000;
+const PAGE: u64 = tstate.page;
 
 // Linux errnos, returned negated. Darwin shares these numbers.
 const ENOMEM: i64 = 12;

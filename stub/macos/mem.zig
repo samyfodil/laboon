@@ -16,8 +16,9 @@ const jit = @import("jit.zig");
 const procinfo = @import("procinfo.zig");
 const sig = @import("sig.zig");
 const wx = @import("wx.zig");
+const tstate = @import("tstate.zig");
 
-pub const PAGE: u64 = 0x4000;
+pub const PAGE: u64 = tstate.page;
 
 // GUEST_BASE is where the guest's memory goes when it names no address. A
 // stub's own mappings all lie below it (its malloc's nano zone far above), so

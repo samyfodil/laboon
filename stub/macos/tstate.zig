@@ -10,6 +10,14 @@ const builtin = @import("builtin");
 
 pub const arm64 = builtin.target.cpu.arch == .aarch64;
 
+// page is the stub's (and the guest's) VM page size, the granularity mmap and
+// mprotect enforce. On Apple Silicon the hardware page is 16 KiB, but Rosetta
+// gives an x86-64 process a 4 KiB VM-map granularity (getpagesize() == 4096,
+// mmap returns 4 KiB-aligned, 4 KiB MAP_FIXED/mprotect succeed) -- matching
+// x86-64 Linux. The arm64 stub runs native at 16 KiB. AT_PAGESZ, the guest's
+// mmap/mprotect rounding and ELF segment mapping all key off this.
+pub const page: u64 = if (arm64) 0x4000 else 0x1000;
+
 pub inline fn pc(mc: *std.c.mcontext_t) u64 {
     return if (arm64) mc.ss.pc else mc.ss.rip;
 }

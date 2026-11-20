@@ -13,13 +13,14 @@
 
 const std = @import("std");
 const chan = @import("chan.zig");
+const tstate = @import("tstate.zig");
 
 extern "c" fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) ?*anyopaque;
 extern "c" fn mprotect(addr: *anyopaque, len: usize, prot: c_int) c_int;
 extern "c" fn sys_icache_invalidate(start: *anyopaque, len: usize) void;
 
 pub const MAX = 32; // instructions at a time
-const PAGE: usize = 0x4000;
+const PAGE: usize = tstate.page;
 const EXIT: u32 = 0xd4200000 | (0x5e << 5); // brk #0x5e
 
 // A thread's page, by its slot, and what it last ran: n instructions from
