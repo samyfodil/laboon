@@ -1,11 +1,38 @@
 # darwin/amd64 — x86-64 macOS stub port
 
-Status: **WORKING — glibc static-PIE guests run end-to-end on the M4 under
-Rosetta.** `testdata/startup.c` prints `STARTUP-OK` and exits 0; `testdata/hello.c`
-prints its uname/argv line and exits 7 (exercising printf/stdio, uname, malloc's
-brk/mmap, argv, and the exit code). The x86-64 stub compiles, both darwin arches
-build with per-arch embed, and the two remaining subsystems — the syscall-number
-ABI and `%fs` TLS virtualization — are both done and mac-validated (below).
+Status: **WORKING — glibc static-PIE guests run multi-threaded and take signals
+on the M4 under Rosetta.** `testdata/startup.c` prints `STARTUP-OK` and exits 0;
+`testdata/hello.c` prints its uname/argv line and exits 7 (printf/stdio, uname,
+malloc's brk/mmap, argv, exit code). The x86-64 stub compiles, both darwin arches
+build with per-arch embed, and the syscall-number ABI, `%fs` TLS virtualization,
+guest threads and signal delivery are all done and mac-validated (below).
+
+Threads (DONE, mac-validated 2026-11-20): clone/thread-create and thread exit
+run — `testdata/threads.c` reports `counter=4000 joined_sum=60` and exits 0, and
+RWX (`testdata/rwx.c`) works. serveTrap captures the full guest register image
+so the clone child (proc.resumeFrame) resumes with the right state; a clone is
+served inside onFault (the SIGILL trap), so the child pthread's host mask was
+unblocked for the stub's trap signals (it inherited SIGILL blocked, which the
+syscall trap needs). mapElf now protects each 16 KiB page with the union of the
+PT_LOADs over it, so a page the end of .text and the start of .rodata share
+keeps exec — else a never-run instruction there (_fini at exit) faulted once the
+process had threads.
+
+Signals (CORE DONE, mac-validated 2026-11-20): `testdata/signals.c` passes
+handler, kill-self, mask-pending, nested and ppoll-sigmask. x86-64 delivers
+handlers and applies sigreturn straight onto the trap's mcontext (no arm64
+brk-trap switch): serveTrap stashes the mcontext, the handler/sigsuspend/
+sigreturn paths build the switch context and run doSwitch on it, and
+sysSigreturnX64 parses deliverOnto's frame back.
+
+fork (ENV-BLOCKED, not a code bug): the fork child resume (resumeIsland) and
+thread-exit asm are in place, but fork could not be validated — running an
+x86-64 **fork** binary wedges macOS `syspolicyd`: a Rosetta process's read of the
+binary then hangs (`arch -x86_64 cat <forkbin>` alone reproduces it, laboon
+uninvolved), likely the fork pool spawning Rosetta stub processes fast. A fresh
+fork binary runs once (reaches loadAndEnter) then its file wedges; the stuck
+assessments do not clear without a mac reboot. Validate fork on a freshly booted
+mac, one run at a time. Non-fork guests are unaffected.
 
 `%fs` TLS (DONE, mac-validated 2026-11-20): glibc keeps its thread pointer in
 `%fs` and reads TLS as `%fs:disp`. The physical `%fs` base cannot be set under
