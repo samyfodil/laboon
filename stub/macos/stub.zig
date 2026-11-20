@@ -488,7 +488,7 @@ fn x64gen(nr: u64) u64 {
 // then reads its TLS as %fs:disp; the physical %fs base cannot be set under
 // Rosetta (wrfsbase faults), so these hold the value the %fs-site handling
 // resolves against. Per thread, like the segment base they stand in for.
-threadlocal var g_guest_fsbase: u64 = 0;
+pub threadlocal var g_guest_fsbase: u64 = 0;
 threadlocal var g_guest_gsbase: u64 = 0;
 
 // archPrctl serves an x86-64 arch_prctl(code, addr): it stores or returns the

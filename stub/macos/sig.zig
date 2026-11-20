@@ -29,6 +29,7 @@ const ool = @import("ool.zig");
 const hwcap = @import("hwcap.zig");
 const service = @import("service.zig");
 const tstate = @import("tstate.zig");
+const fsmem = @import("fsmem.zig");
 
 pub const AREA_OFF: usize = chan.SLOT_SIZE * chan.MAX_SLOTS;
 pub const STRIDE: usize = 0x4000;
@@ -1452,6 +1453,11 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
                 return;
             }
         }
+    }
+    // x86-64 %fs is virtualized: glibc's %fs:disp TLS reads/writes fault (the
+    // physical %fs base is 0) and are emulated against the stored guest base.
+    if (!tstate.arm64 and dsig_in == DW_SIGSEGV and tl.ready and !tl.busy) {
+        if (fsmem.emulate(mc)) return;
     }
     var dsig = dsig_in;
     // The arm64 W^X/OOL fault handling and the stub's copy-helper landmarks are

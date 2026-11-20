@@ -1,12 +1,28 @@
 # darwin/amd64 — x86-64 macOS stub port
 
-Status: **in progress — syscall-number ABI DONE, at the %fs TLS boundary**. The
-x86-64 stub compiles, both darwin arches build with per-arch embed, and a glibc
-static-PIE guest (`testdata/startup.c`) runs end-to-end on the M4 under Rosetta:
-it loads, rewrites syscalls to `ud2`, runs through libc self-relocation and TLS
-setup, dispatches its syscalls through the number-ABI translation, and faults
-exactly at the first `%fs` access (SIGSEGV at `si_addr=0x10`, physical `%fs`
-base 0). The one remaining subsystem is `%fs` TLS virtualization (below).
+Status: **WORKING — glibc static-PIE guests run end-to-end on the M4 under
+Rosetta.** `testdata/startup.c` prints `STARTUP-OK` and exits 0; `testdata/hello.c`
+prints its uname/argv line and exits 7 (exercising printf/stdio, uname, malloc's
+brk/mmap, argv, and the exit code). The x86-64 stub compiles, both darwin arches
+build with per-arch embed, and the two remaining subsystems — the syscall-number
+ABI and `%fs` TLS virtualization — are both done and mac-validated (below).
+
+`%fs` TLS (DONE, mac-validated 2026-11-20): glibc keeps its thread pointer in
+`%fs` and reads TLS as `%fs:disp`. The physical `%fs` base cannot be set under
+Rosetta (`wrfsbase` SIGILLs), so it is virtualized: `arch_prctl(ARCH_SET_FS)`
+stores the base in the stub (`g_guest_fsbase`), the `%fs` instructions are left
+in place and fault (real `%fs` base 0 → low address), and `onFault` emulates
+each against the stored base (`fsmem.zig`: an x86-64 decoder/executor for the
+MOV / MOVZX/MOVSX / ALU-reg / ALU-imm `%fs` forms, with correct flags for the
+stack-canary `xor %fs:0x28` check). An unhandled form prints `FSEMU-MISS <bytes>`
+and is delivered as a signal — a loud miss to grow the corpus from, never a
+silent wrong answer. This is the fault-handler fallback `rewrite/fs.go`'s
+`PatchFS` already leaves sites for; rewriting the hot sites to `%gs:[tp]` islands
+(the windows fast path, reusing `fsIsland`) is the later optimization.
+
+NOTE: `/proc/self/exe` must resolve to an absolute path or glibc's
+`_dl_get_origin` asserts `linkval[0] == '/'`. Run the guest by an absolute path;
+a relative program path is a cross-platform gap (arm64 too), not x86-64-specific.
 
 The syscall-number ABI (DONE, mac-validated 2026-11-20): an x86-64 guest posts
 x86-64 numbers; the stub's `x64gen` translates for its local dispatch (memory,
