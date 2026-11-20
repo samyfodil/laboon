@@ -29,6 +29,7 @@ const ool = @import("ool.zig");
 const hwcap = @import("hwcap.zig");
 const service = @import("service.zig");
 const tstate = @import("tstate.zig");
+const proc = @import("proc.zig");
 const fsmem = @import("fsmem.zig");
 
 pub const AREA_OFF: usize = chan.SLOT_SIZE * chan.MAX_SLOTS;
@@ -1566,7 +1567,7 @@ pub noinline fn handle(nr: u64, frame: [*]u64) ?u64 {
     return switch (nr) {
         NR_RT_SIGPROCMASK => sysSigprocmask(frame[0], frame[1], frame[2], frame[3]),
         NR_RT_SIGPENDING => sysSigpending(frame[0], frame[1]),
-        NR_SIGALTSTACK => sysSigaltstack(frame[0], frame[1], @intFromPtr(frame) + 816),
+        NR_SIGALTSTACK => sysSigaltstack(frame[0], frame[1], if (tstate.arm64) @intFromPtr(frame) + 816 else frame[proc.XR_RSP]),
         NR_RT_SIGRETURN => sysSigreturn(frame),
         NR_RT_SIGSUSPEND => sysSigsuspend(frame),
         NR_RT_SIGTIMEDWAIT => sysSigtimedwait(frame[0], frame[1], frame[2], frame[3]),

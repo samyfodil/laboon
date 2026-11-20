@@ -140,6 +140,11 @@ extern "c" fn pthread_exit(value: ?*anyopaque) noreturn;
 extern "c" fn pthread_key_create(key: *c_ulong, destructor: ?*const anyopaque) c_int;
 extern "c" fn pthread_getspecific(key: c_ulong) ?*anyopaque;
 extern "c" fn pthread_setspecific(key: c_ulong, value: ?*const anyopaque) c_int;
+extern "c" fn pthread_sigmask(how: c_int, set: ?*const u32, old: ?*u32) c_int;
+const SIG_UNBLOCK: c_int = 2;
+// The Darwin signals the stub handles (install): SIGILL(4) SIGTRAP(5) SIGFPE(8)
+// SIGBUS(10) SIGSEGV(11) SIGUSR1(30) SIGUSR2(31), as a sigset bitmask (bit n-1).
+const stubSignals: u32 = (1 << 3) | (1 << 4) | (1 << 7) | (1 << 9) | (1 << 10) | (1 << 29) | (1 << 30);
 
 const SIGCHLD: c_int = 20;
 const SIG_IGN: usize = 1; // auto-reap exited children (no zombies) on BSD/macOS
@@ -394,6 +399,27 @@ pub fn serveTrap(mc: *std.c.mcontext_t) void {
     frame[5] = mc.ss.r9;
     frame[8] = mc.ss.rax; // the syscall number
     frame[33] = mc.ss.rip + 2; // resume just past the ud2
+    // Capture the full guest register image for the clone/fork child resume
+    // paths (proc.resumeFrame/resumeIsland). XR_RIP is the resume pc, past the
+    // 2-byte ud2, so the child continues after the trapped syscall.
+    frame[proc.XR_RAX] = mc.ss.rax;
+    frame[proc.XR_RBX] = mc.ss.rbx;
+    frame[proc.XR_RCX] = mc.ss.rcx;
+    frame[proc.XR_RDX] = mc.ss.rdx;
+    frame[proc.XR_RSI] = mc.ss.rsi;
+    frame[proc.XR_RDI] = mc.ss.rdi;
+    frame[proc.XR_RBP] = mc.ss.rbp;
+    frame[proc.XR_RSP] = mc.ss.rsp;
+    frame[proc.XR_R8] = mc.ss.r8;
+    frame[proc.XR_R9] = mc.ss.r9;
+    frame[proc.XR_R10] = mc.ss.r10;
+    frame[proc.XR_R11] = mc.ss.r11;
+    frame[proc.XR_R12] = mc.ss.r12;
+    frame[proc.XR_R13] = mc.ss.r13;
+    frame[proc.XR_R14] = mc.ss.r14;
+    frame[proc.XR_R15] = mc.ss.r15;
+    frame[proc.XR_RIP] = mc.ss.rip + 2;
+    frame[proc.XR_RFLAGS] = mc.ss.rflags;
     sig.enter();
     while (true) {
         const r = serveSyscall(&frame);
@@ -480,6 +506,16 @@ fn x64gen(nr: u64) u64 {
         60 => 93, // exit
         218 => 96, // set_tid_address
         186 => 178, // gettid
+        // The signal syscalls the stub serves in-guest (sig.handle): the
+        // per-thread mask/altstack/pending/suspend/timedwait/return state.
+        // rt_sigaction (13) is deliberately absent — it forwards to the
+        // supervisor, which records the disposition, on both arches.
+        131 => 132, // sigaltstack
+        130 => 133, // rt_sigsuspend
+        14 => 135, // rt_sigprocmask
+        127 => 136, // rt_sigpending
+        128 => 137, // rt_sigtimedwait
+        15 => 139, // rt_sigreturn
         else => NO_LOCAL,
     };
 }
@@ -526,9 +562,11 @@ fn serveSyscall(frame: [*]u64) u64 {
     // raw guest number, which the forward path hands the supervisor.
     const gen = if (tstate.arm64) frame[8] else x64gen(frame[8]);
     if (!tstate.arm64 and frame[8] == X64_ARCH_PRCTL) return archPrctl(frame);
-    // x86-64 signal delivery is not wired up yet; on arm64 the sig fast path
-    // serves sigaltstack..rt_sigreturn in-guest.
-    if (tstate.arm64 and gen -% sig.NR_SIGALTSTACK <= sig.NR_RT_SIGRETURN - sig.NR_SIGALTSTACK) {
+    // The signal syscalls that touch only this thread's/process's signal state
+    // are served in-guest on both arches (sigaltstack..rt_sigreturn); x64gen
+    // maps the x86-64 numbers into this asm-generic range. rt_sigaction forwards
+    // to the supervisor (it records the disposition).
+    if (gen -% sig.NR_SIGALTSTACK <= sig.NR_RT_SIGRETURN - sig.NR_SIGALTSTACK) {
         if (sig.handle(gen, frame)) |r| return localTraced(frame, r);
     }
     if (gen == NR_MUNMAP and g_exit_sp != 0 and @intFromPtr(frame) -% frame[0] < frame[1]) {
@@ -766,8 +804,8 @@ fn lcClone(ch: *chan.Chan, frame: [*]u64) u64 {
     const flags = ch.args[1];
     const h: *CloneHandoff = @ptrCast(@alignCast(malloc(@sizeOf(CloneHandoff)) orelse return cloneFailed(ch.args[0], flags, ch)));
     h.slot = @intFromPtr(g_base) + ch.args[0];
-    h.tls = if (flags & CLONE_SETTLS != 0) ch.args[4] else @intFromPtr(pthread_getspecific(g_tp_key));
-    h.child_stack = if (ch.args[2] != 0) ch.args[2] else @intFromPtr(frame) + FRAME_TOP;
+    h.tls = if (flags & CLONE_SETTLS != 0) ch.args[4] else if (tstate.arm64) @intFromPtr(pthread_getspecific(g_tp_key)) else g_guest_fsbase;
+    h.child_stack = if (ch.args[2] != 0) ch.args[2] else if (tstate.arm64) @intFromPtr(frame) + FRAME_TOP else frame[proc.XR_RSP];
     h.ctid = if (flags & CLONE_CHILD_CLEARTID != 0) ch.args[5] else 0;
     @memcpy(h.frame[0..], frame[0 .. proc.FRAME_BYTES / 8]);
     if (flags & CLONE_PARENT_SETTID != 0) @as(*u32, @ptrFromInt(ch.args[3])).* = @truncate(tid);
@@ -1010,8 +1048,21 @@ pub fn threadExit(code: u64) noreturn {
     // The main thread runs on the stack the stub built for the program, which
     // no joiner frees; it finishes where it is.
     if (g_exit_sp == 0) threadExitFinish(g_ctid, code);
-    if (!tstate.arm64) { // multi-thread teardown: pending the x86-64 port
-        asm volatile ("ud2");
+    if (!tstate.arm64) {
+        // Switch to this thread's own libc stack (16-align it, then call pushes
+        // the return slot) and run the teardown there. ctid/code are pinned to
+        // the C-ABI arg registers of threadExitFinish.
+        asm volatile (
+            \\ movq %%rax, %%rsp
+            \\ andq $-16, %%rsp
+            \\ callq *%%rdx
+            :
+            : [sp] "{rax}" (g_exit_sp),
+              [ctid] "{rdi}" (g_ctid),
+              [code] "{rsi}" (code),
+              [f] "{rdx}" (&threadExitFinish),
+            : "memory", "cc"
+        );
         unreachable;
     }
     asm volatile (
@@ -1035,8 +1086,16 @@ pub fn threadExit(code: u64) noreturn {
 // A guest thread finishes on its own libc stack, as threadExit does.
 pub fn deadThread() noreturn {
     if (g_exit_sp == 0) deadThreadFinish();
-    if (!tstate.arm64) { // multi-thread teardown: pending the x86-64 port
-        asm volatile ("ud2");
+    if (!tstate.arm64) {
+        asm volatile (
+            \\ movq %%rax, %%rsp
+            \\ andq $-16, %%rsp
+            \\ callq *%%rdx
+            :
+            : [sp] "{rax}" (g_exit_sp),
+              [f] "{rdx}" (&deadThreadFinish),
+            : "memory", "cc"
+        );
         unreachable;
     }
     asm volatile (
@@ -1090,11 +1149,27 @@ fn cloneBootstrap(arg: ?*anyopaque) callconv(.C) ?*anyopaque {
     g_ctid = h.ctid;
     jit.initThread();
     sig.startThread((h.slot - @intFromPtr(g_base)) / chan.SLOT_SIZE);
-    // The guest thread pointer goes in this thread's TSD slot (not the physical
-    // tpidr_el0, which Darwin overwrites on every reschedule). On Linux the
-    // kernel does this from clone's CLONE_SETTLS arg; here we do it explicitly.
-    // The guest's rewritten mrs tpidr_el0 then reads it back.
-    _ = pthread_setspecific(g_tp_key, @ptrFromInt(h.tls));
+    // A clone is served inside onFault (the x86-64 syscall trap is a SIGILL),
+    // so this pthread was created with the handler's mask: SIGILL blocked (plus
+    // the handler sa_mask, USR1/USR2). A guest thread must have the stub's trap
+    // and control signals unblocked at the host level -- the guest's own signal
+    // blocking is virtual (tl.mask), separate from this -- or its ud2 syscall
+    // traps (SIGILL) are never delivered. Reset to a clean host mask. arm64
+    // serves the clone outside any handler, so it is unaffected.
+    if (!tstate.arm64) {
+        var unb: u32 = stubSignals;
+        _ = pthread_sigmask(SIG_UNBLOCK, &unb, null);
+    }
+    // Install the guest thread pointer. On arm64 it goes in this thread's TSD
+    // slot (not the physical tpidr_el0, which Darwin overwrites on every
+    // reschedule); the rewritten mrs tpidr_el0 reads it back. On x86-64 it is
+    // the %fs base this thread's %fs accesses resolve against (clone's
+    // CLONE_SETTLS arg carried it). On Linux the kernel does this from clone.
+    if (tstate.arm64) {
+        _ = pthread_setspecific(g_tp_key, @ptrFromInt(h.tls));
+    } else {
+        g_guest_fsbase = h.tls;
+    }
     // Save this pthread's own stack pointer before switching to the guest's, so
     // thread exit can return to it (see lcThreadExit). The libc stack is left
     // untouched for the thread's whole life and stays valid for pthread_exit.
@@ -1691,10 +1766,20 @@ fn mapElf(f: std.fs.File, sites: []const u32, hint: u64) Image {
     for (sites) |s| rewriteSite(&isl, rb + s);
     isl.seal();
 
-    // Per-segment W^X: each PT_LOAD gets R, R+W or R+X from its flags; the
-    // island area after the image is R+X. These libc/ld.so binaries keep
-    // segments on their own (>=64 KiB-aligned) pages, so 16 KiB Darwin pages
-    // never straddle a permission boundary here.
+    // Per-page W^X. Each 16 KiB Darwin page gets the union of the flags of every
+    // PT_LOAD overlapping it, so a page two segments share -- e.g. the end of
+    // .text and the start of .rodata, only 4 KiB apart in a static-PIE glibc
+    // guest -- keeps every permission either needs, exec included. Darwin's
+    // 16 KiB pages are coarser than the ELF's 4 KiB segment alignment, so this
+    // straddle is normal; protecting segments independently let a later r--
+    // segment drop exec from the shared page (then a never-yet-run instruction
+    // there, like _fini at exit, faulted -- only once the process had threads,
+    // as Rosetta tolerates running a non-exec page single-threaded). The island
+    // area after the image is R+X.
+    const npages: usize = @intCast(imageLen / PAGE);
+    const protmap = std.heap.page_allocator.alloc(u8, npages) catch _exit(6);
+    defer std.heap.page_allocator.free(protmap);
+    @memset(protmap, 0);
     i = 0;
     while (i < e_phnum) : (i += 1) {
         const ph = e_phoff + @as(u64, i) * e_phentsize;
@@ -1702,15 +1787,23 @@ fn mapElf(f: std.fs.File, sites: []const u32, hint: u64) Image {
         const p_flags = rd32(d, @intCast(ph + 4));
         const p_vaddr = rd64(d, @intCast(ph + 16));
         const p_memsz = rd64(d, @intCast(ph + 40));
-        var prot: c_int = PROT_READ;
-        if (p_flags & 1 != 0) {
-            prot |= PROT_EXEC;
-        } else if (p_flags & 2 != 0) {
-            prot |= PROT_WRITE;
+        var prot: u8 = @intCast(PROT_READ);
+        if (p_flags & 1 != 0) prot |= @intCast(PROT_EXEC);
+        if (p_flags & 2 != 0) prot |= @intCast(PROT_WRITE);
+        var pg: usize = @intCast((rdDown(p_vaddr) - minbase) / PAGE);
+        const pgEnd: usize = @intCast((rdUp(p_vaddr + p_memsz) - minbase) / PAGE);
+        while (pg < pgEnd) : (pg += 1) protmap[pg] |= prot;
+    }
+    var pg: usize = 0;
+    while (pg < npages) {
+        if (protmap[pg] == 0) {
+            pg += 1;
+            continue; // a gap between segments: left R+W, as the initial mmap
         }
-        const segLo = bias + rdDown(p_vaddr);
-        const segLen = rdUp(p_vaddr + p_memsz) - rdDown(p_vaddr);
-        if (mprotect(@ptrFromInt(segLo), segLen, prot) != 0) _exit(6);
+        var run = pg + 1;
+        while (run < npages and protmap[run] == protmap[pg]) run += 1;
+        if (mprotect(@ptrFromInt(rb + pg * PAGE), (run - pg) * PAGE, @intCast(protmap[pg])) != 0) _exit(6);
+        pg = run;
     }
     if (mprotect(@ptrFromInt(rb + imageLen), ISLAND_CAP, PROT_READ | PROT_EXEC) != 0) _exit(6);
 
