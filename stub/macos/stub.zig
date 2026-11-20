@@ -134,13 +134,23 @@ const SIG_IGN: usize = 1; // auto-reap exited children (no zombies) on BSD/macOS
 // rawGetpid issues the Darwin getpid syscall directly: libc's getpid caches
 // the pid, and the forked child reports its own to the supervisor.
 fn rawGetpid() u64 {
-    return asm volatile (
-        \\ mov x16, #20
-        \\ svc #0x80
-        : [ret] "={x0}" (-> u64),
-        :
-        : "x16", "memory"
-    );
+    if (tstate.arm64) {
+        return asm volatile (
+            \\ mov x16, #20
+            \\ svc #0x80
+            : [ret] "={x0}" (-> u64),
+            :
+            : "x16", "memory"
+        );
+    } else {
+        return asm volatile (
+            \\ movl $0x2000014, %%eax
+            \\ syscall
+            : [ret] "={rax}" (-> u64),
+            :
+            : "rcx", "r11", "memory"
+        );
+    }
 }
 
 const O_RDWR: c_int = 0x0002;
@@ -281,26 +291,47 @@ fn window(ch: *chan.Chan) [*]u8 {
 // `svc #0x80`; carry set on error with errno in x0.
 fn svc6(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) u64 {
     // Darwin reports a BSD syscall error by setting the carry flag with the
-    // positive errno in x0; Linux returns a negative errno. Negate on carry so
-    // the guest (which expects the Linux convention) detects failures. The
+    // positive errno in x0/rax; Linux returns a negative errno. Negate on carry
+    // so the guest (which expects the Linux convention) detects failures. The
     // errno numbering mostly matches for the calls we forward (EINVAL/ENOMEM/
     // EACCES); a full Darwin->Linux errno map is a later refinement.
-    return asm volatile (
-        \\ mov x16, %[nr]
-        \\ svc #0x80
-        \\ b.cc 1f
-        \\ neg x0, x0
-        \\ 1:
-        : [ret] "={x0}" (-> u64),
-        : [nr] "r" (nr),
-          [a0] "{x0}" (a0),
-          [a1] "{x1}" (a1),
-          [a2] "{x2}" (a2),
-          [a3] "{x3}" (a3),
-          [a4] "{x4}" (a4),
-          [a5] "{x5}" (a5),
-        : "x16", "cc", "memory"
-    );
+    if (tstate.arm64) {
+        return asm volatile (
+            \\ mov x16, %[nr]
+            \\ svc #0x80
+            \\ b.cc 1f
+            \\ neg x0, x0
+            \\ 1:
+            : [ret] "={x0}" (-> u64),
+            : [nr] "r" (nr),
+              [a0] "{x0}" (a0),
+              [a1] "{x1}" (a1),
+              [a2] "{x2}" (a2),
+              [a3] "{x3}" (a3),
+              [a4] "{x4}" (a4),
+              [a5] "{x5}" (a5),
+            : "x16", "cc", "memory"
+        );
+    } else {
+        // x86-64 Darwin BSD syscall: rax = 0x2000000 | nr, args in
+        // rdi/rsi/rdx/r10/r8/r9, result in rax, carry set on error.
+        return asm volatile (
+            \\ orq $0x2000000, %%rax
+            \\ syscall
+            \\ jnc 1f
+            \\ negq %%rax
+            \\ 1:
+            : [ret] "={rax}" (-> u64),
+            : [nr] "{rax}" (nr),
+              [a0] "{rdi}" (a0),
+              [a1] "{rsi}" (a1),
+              [a2] "{rdx}" (a2),
+              [a3] "{r10}" (a3),
+              [a4] "{r8}" (a4),
+              [a5] "{r9}" (a5),
+            : "rcx", "r11", "cc", "memory"
+        );
+    }
 }
 
 // tramp_handler posts the trapped Linux syscall over the channel and services
@@ -691,7 +722,7 @@ fn vforkSpawn(ch: *chan.Chan, h: *CloneHandoff, tid: u64, frame: [*]u64) u64 {
 // return state on that stack rather than the caller's.
 extern fn lc_call_on_stack(arg: *VforkPark, f: *const fn (*VforkPark) callconv(.C) void, sp: u64) void;
 comptime {
-    asm (
+    if (tstate.arm64) asm (
         \\ .text
         \\ .p2align 2
         \\ .globl _lc_call_on_stack
@@ -703,6 +734,13 @@ comptime {
         \\ ldp x9, x30, [sp], #16
         \\ mov sp, x9
         \\ ret
+    ) else asm (
+        // vfork path; not on the x86-64 startup milestone. Trap if ever reached.
+        \\ .text
+        \\ .p2align 4
+        \\ .globl _lc_call_on_stack
+        \\_lc_call_on_stack:
+        \\ ud2
     );
 }
 
@@ -1052,7 +1090,10 @@ var g_auxids: [4]u64 = .{ 0, 0, 0, 0 };
 // packed FPCR|FPSR<<32 at 256; resume at 264; q0..q31 at 272..784. The island
 // pushed guest x16/x17 at the old sp, now [sp,#784]/[sp,#792].
 pub export fn tramp_common() callconv(.Naked) void {
-    asm volatile (
+    // x86-64 has no island/tramp_common path: a rewritten syscall is a ud2
+    // serviced from the SIGILL mcontext (serveTrap), so this symbol is unused
+    // there and kept as a trap. The arm64 body saves the full guest frame.
+    if (!tstate.arm64) asm volatile ("ud2") else asm volatile (
         \\ sub sp, sp, #784
         \\ stp x0,  x1,  [sp, #0]
         \\ stp x2,  x3,  [sp, #16]

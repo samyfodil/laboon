@@ -461,7 +461,7 @@ pub fn cpSys(nr: u64, a: [6]u64) i64 {
 }
 
 comptime {
-    asm (
+    if (tstate.arm64) asm (
         \\ .text
         \\ .p2align 2
         \\ .globl _lc_cp_sys
@@ -482,6 +482,36 @@ comptime {
         \\_lc_cp_cancel:
         \\2:
         \\ mov x0, #-4
+        \\ ret
+    ) else asm (
+        // x86-64: C args a0..a5 in rdi,rsi,rdx,rcx,r8,r9; kicked at 8(%rsp), nr
+        // at 16(%rsp). A Darwin BSD syscall wants rax=class|nr and arg4 in r10
+        // (not rcx). On return CF=error, rax=errno; negate it as the arm64 path
+        // does. VERIFY ON MAC.
+        \\ .text
+        \\ .p2align 4
+        \\ .globl _lc_cp_sys
+        \\ .globl _lc_cp_begin
+        \\ .globl _lc_cp_end
+        \\ .globl _lc_cp_cancel
+        \\_lc_cp_sys:
+        \\ movq 16(%rsp), %rax
+        \\ orq $0x2000000, %rax
+        \\ movq %rcx, %r10
+        \\ movq 8(%rsp), %rcx
+        \\_lc_cp_begin:
+        \\ cmpl $0, (%rcx)
+        \\ jne 2f
+        \\ syscall
+        \\_lc_cp_end:
+        \\ jc 1f
+        \\ ret
+        \\1:
+        \\ negq %rax
+        \\ ret
+        \\_lc_cp_cancel:
+        \\2:
+        \\ movq $-4, %rax
         \\ ret
     );
 }
@@ -625,6 +655,7 @@ fn stopSelf(sig: u32) void {
 // 248, FPCR|FPSR<<32 at 256, q0..q31 at 272; the guest sp is the frame plus the
 // 784-byte frame and the island's two 16-byte pushes.
 fn fromFrame(c: *Ctx, frame: [*]u64, x0: u64, pc: u64) void {
+    if (!tstate.arm64) return; // x86-64 serves from the mcontext, not a saved frame
     for (0..31) |i| c.x[i] = frame[i];
     c.x[0] = x0;
     c.sp = @intFromPtr(frame) + 816;
@@ -736,7 +767,7 @@ fn rd(comptime T: type, addr: u64) T {
 // the rest, and returns 0, or 1 when a guest address faults: onFault resumes a
 // fault inside it at lc_copy_fault.
 comptime {
-    asm (
+    if (tstate.arm64) asm (
         \\ .text
         \\ .p2align 2
         \\ .globl _lc_copy
@@ -770,6 +801,31 @@ comptime {
         \\ .globl _lc_load32_fault
         \\_lc_load32_fault:
         \\ mov x0, #-1
+        \\ ret
+    ) else asm (
+        // x86-64: dst=rdi, src=rsi, n=rdx. rep movsb, DF cleared (a guest may
+        // have set it). The _fault labels are the resume points onFault uses
+        // when a copy touches an unmapped guest address.
+        \\ .text
+        \\ .p2align 4
+        \\ .globl _lc_copy
+        \\_lc_copy:
+        \\ cld
+        \\ movq %rdx, %rcx
+        \\ rep movsb
+        \\ xorl %eax, %eax
+        \\ ret
+        \\ .globl _lc_copy_fault
+        \\_lc_copy_fault:
+        \\ movq $1, %rax
+        \\ ret
+        \\ .globl _lc_load32
+        \\_lc_load32:
+        \\ movl (%rdi), %eax
+        \\ ret
+        \\ .globl _lc_load32_fault
+        \\_lc_load32_fault:
+        \\ movq $-1, %rax
         \\ ret
     );
 }
@@ -993,10 +1049,14 @@ fn dispatchAll(c: *Ctx) bool {
 // lc_sig_switch is the trap a syscall return uses to load tl.switch_ctx (and deliver
 // tl.first_sig onto it) from a Darwin signal context.
 export fn lc_sig_switch() callconv(.Naked) noreturn {
-    asm volatile ("brk #0x5c");
+    asm volatile (if (tstate.arm64) "brk #0x5c" else "ud2");
 }
 
 fn switchNow() noreturn {
+    // x86-64 serves syscalls inside the SIGILL handler, where it delivers a
+    // signal straight into the mcontext (no brk-trap context switch); this path
+    // is not reached on the startup/no-signal path and is pending that port.
+    if (!tstate.arm64) die(SIGSEGV);
     asm volatile ("b _lc_sig_switch");
     unreachable;
 }
@@ -1019,11 +1079,15 @@ fn trapEnter(mc: *std.c.mcontext_t) void {
 }
 
 export fn lc_trap_ret() callconv(.Naked) noreturn {
-    asm volatile (
-        \\ ldr x17, [sp, #136]
-        \\ ldr x16, [sp, #128]
-        \\ brk #0x5d
-    );
+    if (tstate.arm64) {
+        asm volatile (
+            \\ ldr x17, [sp, #136]
+            \\ ldr x16, [sp, #128]
+            \\ brk #0x5d
+        );
+    } else {
+        asm volatile ("ud2");
+    }
 }
 
 fn trapReturn(mc: *std.c.mcontext_t) void {
@@ -1349,13 +1413,19 @@ fn idReg(mc: *std.c.mcontext_t) bool {
 fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) void {
     const uc: *std.c.ucontext_t = @ptrCast(@alignCast(ctx.?));
     const mc = uc.mcontext;
-    if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_sig_switch)) return doSwitch(mc);
-    if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_trap_ret) + 8) return trapReturn(mc);
-    if (dsig_in == DW_SIGTRAP and tl.ready) {
-        if (ool.exit(tl.slot, mc)) |e| {
-            if (e.jit) jit.initThread(); // back to execute mode
-            for (e.holds) |h| wx.letGo(h);
-            return;
+    // The arm64 trampoline-return and OOL-exit traps (brk/svc-return landmarks
+    // and the out-of-line window exits) have no x86-64 analogue: x86-64 serves
+    // syscalls from the SIGILL/mcontext path below and has no in-guest JIT
+    // windows, so a SIGTRAP falls through to the generic delivery.
+    if (tstate.arm64) {
+        if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_sig_switch)) return doSwitch(mc);
+        if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_trap_ret) + 8) return trapReturn(mc);
+        if (dsig_in == DW_SIGTRAP and tl.ready) {
+            if (ool.exit(tl.slot, mc)) |e| {
+                if (e.jit) jit.initThread(); // back to execute mode
+                for (e.holds) |h| wx.letGo(h);
+                return;
+            }
         }
     }
     if (dsig_in == DW_SIGILL and tl.ready and !tl.busy) {
@@ -1384,6 +1454,10 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
         }
     }
     var dsig = dsig_in;
+    // The arm64 W^X/OOL fault handling and the stub's copy-helper landmarks are
+    // arm64-only (x86-64 has no in-guest JIT window machinery on the syscall
+    // path); a guest fault falls through to the generic signal delivery below.
+    if (tstate.arm64) {
     if (dsig == DW_SIGSEGV or dsig == DW_SIGBUS) {
         const page = mc.es.far & ~@as(u64, 0x3fff);
         var st: wx.Step = .{ .from_slot = ool.inSlot(tl.slot, mc.ss.pc), .own = !tl.ready or tl.busy, .lost = ool.lost(tl.slot, mc.ss.pc, page) };
@@ -1433,6 +1507,7 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
         tstate.setPc(mc, @intFromPtr(&lc_load32_fault));
         return;
     }
+    }
     if (!tl.ready or tl.busy) {
         _ = signal(dsig, DW_SIG_DFL); // a fault in the stub itself: crash for real
         return;
@@ -1449,7 +1524,7 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
     // A synchronous signal cannot be blocked or ignored: the supervisor
     // resets it to the default action, which kills.
     const t = thr();
-    _ = goCallArgs(LC_SIGFAULT, .{ sig, @intFromBool(ld(&t.mask) & bit(sig) != 0), info.a, @as(u32, @bitCast(info.code)), c.pc, 0 });
+    _ = goCallArgs(LC_SIGFAULT, .{ sig, @intFromBool(ld(&t.mask) & bit(sig) != 0), info.a, @as(u32, @bitCast(info.code)), if (tstate.arm64) c.pc else c.rip, 0 });
     const act = replyOf(myChan()).act;
     if (classify(sig, act) != .handler) die(sig);
     deliverOnto(&c, sig, &info, act, ld(&t.mask), true);
@@ -1553,6 +1628,7 @@ fn sysSigaltstack(ss: u64, oss: u64, sp: u64) u64 {
 // guest memory: a part of it that is not mapped, or a malformed record, kills
 // the process with SIGSEGV as the kernel's badframe path does.
 fn sysSigreturn(frame: [*]u64) u64 {
+    if (!tstate.arm64) die(SIGSEGV); // x86-64 sigreturn pending x86-64 signal delivery
     const sp = @intFromPtr(frame) + 816;
     if (sp & 15 != 0) die(SIGSEGV);
     const uc = sp + 128;
