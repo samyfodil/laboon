@@ -72,9 +72,15 @@ probe with `export fn`, since the accessors are `inline`).
       `__text` byte-identical. `publishFrame`/`traceRestore` keep their arm64
       bodies behind a `!tstate.arm64 → @compileError` guard — their x86-64 images
       come from the trampoline frame (1e/1f), so they are filled then.
-   c. Arch-split `fromMc` / `toMc`: pc/sp/flags/fault go through `tstate`; the GPR
-      copy and SIMD save/restore stay per-arch (x86-64 reads `ss.rN` and the `fs`
-      float state; arm64 reads `ss.regs` and `ns.q`).
+   c. Arch-split `fromMc` / `toMc`. **DONE** (x86-64 branch probe-verified against
+      `std.c.mcontext_t` for `x86_64-macos`; arm64 `__text`/`stub.bin` unchanged —
+      the comptime-dead branch adds no code). x86-64 copies the 16 GPRs by name
+      (`ss.rax`…`ss.r15`), `rip`/`rflags` direct, the FP state as the 512-byte
+      FXSAVE image from `&fs + 8` (Darwin's `float_state` is FXSAVE behind an
+      8-byte reserved prefix), and `fault`/`trapno`/`err` from `es`. Two
+      deferrals: the guest-`rip` out-of-line translation (arm64's `ool.guestPc`)
+      waits on the x86-64 OOL layer (phase 3); the FXSAVE FIP/FDP form wants
+      confirming on the mac.
    d. `onFault`'s arm64-only body — `es.esr` / `es.far` decode (`faultSignal`),
       `wx.fault(esr,far,pc)`, `idReg` (the sysreg-read islands — no x86-64
       analogue), `jit.Fault{esr,far}` — goes behind `if (tstate.arm64)`; the

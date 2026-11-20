@@ -633,30 +633,85 @@ fn fromFrame(c: *Ctx, frame: [*]u64, x0: u64, pc: u64) void {
 }
 
 fn fromMc(c: *Ctx, mc: *const std.c.mcontext_t) void {
-    for (0..29) |i| c.x[i] = mc.ss.regs[i];
-    c.x[29] = mc.ss.fp;
-    c.x[30] = mc.ss.lr;
-    c.sp = mc.ss.sp;
-    c.pc = ool.guestPc(tl.slot, mc.ss.pc); // run out of line: the guest's own
-    for (ool.release(tl.slot, mc.ss.pc)) |h| wx.letGo(h);
-    c.pstate = mc.ss.cpsr & 0xf0000000;
-    c.v = mc.ns.q;
-    c.fpsr = mc.ns.fpsr;
-    c.fpcr = mc.ns.fpcr;
-    c.fault = mc.es.far;
-    c.esr = mc.es.esr;
+    if (tstate.arm64) {
+        for (0..29) |i| c.x[i] = mc.ss.regs[i];
+        c.x[29] = mc.ss.fp;
+        c.x[30] = mc.ss.lr;
+        c.sp = mc.ss.sp;
+        c.pc = ool.guestPc(tl.slot, mc.ss.pc); // run out of line: the guest's own
+        for (ool.release(tl.slot, mc.ss.pc)) |h| wx.letGo(h);
+        c.pstate = mc.ss.cpsr & 0xf0000000;
+        c.v = mc.ns.q;
+        c.fpsr = mc.ns.fpsr;
+        c.fpcr = mc.ns.fpcr;
+        c.fault = mc.es.far;
+        c.esr = mc.es.esr;
+    } else {
+        c.rax = mc.ss.rax;
+        c.rbx = mc.ss.rbx;
+        c.rcx = mc.ss.rcx;
+        c.rdx = mc.ss.rdx;
+        c.rsi = mc.ss.rsi;
+        c.rdi = mc.ss.rdi;
+        c.rbp = mc.ss.rbp;
+        c.rsp = mc.ss.rsp;
+        c.r8 = mc.ss.r8;
+        c.r9 = mc.ss.r9;
+        c.r10 = mc.ss.r10;
+        c.r11 = mc.ss.r11;
+        c.r12 = mc.ss.r12;
+        c.r13 = mc.ss.r13;
+        c.r14 = mc.ss.r14;
+        c.r15 = mc.ss.r15;
+        // The guest's own rip: the x86-64 out-of-line layer (phase 3) must map a
+        // relocated copy's rip back here, as arm64's ool.guestPc does above;
+        // until it exists the Darwin rip is the guest rip.
+        c.rip = mc.ss.rip;
+        c.rflags = mc.ss.rflags;
+        // Darwin's float_state is the FXSAVE image behind an 8-byte reserved
+        // prefix (fcw onward is 512 bytes); Linux's _fpstate is FXSAVE-shaped
+        // too. The FIP/FDP form wants confirming on the mac.
+        const fxsrc: *const [512]u8 = @ptrCast(@as([*]const u8, @ptrCast(&mc.fs)) + 8);
+        c.fx = fxsrc.*;
+        c.fault = mc.es.faultvaddr;
+        c.trapno = mc.es.trapno;
+        c.err = mc.es.err;
+    }
 }
 
 fn toMc(mc: *std.c.mcontext_t, c: *const Ctx) void {
-    for (0..29) |i| mc.ss.regs[i] = c.x[i];
-    mc.ss.fp = c.x[29];
-    mc.ss.lr = c.x[30];
-    mc.ss.sp = c.sp;
-    mc.ss.pc = c.pc;
-    mc.ss.cpsr = (mc.ss.cpsr & 0x0fffffff) | @as(u32, @truncate(c.pstate & 0xf0000000));
-    mc.ns.q = c.v;
-    mc.ns.fpsr = c.fpsr;
-    mc.ns.fpcr = c.fpcr;
+    if (tstate.arm64) {
+        for (0..29) |i| mc.ss.regs[i] = c.x[i];
+        mc.ss.fp = c.x[29];
+        mc.ss.lr = c.x[30];
+        mc.ss.sp = c.sp;
+        mc.ss.pc = c.pc;
+        mc.ss.cpsr = (mc.ss.cpsr & 0x0fffffff) | @as(u32, @truncate(c.pstate & 0xf0000000));
+        mc.ns.q = c.v;
+        mc.ns.fpsr = c.fpsr;
+        mc.ns.fpcr = c.fpcr;
+    } else {
+        mc.ss.rax = c.rax;
+        mc.ss.rbx = c.rbx;
+        mc.ss.rcx = c.rcx;
+        mc.ss.rdx = c.rdx;
+        mc.ss.rsi = c.rsi;
+        mc.ss.rdi = c.rdi;
+        mc.ss.rbp = c.rbp;
+        mc.ss.rsp = c.rsp;
+        mc.ss.r8 = c.r8;
+        mc.ss.r9 = c.r9;
+        mc.ss.r10 = c.r10;
+        mc.ss.r11 = c.r11;
+        mc.ss.r12 = c.r12;
+        mc.ss.r13 = c.r13;
+        mc.ss.r14 = c.r14;
+        mc.ss.r15 = c.r15;
+        mc.ss.rip = c.rip;
+        mc.ss.rflags = c.rflags;
+        const fxdst: *[512]u8 = @ptrCast(@as([*]u8, @ptrCast(&mc.fs)) + 8);
+        fxdst.* = c.fx;
+    }
 }
 
 fn onStack(t: *Thread, sp: u64) bool {
