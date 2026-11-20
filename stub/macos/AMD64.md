@@ -132,6 +132,35 @@ probe with `export fn`, since the accessors are `inline`).
    `stub-arm64.bin`).
 6. Defer `vmm.zig` (HVF) — require static-PIE guests first.
 
+## Implementation status (serve path DONE)
+
+The validated serve path is in (`0edbf42`): `onFault` SIGILL at a `0f 0b` site →
+`stub.serveTrap(mc)` → projects the mcontext into the arm64-shaped dispatch frame
+(args@0..5, nr@8, resume@33) → `serveSyscall` → result→`rax`, `rip`+=2. Because
+the dispatch reads args by index, `mem`/`local`/`stdio`/`futex` handlers work
+unchanged. `SITE_DELTA` (svc=4/ud2=2) and the ptrace-trace paths are gated.
+
+Remaining grind to a **compiling** `x86_64-macos` stub (then run `startup.c`).
+Drive it with `zig build-exe -target x86_64-macos -lc -O ReleaseSmall stub.zig`
+and fix the lazy-analysis error tip; keep arm64 `__text` byte-identical each
+batch. Known arm64-only reachables to gate behind `if (tstate.arm64)` or port
+(deferred paths `startup.c` never runs, so gate/stub them):
+- `onFault`'s W^X/OOL fault body (`wx.fault`/`ool.*`/`jit.flip`) and the
+  `lc_copy`/`lc_load32` landmarks — gate; the generic fault→signal tail
+  (`faultSignal`/`fromMc`/`deliverOnto`) already works but has a shared-`Ctx`
+  `c.pc` that must become `if (tstate.arm64) c.pc else c.rip` (this pattern
+  recurs at every shared `c.pc`/`c.sp`/… site).
+- `fromFrame`, `sysSigreturn`, `sysSigsuspend`, `trapEnter`/`trapReturn`/
+  `doSwitch`/`step` — arm64 trampoline-frame machinery; gate (x86-64 signal
+  delivery from a syscall is the `serveTrap`/mcontext path, ported later).
+- `ool.zig`, `wx.zig`, `lc_copy`/`lc_load32` asm — once the callers above are
+  gated these stop being analyzed on x86-64; if any leak through, top-gate each
+  pub fn with `if (!tstate.arm64) return <default>;`.
+- Then `proc.zig` (thread/fork/exec context — `startup.c` is single-threaded, so
+  clone/fork gate; exec+enter must work), `mem.zig` (mostly channel-forwarding),
+  and the entry in `stub.zig` (`mapElf`/enter — zero `%rdx` at guest entry).
+- Finally `build.sh` emits `stub-amd64.bin`; `macstub.go` embeds per-arch.
+
 ## Testing
 
 The M4 mac runs x86-64 under Rosetta: `ssh mac` (192.168.29.43), build the stub
