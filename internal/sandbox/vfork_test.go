@@ -56,7 +56,8 @@ func TestPosixSpawn(t *testing.T) {
 			continue
 		}
 		var o bytes.Buffer
-		code, err := Run(context.Background(), exe, Config{Args: []string{"spawn", hello}, Stdout: &o, Stderr: &o})
+		prog := "/" + filepath.Base(exe)
+		code, err := Run(context.Background(), prog, Config{Args: []string{"spawn", "/hello"}, RootFS: HostRoot(dir), Stdout: &o, Stderr: &o})
 		want := "argv[1]=spawned\nchild exit 7\nmissing: No such file or directory\n"
 		if err != nil || code != 0 || !strings.HasSuffix(o.String(), want) {
 			t.Errorf("%s: code=%d err=%v out=%q", filepath.Base(exe), code, err, o.String())

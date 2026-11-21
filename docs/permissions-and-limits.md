@@ -16,6 +16,11 @@ exception is that guest `AF_INET` sockets require `WithNet`, even for loopback.
 
 ## Filesystem
 
+Without a root (`WithRoot`, or `WithMount` at `/`), the guest's `/` is an empty,
+run-private writable tree holding only the program, read-only at its host path;
+nothing else of the host is visible. A `tmpfs` the guest mounts is a fresh
+private tree wherever it is mounted.
+
 `WithMount(host, guest)` exposes a host directory read-write, confined to that
 subtree; `WithMountReadOnly(host, guest)` exposes it read-only (create, modify,
 delete and rename all fail with `EROFS`). A mount can also expose host Unix

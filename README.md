@@ -146,8 +146,9 @@ filesystem and no external network access. Output is connected explicitly
 because the library discards stdout and stderr by default.
 
 Use `laboon.Run` for a Linux ELF binary instead of an image. Without `WithRoot`,
-the binary is loaded from a host path and the guest has no filesystem;
-`WithRoot` supplies a root directory. See [options.go](options.go) for argument,
+the binary is loaded from a host path and the guest's `/` is an empty private
+tree holding only that binary, so it must be static; `WithRoot` supplies a root
+directory. See [options.go](options.go) for argument,
 mount, environment, image-cache, and I/O options, and the
 [Go reference](https://pkg.go.dev/github.com/samyfodil/laboon) for the API.
 

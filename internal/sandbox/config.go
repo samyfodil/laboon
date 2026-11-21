@@ -47,7 +47,8 @@ type Config struct {
 	// RootFS is the guest's root filesystem ("/"), any core.FileSystem: a host
 	// directory (HostRoot, or a public hostfs.Dir mounted at "/"), an in-memory tree (NewMemFS), a
 	// union, a read-only or hardened wrapper, a network-backed or custom backend.
-	// Without it the guest has no filesystem and the program path is a host path.
+	// Without it the program path is a host path and the guest's / is an empty,
+	// run-private writable tree holding only that program, read-only at its path.
 	// The root is always a FileSystem, so the sandbox takes no host path for it;
 	// the parts that still need a real host directory (a host image's writable
 	// upper, the darwin exec resolver) recover it from a HostRoot with HostRootPath.

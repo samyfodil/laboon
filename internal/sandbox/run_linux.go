@@ -102,6 +102,11 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 		return 0, err
 	}
 	defer fs.close()
+	if cfg.RootFS == nil {
+		if err := fs.bindProgram(prog); err != nil {
+			return 0, fmt.Errorf("laboon: program: %w", err)
+		}
+	}
 
 	// The stubs' fd 4: every stub process exits once it reads EOF here,
 	// i.e. when this supervisor is gone however it died.

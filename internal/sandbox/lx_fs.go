@@ -15,8 +15,10 @@ import (
 	"unsafe"
 
 	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/bind"
 	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"github.com/samyfodil/laboon/filesystems/overlayfs"
+	"github.com/samyfodil/laboon/filesystems/readonly"
 	"github.com/samyfodil/laboon/internal/namespace"
 )
 
@@ -152,7 +154,19 @@ func newDfs(rootFS core.FileSystem, upper string, mem []byte, done <-chan struct
 		return fs, nil
 	}
 	if root == "" {
+		// No root filesystem: the guest's / is an empty, run-private tree; the
+		// guest sees nothing of the host's.
 		fs.hostFS = hostfs.NewHostFS("", "", "")
+		t, err := fs.tmpLayer()
+		if err != nil {
+			return nil, err
+		}
+		t.SetMeta(fs.ov.store)
+		mode := uint32(0o755)
+		if err := t.Root().SetAttr(core.AttrUpdate{Mode: &mode}); err != nil {
+			return nil, err
+		}
+		fs.rootFS = t
 		fs.buildNS()
 		return fs, nil
 	}
@@ -215,11 +229,6 @@ func (fs *dfs) mountHostImage(root, upper string) error {
 	return nil
 }
 
-// passthrough reports whether the guest has no root filesystem of its own and
-// sees the host tree directly; it may create and write there but not remove or
-// rename.
-func (fs *dfs) passthrough() bool { return fs.rootFS == nil && fs.rootAbs == "" }
-
 // buildNS composes the guest's filesystem as a vfs Namespace: the overlay union
 // (read-only root as the lower layer, the writable upper on top, sharing the
 // inode-keyed metadata store) mounted on /, each layer backed by the platform
@@ -227,10 +236,9 @@ func (fs *dfs) passthrough() bool { return fs.rootFS == nil && fs.rootAbs == "" 
 // backend. It is the homogeneous view the live ops migrate onto; until a given
 // op is routed it runs beside the helpers, proven equivalent by conformance.
 func (fs *dfs) buildNS() {
-	// Rootless (no image): a single read-write passthrough to the host, guest
-	// paths mapping 1:1 (HostDirFS with an empty root), no layering. With an
-	// image: the read-only root as the lower layer, the writable upper on top
-	// when there is one, unioned by overlayFS. Both layer backends share the
+	// With a host image: the read-only root as the lower layer, the writable
+	// upper on top when there is one, unioned by overlayFS. Both layer backends
+	// share the
 	// live hostfs.HostFS, whose cache knows rootAbs as the read-only lower and upperAbs
 	// as the writable upper (routed by path prefix), so the Namespace sees the
 	// same invalidation the live writes trigger — one cache, not a second that
@@ -249,10 +257,6 @@ func (fs *dfs) buildNS() {
 			up.SetMeta(fs.ov.store) // the leaf and the sandbox share one metadata authority
 			fs.overlay = overlayfs.OverlayFS(fs.rootFS, up)
 		}
-	case fs.rootAbs == "":
-		h := hostfs.NewHostDirFS("/", fs.hostFS)
-		h.SetMeta(fs.ov.store)
-		fs.overlay = h
 	default:
 		lower := hostfs.NewHostDirFS(fs.rootAbs, fs.hostFS)
 		lower.SetMeta(fs.ov.store)
@@ -270,7 +274,7 @@ func (fs *dfs) buildNS() {
 }
 
 // vns returns this guest's namespace view, built on first use: the shared root
-// backend (overlay with an image, a passthrough HostDirFS without one) plus this
+// backend plus this
 // guest's own /proc, /sys and /dev mounts. Each guest (thread) builds its own so
 // the per-reader /proc (self, thread-self, the pid-namespace listing) is correct.
 // It is never nil for a live guest: buildNS always runs during newDfs.
@@ -312,10 +316,8 @@ func (fs *dfs) guestNS(g *dguest) *namespace.Namespace {
 		ovDev = loc.Node
 	}
 	ns.MountShadow("/dev", &devFS{syn: g.devRoot(), ovFS: fs.overlay, ovDev: ovDev, dev: devDevtmp})
-	if !fs.passthrough() {
-		if shm := fs.shmFS(); shm != nil {
-			ns.MountShadow("/dev/shm", shm)
-		}
+	if shm := fs.shmFS(); shm != nil {
+		ns.MountShadow("/dev/shm", shm)
 	}
 	fs.ensureBinds(g.cfg.Mounts)
 	for _, m := range fs.binds {
@@ -341,6 +343,58 @@ func (fs *dfs) guestNS(g *dguest) *namespace.Namespace {
 // confined host-directory bind (which forwards an AF_UNIX connect under it to the
 // host socket there), a ReadOnly wrapper, an in-memory store, a union — so the
 // routing layer takes no host path of its own.
+// bindProgram makes the host program a rootless run names reachable at its own
+// path in the guest's empty root, and nothing else of the host: a read-only bind
+// of that one file, its parent directories made in the root as a mount target's
+// are.
+func (fs *dfs) bindProgram(host string) error {
+	at, mfs, err := programBind(host, fs.rootFS)
+	if err != nil {
+		return err
+	}
+	fs.binds = append(fs.binds, dynMount{at: at, mfs: mfs})
+	return nil
+}
+
+// programBind returns the guest path and the read-only single-file filesystem
+// of the host program at host, after making its parent directories in root.
+func programBind(host string, root core.FileSystem) (string, core.FileSystem, error) {
+	abs, err := filepath.Abs(host)
+	if err != nil {
+		return "", nil, err
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", nil, err
+	}
+	dir, name := filepath.Split(real)
+	hfs := hostfs.NewHostDirFS(dir, hostfs.NewRawHostFS(""))
+	hfs.SetConfine(true)
+	n, err := hfs.Lookup(hfs.Root(), name)
+	if err != nil {
+		return "", nil, err
+	}
+	if n.Kind() != core.Reg {
+		return "", nil, fmt.Errorf("program %s is not a regular file", host)
+	}
+	at := path.Clean("/" + filepath.ToSlash(abs))
+	cur := root.Root()
+	for _, c := range strings.Split(strings.Trim(path.Dir(at), "/"), "/") {
+		if c == "" {
+			continue
+		}
+		next, err := root.Lookup(cur, c)
+		if errors.Is(err, os.ErrNotExist) {
+			next, err = root.Create(cur, c, core.CreateSpec{Kind: core.Dir, Mode: 0o755})
+		}
+		if err != nil {
+			return "", nil, err
+		}
+		cur = next
+	}
+	return at, readonly.ReadOnly(bind.Bind(hfs, n)), nil
+}
+
 func (fs *dfs) ensureBinds(mounts []Mount) {
 	fs.bindOnce.Do(func() {
 		for _, m := range mounts {

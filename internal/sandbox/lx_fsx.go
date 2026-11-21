@@ -312,9 +312,6 @@ func (g *dguest) unlinkat(dirfd int64, pathAddr uint64, flags int64) int64 {
 	if e != 0 {
 		return sErr(e)
 	}
-	if g.dfs.passthrough() {
-		return sErr(lxEROFS)
-	}
 	if rmdir {
 		if !fi.IsDir() {
 			return sErr(lxENOTDIR)
@@ -441,9 +438,6 @@ func (g *dguest) renameat2(odfd int64, oaddr uint64, ndfd int64, naddr uint64, f
 		if strings.HasPrefix(op, np+"/") {
 			return sErr(lxENOTEMPTY)
 		}
-	}
-	if g.dfs.passthrough() {
-		return sErr(lxEROFS)
 	}
 	if !exchange {
 		// Rename through the overlay backend: it deep-copies the source subtree up

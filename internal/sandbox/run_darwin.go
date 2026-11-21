@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/samyfodil/laboon/filesystems/hostfs"
+	"github.com/samyfodil/laboon/filesystems/memfs"
 	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/rewrite"
 	macstub "github.com/samyfodil/laboon/stub/macos"
@@ -182,15 +183,26 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	}
 	// A host root resolves from its canonical path, as the run's own Namespace
 	// does: the confined backend refuses a symlink in the root's own components
-	// (macOS's /var). Without a root the guest's / is the host's, unconfined.
+	// (macOS's /var). Without a root the guest's / is empty but for the program.
 	progRoot := cfg.RootFS
+	var progNS *namespace.Namespace
 	switch {
 	case isHost && rootPath != "":
 		progRoot = HostRoot(rootPath)
 	case progRoot == nil:
-		progRoot = hostfs.NewHostDirFS("/", hostfs.NewRawHostFS(""))
+		progRoot = memfs.NewMemFS()
+		at, mfs, err := programBind(path, progRoot)
+		if err != nil {
+			return 0, fmt.Errorf("laboon: program: %w", err)
+		}
+		progNS = namespace.NewNamespace(progRoot)
+		progNS.MountShadow(at, mfs)
+		path = at
 	}
-	res := &progResolver{tmp: rtmp, ns: namespace.NewNamespace(progRoot)}
+	if progNS == nil {
+		progNS = namespace.NewNamespace(progRoot)
+	}
+	res := &progResolver{tmp: rtmp, ns: progNS}
 	gp := path
 	guestPath, err := res.host(gp)
 	if err != nil {
@@ -384,6 +396,11 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 		return 0, err
 	}
 	defer fs.close()
+	if cfg.RootFS == nil {
+		if err := fs.bindProgram(path); err != nil {
+			return 0, fmt.Errorf("laboon: program: %w", err)
+		}
+	}
 	defer fs.term.close()
 	if term != nil {
 		fs.adoptCtty(term.fd, 1)
