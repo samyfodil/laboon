@@ -470,6 +470,11 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 	parentPid := g.ps.ns.seen(ps)
 	ps.ft = child.ft
 	ps.comm[gpid] = g.ps.comm[g.pid]
+	var vforkDone chan struct{}
+	if r.flags&lxCloneVfork != 0 {
+		vforkDone = make(chan struct{})
+		ps.vforkDone = vforkDone
+	}
 	child.ps, child.ppid = ps, ppid
 	fs.pt[gpid] = ps
 	fs.procs[gpid] = &dproc{ppid: ppid, ch: cch, ps: ps, g: child}
@@ -549,6 +554,16 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 	w.tracef("[lc] [%d] fork: pid %d, ospid %d\n", g.pid, gpid, ospid)
 	if event != 0 {
 		g.ptraceEvent(event, uint64(gpid))
+	}
+	if vforkDone != nil {
+		// CLONE_VFORK: the parent stub waits on this reply until the child
+		// execs or exits.
+		select {
+		case <-vforkDone:
+		case <-g.ch.done:
+		case <-g.ch.stop:
+		}
+		g.ptraceEvent(ptraceEventVforkDone, uint64(parentPid))
 	}
 	pg.ret = uint64(parentPid)
 	g.ptraceSyscallExit(int64(parentPid))
