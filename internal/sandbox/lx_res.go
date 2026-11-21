@@ -208,7 +208,6 @@ type schedState struct {
 	policy    int
 	prio      int
 	resetFork bool
-	affinity  uint64
 	ioprio    int
 }
 
@@ -220,7 +219,7 @@ func hostCPUMask() uint64 {
 	return uint64(1)<<n - 1
 }
 
-func defaultSched() schedState { return schedState{affinity: hostCPUMask()} }
+func defaultSched() schedState { return schedState{} }
 
 // forked is the child's copy; SCHED_RESET_ON_FORK drops a real-time policy
 // and a negative nice.
@@ -336,12 +335,15 @@ func (g *dguest) schedGetaffinity(pid int, size uint64, addr uint64) int64 {
 	if pid < 0 {
 		return sErr(lxESRCH) // no such process, where sched_getparam says EINVAL
 	}
-	mask := g.schedGet(pid, func(s schedState) int64 { return int64(s.affinity) })
-	if mask < 0 && mask > -4096 {
-		return mask
+	fs := g.dfs
+	fs.mu.Lock()
+	p, e := g.procOf(pid)
+	fs.mu.Unlock()
+	if e != 0 {
+		return sErr(e)
 	}
 	var b [affinityMaskLen]byte
-	put64(b[:], uint64(mask))
+	put64(b[:], p.cpus.Load())
 	if g.writeMem(addr, b[:]) != nil {
 		return sErr(lxEFAULT)
 	}
@@ -367,12 +369,13 @@ func (g *dguest) schedSetaffinity(pid int, size uint64, addr uint64) int64 {
 	}
 	fs := g.dfs
 	fs.mu.Lock()
-	defer fs.mu.Unlock()
 	p, e := g.procOf(pid)
+	fs.mu.Unlock()
 	if e != 0 {
 		return sErr(e)
 	}
-	p.sched.affinity = mask
+	p.cpus.Store(mask)
+	syncStdio()
 	return 0
 }
 

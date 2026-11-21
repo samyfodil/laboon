@@ -4,16 +4,31 @@ package sandbox
 
 import (
 	"io"
+	"math/bits"
 	"os"
 )
 
-// getcpu reports CPU 0, NUMA node 0: the stub serves no vDSO to agree with.
+// getcpu reports a CPU of the thread's affinity mask, NUMA node 0. The stub's
+// threads are not pinned, so which host CPU one is on says nothing: the
+// thread is given one of its mask's CPUs by its tid, spreading threads over
+// them as a scheduler would.
 func (g *dguest) getcpu(cpu, node uint64) int64 {
-	var z [4]byte
-	for _, p := range []uint64{cpu, node} {
-		if p != 0 && g.writeMem(p, z[:]) != nil {
-			return sErr(lxEFAULT)
+	mask := g.ps.cpus.Load()
+	var c, z [4]byte
+	put32(c[:], uint32(nthCPU(mask, g.pid%max(bits.OnesCount64(mask), 1))))
+	if cpu != 0 && g.writeMem(cpu, c[:]) != nil || node != 0 && g.writeMem(node, z[:]) != nil {
+		return sErr(lxEFAULT)
+	}
+	return 0
+}
+
+// nthCPU is the n-th CPU (from 0) of mask, or 0 when it has fewer.
+func nthCPU(mask uint64, n int) int {
+	for ; mask != 0; mask &= mask - 1 {
+		if n == 0 {
+			return bits.TrailingZeros64(mask)
 		}
+		n--
 	}
 	return 0
 }

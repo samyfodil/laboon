@@ -16,6 +16,12 @@ const stdioSinglestep = uint64(1) << 62
 // stub/macos/stub.zig and stub/macos/vmm.zig.
 const stdioSeccomp = uint64(1) << 61
 
+// stdioAffinity marks a slot whose process's affinity mask leaves out a CPU:
+// the darwin stub, which otherwise reports the host CPU it runs on, asks the
+// supervisor for getcpu, as that CPU may be outside the mask. Mirrors
+// STDIO_AFFINITY in stub/macos/stub.zig.
+const stdioAffinity = uint64(1) << 60
+
 // Methods run with dfs.mu held, except notifyExit. Only Linux installs tracing.
 type ptraceBackend interface {
 	traced(int) bool

@@ -120,6 +120,8 @@ const ARCH_GET_GS: u64 = 0x1004;
 const NO_LOCAL: u64 = ~@as(u64, 0);
 const STDIO_TRACED: u64 = 1 << 63; // the supervisor set this thread as ptrace-traced
 const STDIO_SECCOMP: u64 = 1 << 61; // its process has a seccomp filter: each call is checked first
+const NR_GETCPU: u64 = 168;
+const STDIO_AFFINITY: u64 = 1 << 60; // its process's affinity leaves out a CPU, maybe the one it runs on: getcpu is the supervisor's
 const NR_VFORK_WAIT: u64 = 0x1_0000_0001; // stub->supervisor only, not a Linux number
 const NR_THREAD_GONE: u64 = 0x1_0000_0002; // a thread ended; no reply expected
 const NR_FORKED: u64 = 0x1_0000_0003; // the child's host pid (0: none), right after a fork
@@ -627,7 +629,9 @@ fn serveSyscall(frame: [*]u64) u64 {
         NR_EXIT => if (g_is_thread or g_threads.load(.seq_cst) > 1) threadExit(frame[0]),
         else => {
             if (stdio.handle(g_chan, gen, frame)) |r| return localTraced(frame, r);
-            if (local.handle(gen, frame)) |r| return localTraced(frame, r);
+            if (gen != NR_GETCPU or g_chan.stdio & STDIO_AFFINITY == 0) {
+                if (local.handle(gen, frame)) |r| return localTraced(frame, r);
+            }
             g_frame = frame;
             if (mem.handle(gen, frame)) |r| return localTraced(frame, r);
         },

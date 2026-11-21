@@ -74,10 +74,13 @@ func (g *dguest) storeStdio(m uint64) { atomic.StoreUint64(&g.ch.page.stdio, m) 
 func (g *dguest) clearTraced() {}
 
 func (g *dguest) stdioMask() uint64 {
-	if g.traced.Load() {
-		return stdioTraced
-	}
 	var m uint64
+	if g.ps.cpus.Load() != hostCPUMask() {
+		m |= stdioAffinity
+	}
+	if g.traced.Load() {
+		return m | stdioTraced
+	}
 	if g.ps.seccomp.Load() == secModeFilter {
 		m |= stdioSeccomp
 	}

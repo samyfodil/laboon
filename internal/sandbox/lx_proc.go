@@ -95,13 +95,14 @@ type pstate struct {
 	noNewPrivs  bool
 	subreaper   bool
 	pdeathsig   int
-	seccomp     atomic.Int32 // SECCOMP_MODE_*: the mode the guest set; read lock-free on each syscall
-	seccompProg [][]byte     // installed seccomp-bpf filters, oldest first, each run on every syscall (under mu)
-	ns          *pidns       // pid namespace this process belongs to
-	childPidNs  *pidns       // set by unshare(CLONE_NEWPID): the namespace new children enter
-	netns       atomic.Int32 // network namespace id; 0 is the host network, nonzero an isolated empty one
-	uts         *utsState    // UTS namespace (node/domain names); shared until CLONE_NEWUTS
-	mntns       int          // mount namespace id; 0 is the root, nonzero a CLONE_NEWNS one whose mounts drop when it empties
+	cpus        atomic.Uint64 // the CPU affinity mask, all the host's at first (darwin, windows: Linux pins the host threads)
+	seccomp     atomic.Int32  // SECCOMP_MODE_*: the mode the guest set; read lock-free on each syscall
+	seccompProg [][]byte      // installed seccomp-bpf filters, oldest first, each run on every syscall (under mu)
+	ns          *pidns        // pid namespace this process belongs to
+	childPidNs  *pidns        // set by unshare(CLONE_NEWPID): the namespace new children enter
+	netns       atomic.Int32  // network namespace id; 0 is the host network, nonzero an isolated empty one
+	uts         *utsState     // UTS namespace (node/domain names); shared until CLONE_NEWUTS
+	mntns       int           // mount namespace id; 0 is the root, nonzero a CLONE_NEWNS one whose mounts drop when it empties
 }
 
 // newInitProc registers pid 1, the run's first process, and records its stub's
@@ -113,6 +114,7 @@ func (fs *dfs) newInitProc(ospid int, prog string, user *UserID) *pstate {
 		cred: initCreds(user), rlim: defaultRlimits(), sched: defaultSched(), dumpable: 1,
 		ns: fs.initNs, uts: &fs.uts,
 	}
+	ps.cpus.Store(hostCPUMask())
 	fs.mu.Lock()
 	fs.pt[1] = ps
 	fs.mu.Unlock()
@@ -130,6 +132,7 @@ func (p *pstate) forkState(tgid, ppid, exitSignal int) *pstate {
 		personality: p.personality, dumpable: p.dumpable, noNewPrivs: p.noNewPrivs,
 		seccompProg: p.seccompProg, ns: p.ns, uts: p.uts, mntns: p.mntns,
 	}
+	ps.cpus.Store(p.cpus.Load())
 	ps.seccomp.Store(p.seccomp.Load())
 	ps.netns.Store(p.netns.Load())
 	return ps
