@@ -481,7 +481,8 @@ fn ownThread(t: *Thread) bool {
 // onKick runs when the supervisor has posted a signal for this thread.
 // A kick that finds the thread busy in the stub is kept: the stub takes the
 // signal on its way back to the guest, and a wait (waitSys) it is about to
-// start, or is in, ends at once.
+// start, or is in, ends at once. One that finds it in guest code with its
+// slot dead (another thread exec'd) ends it, as Linux kills the others.
 fn onKick(_: i32, _: ?*anyopaque, uc: [*]u8) callconv(.C) void {
     if (arch.slotAddr() == 0) return;
     const t = thr();
@@ -491,6 +492,7 @@ fn onKick(_: i32, _: ?*anyopaque, uc: [*]u8) callconv(.C) void {
         arch.cpCancel(uc);
         return;
     }
+    stub.exitIfDead(arch.slot());
     @atomicStore(u32, &t.busy, 1, .seq_cst);
     deliverAll(uc, .{});
     @atomicStore(u32, &t.busy, 0, .seq_cst);

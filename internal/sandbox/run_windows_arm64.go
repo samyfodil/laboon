@@ -23,7 +23,6 @@ const (
 	wExitGroup    = 94
 	wGtod         = 169
 	wSetTid       = 96
-	wRobust       = 99
 	wSigAct       = 134
 	wSigMask      = 135
 	wSigAlt       = 132
@@ -98,7 +97,7 @@ func (r *imageRewriter) place(areas []trampArea) {
 func (g *wguest) newRewriter(src imageSrc) (*imageRewriter, error) {
 	r := &imageRewriter{g: g}
 	if g.cfg.NoRewrite {
-		return r, nil
+		return nil, errNoBackstop
 	}
 	f, err := elf.NewFile(src.reader())
 	if err != nil {

@@ -52,7 +52,3 @@ func AnonFile(dir, prefix string) (*os.File, error) {
 	os.Remove(f.Name())
 	return f, nil
 }
-
-// Modeless reports whether the host keeps no permission bits for an object: on
-// unix never (a socket and a pipe have inodes of their own).
-func Modeless(*os.File) bool { return false }

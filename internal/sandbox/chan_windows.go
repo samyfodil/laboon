@@ -26,6 +26,15 @@ type hostChan struct {
 	ioDead        bool
 	ioGone        chan struct{}  // channel equivalent of ioDeath, for the readiness bus
 	ioDeath       windows.Handle // manual-reset; never share evSup with I/O waits
+	stopW         chan struct{}  // the channel's stop, closed once it ends
+}
+
+// newHostChan is the supervisor's handle on slot ch, whose stop closes when
+// the slot ends (end), so a supervisor-side wait selecting on it gives up.
+func newHostChan(ch *channel) *hostChan {
+	c := &hostChan{channel: ch, stopW: make(chan struct{})}
+	c.stop = c.stopW
+	return c
 }
 
 // After reply wakes the stub, its next request is at least that wakeup away,

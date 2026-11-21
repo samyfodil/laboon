@@ -9,9 +9,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Terminal ioctls. A guest tty fd is backed by a host terminal (the run's
-// stdio, /dev/tty, or a pty pair), so the line discipline, echo and window
-// size are the host's; this layer translates Linux's request numbers and
+// Terminal ioctls. A guest pty is a supervisor terminal (tty.go); the run's
+// stdio terminal is a host one, whose line discipline, echo and window size
+// are the host's, so for it this layer translates Linux's request numbers and
 // struct termios to Darwin's. The two differ in nearly every bit: flag
 // positions, the c_cc indices, the "disabled" char (0 vs 0xff), field widths
 // (Darwin tcflag_t is 8 bytes) and the speed encoding (Linux Bxxx codes in
@@ -73,6 +73,9 @@ func (g *dguest) ttyIoctl(d *dfile, req, arg uint64) int64 {
 		off, _ := d.tell()
 		return g.ttyPutU32(arg, uint32(max(size-off, 0)))
 	}
+	if d.pty != nil {
+		return g.ptyIoctl(d, req, arg)
+	}
 	if d.f == nil || d.ev != nil || d.ep != nil || d.tfd != nil {
 		return sErr(lxENOTTY)
 	}
@@ -89,11 +92,6 @@ func (g *dguest) ttyIoctl(d *dfile, req, arg uint64) int64 {
 			return sErr(osErrno(err))
 		}
 		return g.ttyPutU32(arg, uint32(n))
-	}
-	if d.pty != nil {
-		if r, ok := g.ptmxIoctl(d, req, arg); ok {
-			return r
-		}
 	}
 	cur, err := unix.IoctlGetTermios(fd, ioctlGetTermios)
 	if err != nil {
@@ -259,28 +257,4 @@ func ttyErr(err error) int64 {
 		return sErr(osErrno(err))
 	}
 	return 0
-}
-
-func (g *dguest) ttyPutU32(addr uint64, v uint32) int64 {
-	var b [4]byte
-	put32(b[:], v)
-	if err := g.writeMem(addr, b[:]); err != nil {
-		return sErr(lxEFAULT)
-	}
-	return 0
-}
-
-// signalPgrp delivers sig to every process of guest process group pgrp, the way
-// a terminal signals its foreground group — which the host pty cannot do for the
-// guest, since its own foreground group is host pids while these are the guest's.
-func (fs *dfs) signalPgrp(pgrp, sig int) {
-	sr := fs.sigs()
-	if sr == nil || pgrp <= 0 {
-		return
-	}
-	for _, pid := range fs.pidsInPgrp(pgrp) {
-		if p := sr.proc(pid); p != nil {
-			sr.send(p, nil, sig, sigInfo{code: siKernel}, nil)
-		}
-	}
 }

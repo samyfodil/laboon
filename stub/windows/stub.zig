@@ -498,6 +498,7 @@ pub export fn wWinMainCRTStartup() callconv(win.WINAPI) noreturn {
     // describes the guest stack from here on, so exception dispatch and stack
     // probes in the handlers (which run on it) see a valid stack.
     if (@hasDecl(arch, "prefaultStack")) arch.prefaultStack();
+    sig.keepWinStack();
     arch.tebStore(0x08, ch.args[2]);
     arch.tebStore(0x10, ch.args[3]);
     arch.tebStore(0x1478, ch.args[3]);

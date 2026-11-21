@@ -53,6 +53,9 @@ func (c *hostChan) endIO() {
 		return
 	}
 	c.ioDead = true
+	if c.stopW != nil {
+		close(c.stopW)
+	}
 	if c.ioGone != nil {
 		close(c.ioGone)
 	}

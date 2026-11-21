@@ -130,7 +130,8 @@ func WithRejectRWX() Option {
 // WithMaxMemory caps the guest's memory in bytes (0, the default, is
 // unlimited): on Linux the address space its mappings take, which the
 // supervisor counts; on Windows the memory the run's stub processes commit,
-// which their job object holds to it. macOS does not enforce it yet.
+// which their job object holds to it; on macOS the memory the guest has
+// mapped, which each stub counts for its process against the run's total.
 func WithMaxMemory(bytes uint64) Option {
 	return func(o *options) { o.cfg.MaxBytes = bytes }
 }

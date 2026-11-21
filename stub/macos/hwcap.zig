@@ -9,6 +9,8 @@
 // the keys; Darwin's arm64 ABI differs), and EVTSTRM/ECV/WFxT (timer behaviour
 // Linux promises and Darwin does not).
 
+const std = @import("std");
+
 extern "c" fn sysctlbyname(name: [*:0]const u8, old: ?*anyopaque, oldlen: ?*usize, new: ?*anyopaque, newlen: usize) c_int;
 
 const Feat = struct { name: [*:0]const u8, word: u1, bit: u6 };
@@ -51,12 +53,35 @@ const feats = [_]Feat{
 
 pub var hwcap: [2]u64 = .{ 0, 0 };
 
+// midr is the MIDR_EL1 the guest reads: Apple's implementer, the P-core part
+// of this chip generation, variant and revision 0, as /proc/cpuinfo names it
+// (appleChips in sandbox/hostinfo_darwin.go; keep them in step).
+pub var midr: u64 = midrOf(0x023);
+
+fn midrOf(part: u64) u64 {
+    return 0x61 << 24 | 0xf << 16 | part << 4;
+}
+
+const chips = [_]struct { prefix: []const u8, part: u64 }{
+    .{ .prefix = "Apple M1", .part = 0x023 },
+    .{ .prefix = "Apple M2", .part = 0x033 },
+    .{ .prefix = "Apple M3", .part = 0x049 },
+    .{ .prefix = "Apple M4", .part = 0x059 },
+};
+
 // init reads the sysctls; it must run before Seatbelt, which denies sysctl.
 pub fn init() void {
     for (feats) |f| {
         var v: u32 = 0;
         var len: usize = @sizeOf(u32);
         if (sysctlbyname(f.name, &v, &len, null, 0) == 0 and v != 0) hwcap[f.word] |= @as(u64, 1) << f.bit;
+    }
+    var brand: [128]u8 = undefined;
+    var blen: usize = brand.len;
+    if (sysctlbyname("machdep.cpu.brand_string", &brand, &blen, null, 0) == 0) {
+        for (chips) |c| {
+            if (blen >= c.prefix.len and std.mem.eql(u8, brand[0..c.prefix.len], c.prefix)) midr = midrOf(c.part);
+        }
     }
 }
 

@@ -189,7 +189,7 @@ func serveGuest(dg *dguest) (int, error) {
 // to proc: the process's stubProc may close its handle while this thread is
 // still served.
 func newStubChan(fs *dfs, idx int, proc windows.Handle, inherit bool) (*hostChan, error) {
-	cch := &hostChan{channel: newChannel(fs.mem, idx, 0, fs.done, nil)}
+	cch := newHostChan(newChannel(fs.mem, idx, 0, fs.done, nil))
 	pg := cch.page
 	pg.state, pg.kind, pg.stubSleep, pg.supSleep, pg.rip, pg.alive = 0, 0, 0, 0, 0, 0
 	var err error
@@ -273,6 +273,8 @@ func (g *dguest) cloneThread(r cloneReq, cfg Config) int {
 	child.ps = g.ps
 	fs.mu.Lock()
 	g.ps.threads++
+	g.ps.ns.register(tid)
+	nsTid := g.ps.ns.localOf(tid)
 	g.ps.comm[tid] = g.ps.comm[g.pid]
 	fs.procs[tid] = &dproc{ospid: g.ps.ospid, ppid: g.pid, ch: cch, ps: g.ps, g: child, thread: true}
 	event := g.ptraceFork(child, r)
@@ -283,7 +285,7 @@ func (g *dguest) cloneThread(r cloneReq, cfg Config) int {
 	go serveThread(child)
 
 	traced := g.stubTraced()
-	g.ch.page.ret = uint64(tid)
+	g.ch.page.ret = uint64(nsTid)
 	g.ch.page.args = [6]uint64{uint64(idx * slotSize), r.flags, r.stack, r.ptid, r.tls, r.ctid}
 	g.ch.reply(repClone)
 	if traced {
@@ -296,7 +298,7 @@ func (g *dguest) cloneThread(r cloneReq, cfg Config) int {
 func serveThread(child *dguest) {
 	fs := child.dfs
 	defer fs.wg.Done()
-	defer fs.freeSlot(child.slot)
+	defer fs.releaseSlot(child)
 	defer child.ch.closeEvents()
 	code, err := serveGuest(child)
 	fs.sigThreadExit(child.pid)
@@ -361,6 +363,8 @@ func (g *dguest) cloneVMProc(r cloneReq, cfg Config) int {
 		ppid, sig = g.ps.ppid, g.ps.exitSignal
 	}
 	ps := g.ps.forkState(gpid, ppid, sig)
+	g.cloneNamespaces(ps, gpid, r.flags)
+	parentPid := g.ps.ns.seen(ps) // the child's pid as the parent's namespace sees it
 	ps.shared, ps.ospid, ps.checkedIn = true, g.ps.ospid, true
 	ps.ft = ft
 	ps.comm[gpid] = g.ps.comm[g.pid]
@@ -389,14 +393,14 @@ func (g *dguest) cloneVMProc(r cloneReq, cfg Config) int {
 	go serveVMProc(child)
 
 	traced := g.stubTraced()
-	g.ch.page.ret = uint64(gpid)
+	g.ch.page.ret = uint64(parentPid)
 	g.ch.page.args = [6]uint64{uint64(idx * slotSize), r.flags, r.stack, r.ptid, r.tls, r.ctid}
 	g.ch.reply(repClone)
 	switch {
 	case vforkDone != nil:
-		g.vforkHold(vforkDone, uint64(gpid), event)
+		g.vforkHold(vforkDone, uint64(parentPid), event)
 	case traced:
-		g.cloned(gpid, gpid, event)
+		g.cloned(gpid, parentPid, event)
 	}
 	return gpid
 }
@@ -412,7 +416,7 @@ func (g *dguest) stubTraced() bool {
 func serveVMProc(child *dguest) {
 	fs := child.dfs
 	defer fs.wg.Done()
-	defer fs.freeSlot(child.slot)
+	defer fs.releaseSlot(child)
 	defer child.ch.closeEvents()
 	code, err := serveGuest(child)
 	winUnregisterThread(fs.sigs(), child.pid)
@@ -462,6 +466,8 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 		ppid, sig = g.ps.ppid, g.ps.exitSignal
 	}
 	ps := g.ps.forkState(gpid, ppid, sig)
+	g.cloneNamespaces(ps, gpid, r.flags)
+	parentPid := g.ps.ns.seen(ps)
 	ps.ft = child.ft
 	ps.comm[gpid] = g.ps.comm[g.pid]
 	child.ps, child.ppid = ps, ppid
@@ -544,8 +550,8 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 	if event != 0 {
 		g.ptraceEvent(event, uint64(gpid))
 	}
-	pg.ret = uint64(gpid)
-	g.ptraceSyscallExit(int64(gpid))
+	pg.ret = uint64(parentPid)
+	g.ptraceSyscallExit(int64(parentPid))
 	g.ch.reply(repResult)
 	return gpid
 }
@@ -555,19 +561,22 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 func serveChild(child *dguest) {
 	fs := child.dfs
 	defer fs.wg.Done()
-	defer fs.freeSlot(child.slot)
+	defer fs.releaseSlot(child)
 	defer child.ch.closeEvents()
 	ch := child.ch
 	w := child.mp.w
 	if err := ch.wait(); err != nil || ch.page.kind != msgForked {
+		// Killed before it checked in (a kill right after fork), or its stub
+		// died: either way the parent's fork returned its pid, so it ends as a
+		// process the parent reaps, with the kill it got or SIGKILL.
 		var code uint32
 		windows.GetExitCodeProcess(w.sp.proc, &code)
 		w.tracef("[lc] [%d] fork child never checked in: %v, status %#x\n", child.pid, err, code)
 		windows.TerminateProcess(w.sp.proc, 128+9)
-		w.sp.close()
-		child.release()
-		fs.forgetProc(child.ps)
-		fs.sigThreadExit(child.pid)
+		if fs.sigs().killedBy(child.tgid) == 0 {
+			fs.setKillSig(child.tgid, lxSigkill)
+		}
+		endWinProcess(child, 0, errExited)
 		return
 	}
 	winRegisterThread(fs.sigs(), child.pid, uint32(ch.page.args[1]), w.st)
@@ -605,7 +614,11 @@ func endWinProcess(child *dguest, code int, err error) {
 	}
 	fs.childDone(child, code, err)
 	if !shared && child.mp.w != nil && child.mp.w.sp != nil {
-		child.mp.dropBackings(fs) // the address space is gone: release its shared backings
+		// The address space is gone: settle its SysV attachments and SEM_UNDO
+		// adjustments, and release its shared backings.
+		child.mp.detachAll(child)
+		child.mp.undoSems(child)
+		child.mp.dropBackings(fs)
 		child.mp.w.sp.close()
 	}
 }
@@ -655,6 +668,7 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	if e != 0 {
 		return fail(e)
 	}
+	defer t.drop()
 	argv, e := dg.readArgv(argvAddr)
 	if e != 0 {
 		return fail(e)
@@ -698,15 +712,22 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 		}
 	}
 	fs.mu.Unlock()
+	oldTid := dg.ptraceExecTid()
 	if shared {
 		if err := dg.endSharedThread(); err != nil {
 			return true, err
 		}
 		dg.mp = newMemProc()
+		dg.takeOverGroup()
 	} else {
+		// The process passes to this thread before its old stub ends, so the
+		// old leader's serve loop, which sees that end, finds itself
+		// superseded rather than its process killed.
+		dg.takeOverGroup()
 		ru := hostRusage(dg.ps.ospid)
 		windows.TerminateProcess(old.sp.proc, 0)
 		windows.WaitForSingleObject(old.sp.proc, windows.INFINITE)
+		dg.mp.detachAll(dg) // exec detaches every SysV segment; SEM_UNDO adjustments carry over
 		fs.mu.Lock()
 		dg.ps.ruPrev = dg.ps.ruPrev.plus(ru)
 		fs.mu.Unlock()
@@ -714,10 +735,8 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	fs.mu.Lock()
 	dg.ps.shared, dg.ps.forked = false, false
 	fs.mu.Unlock()
-	oldTid := dg.ptraceExecTid()
-	dg.takeOverGroup()
 	dg.execDone(path.Base(t.gp))
-	dg.noteExec(t.gp, t.gp, argv, nil)
+	dg.noteExec(t.gp, t.gp, argv, dg.exePin(&t))
 	// A tracer sees the exec stop and the call's exit with the new image in
 	// place, before its first instruction.
 	w, err := old.run.boot(dg, src, argv, envv, func(entry, sp uint64) { dg.ptraceExec(oldTid, entry, sp) })

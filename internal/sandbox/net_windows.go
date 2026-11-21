@@ -148,13 +148,22 @@ func (s *dsock) inet() bool { return s.family == lxAFInet || s.family == lxAFIne
 
 // local reports whether s is served entirely here, over queues and pairs: an
 // AF_UNIX socket, or an INET one on loopback without networking.
-func (s *dsock) local() bool { return s.family == lxAFUnix || s.loop }
+// A unix socket connected to a host socket moves its bytes over a host
+// connection, as a TCP one does.
+func (s *dsock) local() bool { return s.family == lxAFUnix && s.conn == nil || s.loop }
 
 // sockKey is a pathname-bound AF_UNIX socket node's host file identity (volume
 // plus file id), the key the names table uses for it.
 type sockKey struct {
 	vol uint32
 	id  uint64
+}
+
+// absKey is an abstract AF_UNIX name's key in the names table: the names are
+// per network namespace, as on Linux.
+type absKey struct {
+	netns int32
+	name  string
 }
 
 // dnet is a run's socket state: the lock and bus of every socket, the egress
@@ -165,7 +174,8 @@ type dnet struct {
 	bus   chan struct{}
 	seq   uint64
 	eg    *egress
-	names map[any]*dsock // sockKey of a socket node, or "@name" for an abstract one
+	names map[any]*dsock           // sockKey of a socket node, or the absKey of an abstract name
+	fifos map[core.NodeID]*pipeObj // the pipe of each FIFO node the run opened (fifo_windows.go)
 	ino   uint64
 	auto  uint32
 
@@ -311,12 +321,13 @@ func (g *dguest) creds() ucred {
 	return c
 }
 
-func (n *dnet) newSock(family, typ, proto int, cred ucred) *dsock {
+// newSock makes a socket of the network namespace netns.
+func (n *dnet) newSock(family, typ, proto int, cred ucred, netns int32) *dsock {
 	n.mu.Lock()
 	n.ino++
 	ino := n.ino
 	n.mu.Unlock()
-	return &dsock{family: family, typ: typ, proto: proto, n: n, ino: ino, cred: cred, maxBack: 128}
+	return &dsock{family: family, typ: typ, proto: proto, n: n, ino: ino, cred: cred, maxBack: 128, netns: netns}
 }
 
 func sockDfile(s *dsock) (*dfile, lxErrno) {
@@ -380,12 +391,12 @@ func (g *dguest) socket(family, typ, proto int) int64 {
 	default:
 		return sErr(lxEAFNOSUPPORT)
 	}
-	s := g.netState().newSock(family, typ, proto, g.creds())
+	s := g.netState().newSock(family, typ, proto, g.creds(), g.ps.netns.Load())
 	if family == lxAFNetlink {
 		s.nl = newNlDump(g.guestPageSize())
 	}
 	if s.inet() && !g.hostNet() {
-		s.loop, s.netns = true, g.ps.netns.Load()
+		s.loop = true
 	}
 	return g.installSock(s, flags)
 }
@@ -410,7 +421,8 @@ func (g *dguest) socketpair(family, typ, proto int, svAddr uint64) int64 {
 	}
 	n := g.netState()
 	cr := g.creds()
-	a, b := n.newSock(family, typ, 0, cr), n.newSock(family, typ, 0, cr)
+	ns := g.ps.netns.Load()
+	a, b := n.newSock(family, typ, 0, cr, ns), n.newSock(family, typ, 0, cr, ns)
 	a.pair, b.pair = b, a
 	a.state, b.state = skConnected, skConnected
 	a.peerCred, b.peerCred = cr, cr
@@ -627,16 +639,16 @@ func (g *dguest) egressOK(ap netip.AddrPort) bool {
 
 // ---- AF_UNIX names --------------------------------------------------------------
 
-// unixKey resolves a guest AF_UNIX address to its key in dnet.names: "@name"
+// unixKey resolves a guest AF_UNIX address for the socket s to its key in dnet.names: its absKey
 // for an abstract one, the socket node's file id for a path. bind creates the
 // node.
-func (g *dguest) unixKey(raw []byte, create bool) (key any, canon []byte, e lxErrno) {
+func (g *dguest) unixKey(s *dsock, raw []byte, create bool) (key any, canon []byte, e lxErrno) {
 	name, abstract, canon, e := unixName(raw)
 	if e != 0 {
 		return nil, nil, e
 	}
 	if abstract {
-		return "@" + name, canon, 0
+		return absKey{s.netns, name}, canon, 0
 	}
 	gp, e := g.walkAt(lxAtFdcwd, name, !create)
 	if e != 0 {
@@ -714,7 +726,7 @@ func (g *dguest) bind(fd int64, addr, addrlen uint64) int64 {
 			n.auto++
 			name := fmt.Sprintf("%05x", n.auto&0xfffff)
 			n.mu.Unlock()
-			key, canon = "@"+name, append([]byte{lxAFUnix, 0, 0}, name...)
+			key, canon = absKey{s.netns, name}, append([]byte{lxAFUnix, 0, 0}, name...)
 		} else {
 			n.mu.Lock()
 			bound := s.name != nil
@@ -722,7 +734,7 @@ func (g *dguest) bind(fd int64, addr, addrlen uint64) int64 {
 			if bound {
 				return sErr(lxEINVAL)
 			}
-			if key, canon, e = g.unixKey(raw, true); e != 0 {
+			if key, canon, e = g.unixKey(s, raw, true); e != 0 {
 				return sErr(e)
 			}
 		}
@@ -1173,9 +1185,17 @@ func (g *dguest) unixConnect(d *dfile, raw []byte) int64 {
 		n.mu.Unlock()
 		return 0
 	}
-	key, canon, e := g.unixKey(raw, false)
+	key, canon, e := g.unixKey(s, raw, false)
 	if e != 0 {
 		return sErr(e)
+	}
+	if _, path := key.(sockKey); path && s.typ == lxSockStream {
+		n.mu.Lock()
+		l, ok := n.names[key]
+		n.mu.Unlock()
+		if !ok || l.closed {
+			return g.hostUnixConnect(d, raw, canon)
+		}
 	}
 	cr := g.creds()
 	n.mu.Lock()
@@ -1221,6 +1241,69 @@ func (g *dguest) unixConnect(d *dfile, raw []byte) int64 {
 	s.peer = canon
 	l.backlog = append(l.backlog, srv)
 	n.changed(l)
+	n.changed(s)
+	return 0
+}
+
+// hostUnixConnect connects s to the host socket a path names, which a
+// backend holding host sockets (a bind of a host directory) reaches.
+func (g *dguest) hostUnixConnect(d *dfile, raw, canon []byte) int64 {
+	s := d.sk
+	n := s.n
+	name, _, _, e := unixName(raw)
+	if e != 0 {
+		return sErr(e)
+	}
+	gp, e := g.walkAt(lxAtFdcwd, name, true)
+	if e != 0 {
+		return sErr(e)
+	}
+	loc, err := g.vns().Resolve(gp, true)
+	if err != nil {
+		return sErr(osErrno(err))
+	}
+	sfs, ok := loc.FS.(core.SocketFS)
+	if !ok {
+		return sErr(lxECONNREFUSED)
+	}
+	n.mu.Lock()
+	switch s.state {
+	case skConnected:
+		n.mu.Unlock()
+		return sErr(lxEISCONN)
+	case skListening:
+		n.mu.Unlock()
+		return sErr(lxEINVAL)
+	}
+	n.mu.Unlock()
+	var c net.Conn
+	err = sfs.ReachSocket(loc.Node, func(addr string) error {
+		var err error
+		c, err = net.Dial("unix", addr)
+		return err
+	})
+	switch {
+	case errors.Is(err, core.ErrSocketUnsupported):
+		return sErr(lxECONNREFUSED)
+	case err != nil:
+		var ce core.Errno
+		if errors.As(err, &ce) {
+			return sErr(osErrno(err))
+		}
+		return sErr(sockErrno(err))
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	switch {
+	case s.closed:
+		c.Close()
+		return sErr(lxEBADF)
+	case s.state == skConnected || s.state == skListening:
+		c.Close()
+		return sErr(lxEISCONN)
+	}
+	s.peer = canon
+	n.startTCP(s, c)
 	n.changed(s)
 	return 0
 }

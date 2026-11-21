@@ -65,6 +65,7 @@ func (g *dguest) cloneVMProc(r cloneReq, cfg Config) int {
 		ppid, sig = g.ps.ppid, g.ps.exitSignal
 	}
 	ps := g.ps.forkState(gpid, ppid, sig)
+	g.cloneNamespaces(ps, gpid, r.flags)
 	ps.shared, ps.ospid, ps.checkedIn = true, g.ps.ospid, true
 	ps.ft = ft
 	ps.comm[gpid] = g.ps.comm[g.pid]
@@ -113,7 +114,7 @@ func (g *dguest) cloneVMProc(r cloneReq, cfg Config) int {
 // starts straight in the guest (no fork handshake).
 func serveVMProc(fs *dfs, child *dguest, gpid int, cfg Config) {
 	defer fs.wg.Done()
-	defer fs.freeSlot(child.slot)
+	defer fs.releaseSlot(child)
 	code, err := serveLoop(child, cfg)
 	if cfg.Trace != nil {
 		fmt.Fprintf(cfg.Trace, "[vm child %d] serveLoop returned code=%d err=%v\n", gpid, code, err)
@@ -184,6 +185,7 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 		ppid, sig = g.ps.ppid, g.ps.exitSignal
 	}
 	ps := g.ps.forkState(gpid, ppid, sig)
+	g.cloneNamespaces(ps, gpid, r.flags)
 	ps.ft = child.ft
 	ps.comm[gpid] = g.ps.comm[g.pid]
 	var vforkDone chan struct{}
@@ -269,6 +271,8 @@ func (g *dguest) cloneThread(r cloneReq, cfg Config) int {
 	child.ps = g.ps
 	fs.mu.Lock()
 	g.ps.threads++
+	g.ps.ns.register(tid)
+	nsTid := g.ps.ns.localOf(tid)
 	g.ps.comm[tid] = g.ps.comm[g.pid]
 	fs.procs[tid] = &dproc{ospid: g.ps.ospid, ppid: g.pid, ch: cch, stop: stop, ps: g.ps, g: child, thread: true}
 	event := g.ptraceFork(child, r)
@@ -283,7 +287,7 @@ func (g *dguest) cloneThread(r cloneReq, cfg Config) int {
 			tid, idx*slotSize, g.ch.page.guestRip, r.flags)
 	}
 	traced := g.stubTraced()
-	g.ch.page.ret = uint64(tid)
+	g.ch.page.ret = uint64(nsTid)
 	g.ch.page.args = [6]uint64{uint64(idx * slotSize), r.flags, r.stack, r.ptid, r.tls, r.ctid}
 	g.ch.reply(repClone)
 	if traced {
@@ -297,7 +301,7 @@ func (g *dguest) cloneThread(r cloneReq, cfg Config) int {
 // a syscall; serveLoop's leading wait receives it.
 func serveThread(fs *dfs, child *dguest, tid int, cfg Config) {
 	defer fs.wg.Done()
-	defer fs.freeSlot(child.slot)
+	defer fs.releaseSlot(child)
 	code, err := serveLoop(child, cfg)
 	if cfg.Trace != nil {
 		fmt.Fprintf(cfg.Trace, "[thread %d] serveLoop returned code=%d err=%v\n", tid, code, err)
@@ -405,7 +409,7 @@ func (g *dguest) stubTraced() bool {
 // its parent may be reading) and becomes a zombie for wait4.
 func serveChild(fs *dfs, child *dguest, gpid int, cfg Config) {
 	defer fs.wg.Done()
-	defer fs.freeSlot(child.slot)
+	defer fs.releaseSlot(child)
 	ch := child.ch
 	if err := ch.wait(); err != nil || ch.page.kind != msgForked {
 		child.release()

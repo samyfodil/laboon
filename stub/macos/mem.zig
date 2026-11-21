@@ -266,13 +266,112 @@ pub fn init() void {
 }
 
 pub fn handle(nr: u64, a: [*]const u64) ?u64 {
+    if (overCap(growth(nr, a))) return if (nr == NR_BRK) brk_cur else neg(ENOMEM);
     const r = serve(nr, a);
     switch (nr) {
         NR_MUNMAP, NR_MPROTECT, NR_MREMAP, NR_BRK, NR_SHMAT, NR_SHMDT => wroteMaps(),
         NR_MMAP => if (a[3] & L_FIXED != 0) wroteMaps(),
         else => {},
     }
+    switch (nr) {
+        NR_MMAP, NR_MUNMAP, NR_MREMAP, NR_BRK, NR_SHMAT, NR_SHMDT => publish(),
+        else => {},
+    }
     return r;
+}
+
+// ---- memory cap ---------------------------------------------------------------
+
+// The run's memory cap (Config.MaxBytes) bounds what all its processes have
+// mapped together. Each stub process publishes its total in the signal record
+// of the slot it leads (acct); a request that would take the sum past the cap
+// fails with ENOMEM, as an address-space limit does on Linux.
+var acct: usize = 0;
+
+// account makes slot the one this stub process publishes its total in: its
+// image's or its fork child's, once that is in place.
+pub fn account(slot: usize) void {
+    acct = slot;
+    publish();
+}
+
+fn publish() void {
+    if (sig.runMemCap() == 0) return;
+    lock.lock();
+    const n = usedIn(0, std.math.maxInt(u64));
+    lock.unlock();
+    sig.setProcMem(acct, n);
+}
+
+// growth is how much more a call asks to map, at most.
+fn growth(nr: u64, a: [*]const u64) u64 {
+    if (sig.runMemCap() == 0) return 0;
+    switch (nr) {
+        NR_MMAP => {
+            const n = rdUp(a[1]);
+            if (a[3] & L_FIXED == 0) return n;
+            lock.lock();
+            defer lock.unlock();
+            return n -| usedIn(a[0], a[0] +| n);
+        },
+        NR_MREMAP => return if (a[3] & MREMAP_DONTUNMAP != 0) rdUp(a[2]) else rdUp(a[2]) -| rdUp(a[1]),
+        NR_BRK => {
+            lock.lock();
+            defer lock.unlock();
+            return if (brk_base != 0 and a[0] > brk_end) rdUp(a[0]) - brk_end else 0;
+        },
+        else => return 0,
+    }
+}
+
+fn overCap(more: u64) bool {
+    if (more == 0) return false;
+    const cap = sig.runMemCap();
+    if (cap == 0) return false;
+    lock.lock();
+    const own = usedIn(0, std.math.maxInt(u64));
+    lock.unlock();
+    return own +| more +| sig.othersMem(acct) > cap;
+}
+
+// usedIn is how much of [lo, hi) the guest has mapped: the union of its
+// mappings there, each counted once. Under lock.
+fn usedIn(lo: u64, hi: u64) u64 {
+    const pi = procinfo.info;
+    const fixed = [_]Range{
+        .{ .lo = brk_base, .hi = brk_end },
+        .{ .lo = pi.main_lo, .hi = pi.main_hi },
+        .{ .lo = pi.interp_lo, .hi = pi.interp_hi },
+        .{ .lo = pi.stack_lo, .hi = pi.stack_hi },
+    };
+    const all = gpa.alloc(Range, anons.items.len + vmas.items.len + fixed.len) catch return 0;
+    defer gpa.free(all);
+    var n: usize = 0;
+    for (anons.items) |e| {
+        all[n] = .{ .lo = e.lo, .hi = e.hi };
+        n += 1;
+    }
+    for (vmas.items) |e| {
+        if (e.kind != .file) continue;
+        all[n] = .{ .lo = e.lo, .hi = e.hi };
+        n += 1;
+    }
+    for (fixed) |e| {
+        all[n] = e;
+        n += 1;
+    }
+    std.mem.sort(Range, all[0..n], {}, rangeLess);
+    var used: u64 = 0;
+    var done = lo;
+    for (all[0..n]) |e| {
+        const a = @max(e.lo, done);
+        const b = @min(e.hi, hi);
+        if (b > a) {
+            used += b - a;
+            done = b;
+        }
+    }
+    return used;
 }
 
 fn serve(nr: u64, a: [*]const u64) ?u64 {
@@ -714,9 +813,10 @@ pub fn reset() void {
 
 // place maps at addr as the caller asked: MAP_FIXED replaces, a NOREPLACE
 // request must land exactly on addr (Darwin takes it as a hint) or EEXIST, and
-// otherwise addr is a hint.
+// otherwise addr is a hint, an unaligned one naming the page it falls in as
+// Linux takes it.
 fn place(addr: u64, n: u64, prot: u64, dw: u64, fd: i64, off: u64, noreplace: bool) u64 {
-    const r = sys(SYS_mmap, if (addr == 0) hint_mmap else addr, n, prot, dw, @bitCast(fd), off);
+    const r = sys(SYS_mmap, if (addr == 0) hint_mmap else addr & ~(PAGE - 1), n, prot, dw, @bitCast(fd), off);
     if (r < 0) return lx(r);
     const got: u64 = @bitCast(r);
     if (noreplace and got != addr) {
@@ -1190,6 +1290,26 @@ fn regionAt(addr: u64) ?Region {
 pub fn writable(addr: u64) bool {
     const r = regionAt(addr) orelse return false;
     return r.info.prot & 2 != 0;
+}
+
+// protAt is the protection addr is mapped with, if it is mapped.
+pub fn protAt(addr: u64) ?u32 {
+    const r = regionAt(addr) orelse return null;
+    return @intCast(r.info.prot);
+}
+
+// pastEnd reports whether addr is in a page of a shared file mapping that
+// lies wholly past the file's end, which has no page to give.
+pub fn pastEnd(addr: u64) bool {
+    lock.lock();
+    defer lock.unlock();
+    for (vmas.items) |e| {
+        if (e.kind != .file or !e.shared or e.copy or addr < e.lo or addr >= e.hi) continue;
+        const fd = fdlink.lookup(e.id) orelse return false;
+        const size = fileSize(fd) orelse return false;
+        return e.off + (addr & ~(PAGE - 1)) - e.lo >= rdUp(size);
+    }
+    return false;
 }
 
 // isShared reports whether addr is in a MAP_SHARED mapping.
@@ -1798,6 +1918,7 @@ fn shmat(shmid: u64, addr_in: u64, flg: u64) u64 {
     if (isErr(k)) return k;
     const sfd: i32 = @intCast(k & 0xffffffff);
     const n = (k >> 32) * PAGE;
+    if (overCap(n)) return neg(ENOMEM);
     var prot: u64 = if (flg & SHM_RDONLY != 0) PROT_READ else PROT_RW;
     if (flg & SHM_EXEC != 0) prot |= PROT_EXEC;
     const fixed = addr != 0 and flg & SHM_REMAP != 0;

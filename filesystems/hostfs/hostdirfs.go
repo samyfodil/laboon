@@ -237,11 +237,16 @@ func (n *HostNode) Stat() (core.Attr, error) {
 // attrFromHostStat maps a normalized host stat to a backend-agnostic Attr (guest
 // overrides are a separate step, applyMeta). Kind comes from the S_IFMT bits so
 // the fstat path, which has no lstat FileInfo, classifies the object the same
-// way the lstat path does.
+// way the lstat path does. A symlink's mode is 0777, as Linux has no other
+// (Darwin keeps the umask it was made under).
 func attrFromHostStat(st HostStat) core.Attr {
+	mode := st.mode & 0o7777 // perm + setuid/setgid/sticky, which Perm() drops
+	if kindOfMode(st.mode) == core.Symlink {
+		mode = 0o777
+	}
 	return core.Attr{
 		Kind:    kindOfMode(st.mode),
-		Mode:    st.mode & 0o7777, // perm + setuid/setgid/sticky, which Perm() drops
+		Mode:    mode,
 		Uid:     st.uid,
 		Gid:     st.gid,
 		Rdev:    st.rdev,
@@ -551,7 +556,7 @@ func (l *Layer) Persist(store *core.MetaStore) error {
 			return nil
 		}
 		gp := "/" + filepath.ToSlash(rel)
-		dev, ino := HostDevIno(fi)
+		dev, ino := pathDevIno(hp, fi)
 		o, ok := store.Get(core.NodeID{Dev: dev, Ino: ino})
 		if fi.Mode()&os.ModeNamedPipe != 0 {
 			perm := uint32(fi.Mode().Perm())

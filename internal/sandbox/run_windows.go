@@ -69,9 +69,6 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	if len(cfg.Args) == 0 {
 		return 0, errors.New("no argv")
 	}
-	if cfg.RootFS == nil {
-		return 0, errors.New("windows backend needs a root")
-	}
 	if cfg.Env == nil {
 		cfg.Env = []string{} // a nil env is empty, never the supervisor's own
 	}
@@ -113,6 +110,11 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 		return 0, err
 	}
 	defer fs.close()
+	if cfg.RootFS == nil {
+		if prog, err = fs.bindProgram(prog); err != nil {
+			return 0, fmt.Errorf("laboon: program: %w", err)
+		}
+	}
 	seedLowerOwners(fs)
 
 	stdio, wait, err := stdioFiles(&cfg)
@@ -154,7 +156,8 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 		return 0, err
 	}
 	defer windows.CloseHandle(evSup)
-	ch := &hostChan{channel: newChannel(mem, 0, 0, done, nil), evStub: evStub, evSup: evSup}
+	ch := newHostChan(newChannel(mem, 0, 0, done, nil))
+	ch.evStub, ch.evSup = evStub, evSup
 	defer ch.closeProc()
 	dg := newDguest(fs, ch, mem, 0, cfg)
 	dg.pid, dg.tgid = 1, 1
@@ -196,7 +199,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 		fs.wg.Wait() // a stub's watcher touches the section
 		return 0, err
 	}
-	publishControl(cfg, 0, fs) // the host leader runs in a job object; Pid is best-effort here
+	publishControl(cfg, fs.initOspid, fs)
 	defer revokeControl(cfg)
 	code, err := serveGuest(dg)
 	if err == errLeaderGone {
@@ -809,7 +812,7 @@ func (g *wguest) syscall(dg *dguest, nr uint64, a [6]uint64) int64 {
 		isar0, isar1, isar2 := isarFromHwcap(hwcap, hwcap2)
 		dg.ch.page.args[0], dg.ch.page.args[1], dg.ch.page.args[2] = isar0, isar1, isar2
 		return 0
-	case wRobust, wYield:
+	case wYield:
 		return 0
 	case wSetTid:
 		return int64(dg.pid)

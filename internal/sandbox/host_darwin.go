@@ -26,3 +26,6 @@ func hostIsTTY(f *os.File) bool {
 	_, err := unix.IoctlGetTermios(hostFd(f), unix.TIOCGETA)
 	return err == nil
 }
+
+// setHostPipeSize leaves the host pipe as it is: Darwin sizes its pipes itself.
+func setHostPipeSize(int, int) lxErrno { return 0 }

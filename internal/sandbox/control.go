@@ -14,19 +14,23 @@ import (
 // the run is a safe no-op (ESRCH), never a use of freed state. The zero value is
 // ready; pass a *Control in Config.Control to receive the handle.
 type Control struct {
-	mu   sync.Mutex
-	pid  int
-	send func(sig int) error // nil until the guest starts and once it ends
+	mu    sync.Mutex
+	pid   int                 // the leader the run ended with
+	pidOf func() int          // the leader now, while the run is up
+	send  func(sig int) error // nil until the guest starts and once it ends
 }
 
-func (c *Control) publish(pid int, send func(int) error) {
+func (c *Control) publish(pidOf func() int, send func(int) error) {
 	c.mu.Lock()
-	c.pid, c.send = pid, send
+	c.pidOf, c.send = pidOf, send
 	c.mu.Unlock()
 }
 
 func (c *Control) revoke() {
 	c.mu.Lock()
+	if c.pidOf != nil {
+		c.pid, c.pidOf = c.pidOf(), nil
+	}
 	c.send = nil
 	c.mu.Unlock()
 }
@@ -39,6 +43,9 @@ func (c *Control) Pid() int {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.pidOf != nil {
+		return c.pidOf()
+	}
 	return c.pid
 }
 
@@ -85,11 +92,23 @@ func (fs *dfs) signalGuest1(sig int) error {
 }
 
 // publishControl and revokeControl wire a run's Control, if the caller passed
-// one, so each Run adds only a one-line call.
-func publishControl(cfg Config, pid int, fs *dfs) {
+// one, so each Run adds only a one-line call. pidOf reports the run's host
+// leader.
+func publishControl(cfg Config, pidOf func() int, fs *dfs) {
 	if cfg.Control != nil {
-		cfg.Control.publish(pid, fs.signalGuest1)
+		cfg.Control.publish(pidOf, fs.signalGuest1)
 	}
+}
+
+// initOspid is the host process the guest's init runs in now: an exec into a
+// new stub moves it.
+func (fs *dfs) initOspid() int {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if ps := fs.pt[1]; ps != nil {
+		return ps.ospid
+	}
+	return 0
 }
 
 func revokeControl(cfg Config) {

@@ -48,10 +48,32 @@ const smaps = @import("smaps.zig");
 // this Darwin), which is per-thread and separate from the guest's tpidr_el0, so
 // the guest owning tpidr_el0 does not disturb it (see m15-threads/tlsprobe).
 threadlocal var g_chan: *chan.Chan = undefined;
-// g_exit_sp is a guest thread's own (libc-allocated) stack pointer, saved before
-// it switches to the guest stack. On thread exit the stub switches back to it so
-// pthread_exit does not run on the guest stack, which the guest's joiner frees.
-threadlocal var g_exit_sp: u64 = 0;
+// g_exit_key is a pthread TSD slot holding a guest thread's own (libc-allocated)
+// stack pointer, saved before it switches to the guest stack; 0 on the main
+// thread, whose stack no joiner frees. A thread's exit runs there from its
+// island on (buildExitIsland), and pthread_exit with it, never on the guest
+// stack, which the guest frees as soon as it is done with it.
+pub var g_exit_key: c_ulong = 0;
+
+// g_stk_key holds the stack a thread serves the guest's syscalls on, set as
+// it first enters the guest: the rest of its own, below where the guest took
+// over (an exec, which enters again from deep in it, keeps it). The guest's
+// stack has only the room Linux promises below its sp, which the stub's own
+// frame and calls would overrun into whatever lies below it.
+pub var g_stk_key: c_ulong = 0;
+export var lc_stk_tsd: u64 = 0;
+
+inline fn ownStack() void {
+    if (pthread_getspecific(g_stk_key) != null) return;
+    const sp = asm volatile (if (tstate.arm64) "mov %[o], sp" else "movq %%rsp, %[o]"
+        : [o] "=r" (-> u64),
+    );
+    _ = pthread_setspecific(g_stk_key, @ptrFromInt(sp & ~@as(u64, 15)));
+}
+
+pub fn exitSp() u64 {
+    return @intFromPtr(pthread_getspecific(g_exit_key));
+}
 // Guest thread state the stub owns end to end: a clone(CLONE_VM) child, whose
 // exit ends only itself, and its CLONE_CHILD_CLEARTID / set_tid_address word,
 // cleared and futex-woken on that exit so a joiner wakes.
@@ -81,7 +103,6 @@ const SVC0: u32 = 0xd4000001;
 const NR_EXIT: u64 = 93;
 const NR_SET_TID_ADDRESS: u64 = 96;
 const NR_FUTEX: u64 = 98;
-const NR_SET_ROBUST_LIST: u64 = 99;
 const NR_GETTID: u64 = 178;
 const NR_MUNMAP: u64 = 215;
 // x86-64 arch_prctl subfunctions. On x86-64 glibc keeps its thread pointer in
@@ -514,7 +535,6 @@ fn x64gen(nr: u64) u64 {
         324 => 283, // membarrier
         281 => 22, // epoll_pwait
         202 => 98, // futex
-        273 => 99, // set_robust_list
         60 => 93, // exit
         218 => 96, // set_tid_address
         186 => 178, // gettid
@@ -581,13 +601,12 @@ fn serveSyscall(frame: [*]u64) u64 {
     if (gen -% sig.NR_SIGALTSTACK <= sig.NR_RT_SIGRETURN - sig.NR_SIGALTSTACK) {
         if (sig.handle(gen, frame)) |r| return localTraced(frame, r);
     }
-    if (gen == NR_MUNMAP and g_exit_sp != 0 and @intFromPtr(frame) -% frame[0] < frame[1]) {
+    if (gen == NR_MUNMAP and exitSp() != 0 and proc.guestSp(frame) -% frame[0] < frame[1]) {
         g_unmap = .{ frame[0], frame[1] };
         return 0;
     }
     switch (gen) {
         NR_FUTEX => return localTraced(frame, futex.handle(frame[0..6].*)),
-        NR_SET_ROBUST_LIST => return localTraced(frame, 0),
         NR_EXIT => if (g_is_thread or g_threads.load(.seq_cst) > 1) threadExit(frame[0]),
         else => {
             if (stdio.handle(g_chan, gen, frame)) |r| return localTraced(frame, r);
@@ -750,6 +769,7 @@ fn forkChild(base: [*]u8, child_off: u64, parent_pid: u64, gpid: u64) noreturn {
     // signal records (it replies to the fork only then): bind to them now.
     sig.startThread(slotIndex(cc));
     procinfo.publish(cc);
+    mem.account(slotIndex(cc));
     g_threads.store(1, .seq_cst);
     g_is_thread = false;
     g_ctid = if (t.flags & CLONE_CHILD_CLEARTID != 0) t.ctid else 0;
@@ -765,6 +785,8 @@ fn forkChild(base: [*]u8, child_off: u64, parent_pid: u64, gpid: u64) noreturn {
     cc.args[0] = rawGetpid();
     chan.exchange(cc); // supervisor records the pid and replies
     if (t.flags & CLONE_CHILD_SETTID != 0) @as(*u32, @ptrFromInt(t.ctid)).* = @truncate(gpid);
+    if (tstate.arm64) sig.leaveTo(@ptrFromInt(t.frame), 0, if (t.stack != 0) t.stack else proc.guestSp(@ptrFromInt(t.frame)));
+    ownStack();
     sig.enterGuest();
     if (t.stack != 0) proc.resumeFrame(@ptrFromInt(t.frame), t.stack);
     proc.resumeIsland(@ptrFromInt(t.frame));
@@ -826,7 +848,7 @@ fn lcClone(ch: *chan.Chan, frame: [*]u64) u64 {
     const h: *CloneHandoff = @ptrCast(@alignCast(malloc(@sizeOf(CloneHandoff)) orelse return cloneFailed(ch.args[0], flags, ch)));
     h.slot = @intFromPtr(g_base) + ch.args[0];
     h.tls = if (flags & CLONE_SETTLS != 0) ch.args[4] else if (tstate.arm64) @intFromPtr(pthread_getspecific(g_tp_key)) else g_guest_fsbase;
-    h.child_stack = if (ch.args[2] != 0) ch.args[2] else if (tstate.arm64) @intFromPtr(frame) + FRAME_TOP else frame[proc.XR_RSP];
+    h.child_stack = if (ch.args[2] != 0) ch.args[2] else if (tstate.arm64) proc.guestSp(frame) else frame[proc.XR_RSP];
     h.ctid = if (flags & CLONE_CHILD_CLEARTID != 0) ch.args[5] else 0;
     @memcpy(h.frame[0..], frame[0 .. proc.FRAME_BYTES / 8]);
     if (flags & CLONE_PARENT_SETTID != 0) @as(*u32, @ptrFromInt(ch.args[3])).* = @truncate(tid);
@@ -840,9 +862,7 @@ fn lcClone(ch: *chan.Chan, frame: [*]u64) u64 {
     return if (ok) ch.ret else neg(EAGAIN);
 }
 
-// FRAME_TOP is the guest sp at a trapped svc, above the trampoline frame and
-// the island's two pushes.
-const FRAME_TOP: u64 = 816;
+
 
 // spawnThread starts the OS thread for h. On failure it retires the slot the
 // supervisor set up, as the thread's exit would.
@@ -873,8 +893,8 @@ fn cloneFailed(child_off: u64, flags: u64, ch: *chan.Chan) u64 {
 
 // A vfork child given no stack shares the parent's: it returns from the clone
 // call on it and runs below the parent's sp until it execs or exits. The
-// parent's own state -- its trampoline frame and the stub's call chain under
-// it -- lives below that sp too, so the parent copies that region aside,
+// parent's trampoline frame lives below that sp too, so the parent copies
+// that region aside,
 // starts the child and waits on a stack of its own, and puts the region back
 // once the child is done (to the guest it is dead stack, as on Linux).
 const VforkPark = struct { ch: *chan.Chan, h: *CloneHandoff, lo: u64, len: u64, save: [*]u8, ok: bool };
@@ -883,10 +903,10 @@ const PARK_STACK: usize = 256 << 10;
 extern "c" fn free(p: ?*anyopaque) void;
 
 fn vforkSpawn(ch: *chan.Chan, h: *CloneHandoff, tid: u64, frame: [*]u64) u64 {
-    const top = @intFromPtr(frame) + FRAME_TOP;
+    const top = if (tstate.arm64) proc.guestSp(frame) else @intFromPtr(frame) + 816;
     const stk = malloc(PARK_STACK) orelse return cloneFailed(h.slot - @intFromPtr(g_base), CLONE_VFORK, ch);
     var v = VforkPark{ .ch = ch, .h = h, .lo = 0, .len = 0, .save = undefined, .ok = false };
-    v.lo = asm volatile (if (tstate.arm64) "mov %[o], sp" else "movq %%rsp, %[o]"
+    v.lo = if (tstate.arm64) frame[98] else asm volatile ("movq %%rsp, %[o]"
         : [o] "=r" (-> u64),
     );
     v.len = top - v.lo;
@@ -991,7 +1011,7 @@ fn rewriteSite(isl: *Islands, pc: u64) void {
         return;
     };
     if (insn == SVC0) {
-        buildIsland(at, pc + 4);
+        if (loadsExit(pc)) buildExitIsland(at, pc + 4) else buildIsland(at, pc + 4);
     } else if (kind == MRS_TPIDR) {
         buildTpRead(at, pc + 4, n);
     } else if (kind == MSR_TPIDR) {
@@ -1068,7 +1088,8 @@ fn inB(from: u64, to: u64) bool {
 pub fn threadExit(code: u64) noreturn {
     // The main thread runs on the stack the stub built for the program, which
     // no joiner frees; it finishes where it is.
-    if (g_exit_sp == 0) threadExitFinish(g_ctid, code);
+    const sp = exitSp();
+    if (sp == 0) threadExitFinish(g_ctid, code);
     if (!tstate.arm64) {
         // Switch to this thread's own libc stack (16-align it, then call pushes
         // the return slot) and run the teardown there. ctid/code are pinned to
@@ -1078,7 +1099,7 @@ pub fn threadExit(code: u64) noreturn {
             \\ andq $-16, %%rsp
             \\ callq *%%rdx
             :
-            : [sp] "{rax}" (g_exit_sp),
+            : [sp] "{rax}" (sp),
               [ctid] "{rdi}" (g_ctid),
               [code] "{rsi}" (code),
               [f] "{rdx}" (&threadExitFinish),
@@ -1092,7 +1113,7 @@ pub fn threadExit(code: u64) noreturn {
         \\ mov x1, %[code]
         \\ bl %[f]
         :
-        : [sp] "r" (g_exit_sp),
+        : [sp] "r" (sp),
           [ctid] "r" (g_ctid),
           [code] "r" (code),
           [f] "X" (&threadExitFinish),
@@ -1106,14 +1127,15 @@ pub fn threadExit(code: u64) noreturn {
 // to another thread, so neither the slot nor its signal record is touched.
 // A guest thread finishes on its own libc stack, as threadExit does.
 pub fn deadThread() noreturn {
-    if (g_exit_sp == 0) deadThreadFinish();
+    const sp = exitSp();
+    if (sp == 0) deadThreadFinish();
     if (!tstate.arm64) {
         asm volatile (
             \\ movq %%rax, %%rsp
             \\ andq $-16, %%rsp
             \\ callq *%%rdx
             :
-            : [sp] "{rax}" (g_exit_sp),
+            : [sp] "{rax}" (sp),
               [f] "{rdx}" (&deadThreadFinish),
             : "memory", "cc"
         );
@@ -1123,7 +1145,7 @@ pub fn deadThread() noreturn {
         \\ mov sp, %[sp]
         \\ bl %[f]
         :
-        : [sp] "r" (g_exit_sp),
+        : [sp] "r" (sp),
           [f] "X" (&deadThreadFinish),
         : "x30", "memory", "cc"
     );
@@ -1194,15 +1216,18 @@ fn cloneBootstrap(arg: ?*anyopaque) callconv(.C) ?*anyopaque {
     // Save this pthread's own stack pointer before switching to the guest's, so
     // thread exit can return to it (see lcThreadExit). The libc stack is left
     // untouched for the thread's whole life and stays valid for pthread_exit.
-    g_exit_sp = asm volatile (if (tstate.arm64) "mov %[o], sp" else "movq %%rsp, %[o]"
+    const own_sp = asm volatile (if (tstate.arm64) "mov %[o], sp" else "movq %%rsp, %[o]"
         : [o] "=r" (-> u64),
     );
+    _ = pthread_setspecific(g_exit_key, @ptrFromInt(own_sp));
     if (g_chan.stdio & STDIO_TRACED != 0) {
         // A traced new thread starts stopped, as Linux's auto-attached one.
         g_chan.kind = chan.MSG_SYSCALL;
         g_chan.nr = NR_CHILD_STOP;
         _ = awaitReply(g_chan);
     }
+    if (tstate.arm64) sig.leaveTo(&h.frame, 0, h.child_stack);
+    ownStack();
     sig.enterGuest();
     proc.resumeFrame(&h.frame, h.child_stack);
 }
@@ -1311,28 +1336,49 @@ const GUEST_STACK: u64 = 8 << 20; // the main thread's stack, as RLIMIT_STACK sa
 // g_auxids is the uid, euid, gid, egid the next image's auxv reports.
 var g_auxids: [4]u64 = .{ 0, 0, 0, 0 };
 
-// tramp_common is the shared thunk. Entry: sp = guest_sp-16, [sp]=guest x16,
-// [sp+8]=guest x17, x17=resume, x16 clobbered. It saves the full guest frame,
-// calls tramp_handler, and restores every register except x0 (the syscall
-// result) and x16 (reused as the resume-branch scratch). The arm64 Linux ABI
-// preserves every register but x0 across `svc` AND restores the full user
+// tramp_common is the shared thunk. Entry: sp = guest_sp-160 (the island's
+// sp), [sp]=&epilogue, [sp+16]=guest x16, [sp+24]=guest x17, x17=resume, x16
+// clobbered. It moves to the thread's own stack (g_stk_key), saves the full
+// guest frame there, calls tramp_handler, restores every register except x0
+// (the syscall result) and x16, and goes back to the island's sp and its
+// epilogue, which restores x16 and x17. So nothing but the island's 160 bytes
+// is written below the guest's sp, which has no more room than Linux promises
+// there. tramp_common_here is an entry that keeps the frame below the island's
+// sp: an exit's island is on the thread's own stack already. The arm64 Linux
+// ABI preserves every register but x0 across `svc` AND restores the full user
 // context, so x8 (the syscall number, which musl reuses), the condition flags
 // (NZCV), FPCR/FPSR and all of q0-q31 must survive too -- libSystem's C code in
 // the handler freely clobbers the flags and FP/SIMD registers, so they are
 // saved and restored here. x18 (Apple-reserved) is preserved. tpidr_el0 is NOT
 // touched: the guest's thread pointer lives in a TSD slot reached by rewritten
-// mrs/msr sites (see g_tp_key). x16 (IP0) is still sacrificed as the branch
-// scratch -- a latent gap (Linux keeps it) addressed by the per-site epilogue.
+// mrs/msr sites (see g_tp_key).
 //
-// Frame (784 bytes, on the guest stack): x0..x30 at 0..240; NZCV at 248;
-// packed FPCR|FPSR<<32 at 256; resume at 264; q0..q31 at 272..784. The island
-// pushed guest x16/x17 at the old sp, now [sp,#784]/[sp,#792].
+// Frame (800 bytes): x0..x30 at 0..240; NZCV at 248; packed FPCR|FPSR<<32 at
+// 256; resume at 264; q0..q31 at 272..784; the island's sp at 784.
+pub extern fn tramp_common_here() callconv(.Naked) void;
+
 pub export fn tramp_common() callconv(.Naked) void {
     // x86-64 has no island/tramp_common path: a rewritten syscall is a ud2
     // serviced from the SIGILL mcontext (serveTrap), so this symbol is unused
     // there and kept as a trap. The arm64 body saves the full guest frame.
     if (!tstate.arm64) asm volatile ("ud2") else asm volatile (
-        \\ sub sp, sp, #784
+        \\ str x0, [sp, #8]          // free x0 (the island's spare slot)
+        \\ adrp x0, _lc_stk_tsd@PAGE
+        \\ ldr x0, [x0, _lc_stk_tsd@PAGEOFF]
+        \\ mrs x16, tpidrro_el0
+        \\ ldr x0, [x16, x0]         // this thread's own stack
+        \\ mov x16, sp               // the island's sp
+        \\ cbz x0, 2f
+        \\ mov sp, x0
+        \\ b 2f
+        \\ .globl _tramp_common_here  // an entry already on the stack to use
+        \\_tramp_common_here:
+        \\ str x0, [sp, #8]
+        \\ mov x16, sp
+        \\2:
+        \\ sub sp, sp, #800
+        \\ str x16, [sp, #784]
+        \\ ldr x0, [x16, #8]
         \\ stp x0,  x1,  [sp, #0]
         \\ stp x2,  x3,  [sp, #16]
         \\ stp x4,  x5,  [sp, #32]
@@ -1341,9 +1387,9 @@ pub export fn tramp_common() callconv(.Naked) void {
         \\ stp x10, x11, [sp, #80]
         \\ stp x12, x13, [sp, #96]
         \\ stp x14, x15, [sp, #112]
-        \\ ldr x0, [sp, #800]       // guest x16 (second island push, at old sp)
+        \\ ldr x0, [x16, #16]       // guest x16 (the island's second push)
         \\ str x0, [sp, #128]
-        \\ ldr x0, [sp, #808]       // guest x17
+        \\ ldr x0, [x16, #24]       // guest x17
         \\ str x0, [sp, #136]
         \\ str x17, [sp, #264]      // guest resume pc (for tramp_handler's guest_rip)
         \\ stp x18, x19, [sp, #144] // x18 preserved
@@ -1375,6 +1421,16 @@ pub export fn tramp_common() callconv(.Naked) void {
         \\ stp q26, q27, [sp, #688]
         \\ stp q28, q29, [sp, #720]
         \\ stp q30, q31, [sp, #752]
+        \\ adrp x9, _lc_busy_tsd@PAGE  // busy from here: a kick before this
+        \\ ldr x9, [x9, _lc_busy_tsd@PAGEOFF] // leaves its signal to the syscall
+        \\ mrs x10, tpidrro_el0
+        \\ ldr x10, [x10, x9]
+        \\ cbz x10, 1f
+        \\ mov w9, #1
+        \\ strb w9, [x10]
+        \\1:
+        \\ .globl _lc_tc_busy
+        \\_lc_tc_busy:
         \\ mov x0, sp
         \\ bl _tramp_handler
         \\ str x0, [sp, #0]
@@ -1414,8 +1470,12 @@ pub export fn tramp_common() callconv(.Naked) void {
         \\ ldp x6,  x7,  [sp, #48]
         \\ ldp x4,  x5,  [sp, #32]
         \\ ldp x2,  x3,  [sp, #16]
+        \\ ldr x16, [sp, #784]      // the island's sp
+        \\ ldr x17, [sp, #264]
+        \\ str x17, [x16, #8]       // the resume pc, for a trap's return (lc_trap_ret)
         \\ ldp x0,  x1,  [sp, #0]   // x0 = syscall result
-        \\ ldr x16, [sp, #784]      // x16 = &per-site epilogue (first island push)
+        \\ mov sp, x16
+        \\ ldr x16, [sp]            // &per-site epilogue (the island's first push)
         \\ br  x16                  // -> epilogue; it restores guest x16/x17, pops, b resume
     );
 }
@@ -1433,7 +1493,7 @@ const MRS_CTR: u32 = 0xd53b0020; // mrs xN, ctr_el0
 // IDC=DIC=0 forces musl's __clear_cache to do both dc cvau and ic ivau;
 // DminLine=IminLine=4 => 64-byte stride, which is <= the real Apple cache line,
 // so stepping by it cleans/invalidates every real line (correct, never stale).
-const CTR_EL0_VALUE: u64 = 0x8444c004;
+pub const CTR_EL0_VALUE: u64 = 0x8444c004;
 
 // encB returns `b to` encoded for an instruction placed at `from`.
 // syncCode makes freshly written instructions visible to instruction fetch.
@@ -1466,40 +1526,103 @@ fn encLdrLit(from: u64, lit: u64, rt: u32) u32 {
 
 // buildIsland emits a svc #0 island (64 bytes): an entry that saves the guest's
 // x16/x17 and hands control to tramp_common, and a per-site epilogue that
-// tramp_common returns to with the save frame still live. The epilogue restores
+// tramp_common returns to on the island's sp. The epilogue restores
 // the guest's own x16/x17 and branches back with a DIRECT `b`, so unlike a
 // register-indirect return it sacrifices no guest register -- the Linux ABI
 // keeps every register but x0 across svc, including x16/x17 (IP0/IP1), which an
 // inlined syscall's caller may keep live. tramp_common gets the guest resume pc
 // (for the handler's guest_rip) and the epilogue address through the frame.
+// The 128 bytes below the guest's sp are skipped, not touched: Linux leaves
+// them alone across svc (proc.ISLAND_PUSH).
 //
-//   0:  stp x16, x17, [sp, #-16]!      save guest x16/x17
+//   0:  stp x16, x17, [sp, #-144]!     skip the gap, save guest x16/x17
 //   4:  ldr x16, Lepi                  x16 = &epilogue
 //   8:  str x16, [sp, #-16]!           push &epilogue (tramp_common reads it)
 //   12: ldr x17, Lresume               x17 = guest resume pc
 //   16: ldr x16, Lcommon               x16 = &tramp_common
 //   20: br  x16
-//   24: ldr x17, [sp, #136]            epilogue: guest x17
-//   28: ldr x16, [sp, #128]            guest x16 (the real value)
-//   32: add sp, sp, #816               pop frame (784) + both island pushes (32)
+//   24: ldp x16, x17, [sp, #16]        epilogue: guest x16/x17
+//   28: add sp, sp, #160               pop both pushes and the gap
+//   32: nop
 //   36: b   resume                     direct branch into the guest
 //   40: .quad &epilogue; .quad resume; .quad &tramp_common
 fn buildIsland(at: u64, resume_pc: u64) void {
     const w: [*]u32 = @ptrFromInt(at);
-    w[0] = 0xa9bf47f0; // stp x16, x17, [sp, #-16]!
+    w[0] = 0xa9b747f0; // stp x16, x17, [sp, #-144]!
     w[1] = encLdrLit(at + 4, at + 40, 16); // ldr x16, Lepi
     w[2] = 0xf81f0ff0; // str x16, [sp, #-16]!
     w[3] = encLdrLit(at + 12, at + 48, 17); // ldr x17, Lresume
     w[4] = encLdrLit(at + 16, at + 56, 16); // ldr x16, Lcommon
     w[5] = 0xd61f0200; // br x16
-    w[6] = 0xf94047f1; // ldr x17, [sp, #136]  (epilogue start = at+24)
-    w[7] = 0xf94043f0; // ldr x16, [sp, #128]
-    w[8] = 0x910cc3ff; // add sp, sp, #816
+    w[6] = 0xa94147f0; // ldp x16, x17, [sp, #16]  (epilogue start = at+24)
+    w[7] = 0x910283ff; // add sp, sp, #160
+    w[8] = 0xd503201f; // nop
     w[9] = encB(at + 36, resume_pc); // b resume
     const q: [*]u64 = @ptrFromInt(at + 40);
     q[0] = at + 24; // Lepi = &epilogue
     q[1] = resume_pc; // Lresume (for tramp_handler's guest_rip)
     q[2] = @intFromPtr(&tramp_common); // Lcommon
+}
+
+// loadsExit reports whether the svc at pc follows `mov x8|w8, #93` (exit).
+fn loadsExit(pc: u64) bool {
+    if (pc & (PAGE - 1) == 0) {
+        const p = mem.protAt(pc - 4) orelse return false;
+        if (p & 1 == 0) return false;
+    }
+    const w = @as(*const u32, @ptrFromInt(pc - 4)).*;
+    return w == 0xd2800ba8 or w == 0x52800ba8;
+}
+
+// buildExitIsland emits a thread exit's island: a svc island that first moves
+// to the thread's own stack (g_stk_key), so not even the island touches the
+// guest's stack, which may be free already (Go's exitThread says so before
+// the syscall), and enters tramp_common where it is. Its x16 is lost, as an
+// exit does not return. 64 bytes, as buildIsland's:
+//
+//   0:  mrs x16, tpidrro_el0
+//   4:  ldr x16, [x16, #key*8]          this thread's own stack
+//   8:  cbz x16, 16
+//   12: mov sp, x16
+//   16: stp x16, x17, [sp, #-144]!
+//   20: adr x16, epilogue
+//   24: str x16, [sp, #-16]!
+//   28: adrp x17, resume
+//   32: add x17, x17, :lo12:resume
+//   36: ldr x16, Lcommon
+//   40: br  x16
+//   44: ldp x16, x17, [sp, #16]         epilogue
+//   48: add sp, sp, #160
+//   52: b   resume
+//   56: .quad &tramp_common_here
+fn buildExitIsland(at: u64, resume_pc: u64) void {
+    const key: u32 = @intCast(g_stk_key);
+    const w: [*]u32 = @ptrFromInt(at);
+    w[0] = 0xd53bd070; // mrs x16, tpidrro_el0
+    w[1] = 0xf9400210 | (key << 10); // ldr x16, [x16, #key*8]
+    w[2] = 0xb4000050; // cbz x16, +8
+    w[3] = 0x9100021f; // mov sp, x16
+    w[4] = 0xa9b747f0; // stp x16, x17, [sp, #-144]!
+    w[5] = encADR(at + 20, at + 44, 16);
+    w[6] = 0xf81f0ff0; // str x16, [sp, #-16]!
+    w[7] = encADRP(at + 28, resume_pc, 17);
+    w[8] = 0x91000231 | @as(u32, @intCast(resume_pc & 0xfff)) << 10; // add x17, x17, #lo12
+    w[9] = encLdrLit(at + 36, at + 56, 16);
+    w[10] = 0xd61f0200; // br x16
+    w[11] = 0xa94147f0; // ldp x16, x17, [sp, #16]
+    w[12] = 0x910283ff; // add sp, sp, #160
+    w[13] = encB(at + 52, resume_pc);
+    @as(*u64, @ptrFromInt(at + 56)).* = @intFromPtr(&tramp_common_here);
+}
+
+fn encADR(from: u64, to: u64, rd: u32) u32 {
+    const off: u32 = @truncate(to -% from);
+    return 0x10000000 | (off & 3) << 29 | (off >> 2 & 0x7ffff) << 5 | rd;
+}
+
+fn encADRP(from: u64, to: u64, rd: u32) u32 {
+    const off: u32 = @truncate((to >> 12) -% (from >> 12));
+    return 0x90000000 | (off & 3) << 29 | (off >> 2 & 0x7ffff) << 5 | rd;
 }
 
 // buildTpRead emits an island for `mrs xN, tpidr_el0`: load the guest thread
@@ -1526,15 +1649,16 @@ fn buildCtrRead(at: u64, resume_pc: u64, n: u32) void {
 
 // buildTpWrite emits an island for `msr tpidr_el0, xN`: store xN into this
 // thread's TSD slot, then branch back. Uses one scratch register (!= xN) saved
-// and restored on the stack, so it preserves every guest register and flags.
+// and restored on the stack past the 128 bytes below sp Linux leaves alone, so
+// it preserves every guest register, flags and that memory.
 fn buildTpWrite(at: u64, resume_pc: u64, n: u32) void {
     const key: u32 = @intCast(g_tp_key);
     const s: u32 = if (n == 16) 17 else 16; // scratch, distinct from xN
     const w: [*]u32 = @ptrFromInt(at);
-    w[0] = 0xf81f0fe0 | s; // str xS, [sp, #-16]!
+    w[0] = 0xf8170fe0 | s; // str xS, [sp, #-144]!
     w[1] = 0xd53bd060 | s; // mrs xS, tpidrro_el0  (TSD base)
     w[2] = 0xf9000000 | (key << 10) | (s << 5) | n; // str xN, [xS, #key*8]
-    w[3] = 0xf84107e0 | s; // ldr xS, [sp], #16
+    w[3] = 0xf84907e0 | s; // ldr xS, [sp], #144
     w[4] = encB(at + 16, resume_pc); // b resume
 }
 
@@ -1904,6 +2028,7 @@ fn loadAndEnter(path: [*:0]const u8, interpPath: ?[*:0]const u8, mainSites: [*:0
     procinfo.info.sp = sp;
     procinfo.info.stack_lo = @intFromPtr(stk);
     procinfo.info.stack_hi = @intFromPtr(stk) + GUEST_STACK;
+    mem.account(slotIndex(g_chan));
     if (g_chan.stdio & STDIO_TRACED != 0) {
         // A traced exec stops at the new image before its first instruction
         // (the ptrace exec-event stop); a tracer may read memory meanwhile.
@@ -1926,6 +2051,7 @@ const LC_EXEC_STOP: u64 = 0x4c430018; // sandbox/lx_signal.go lxExecStop
 // sp and entry are pinned to x1/x2 so clearing x0 cannot clobber the branch
 // target, matching the Linux stub's enter (stub/zig/aarch64.zig).
 fn enterGuest(entry: u64, sp: u64) noreturn {
+    ownStack();
     sig.enterGuest();
     if (tstate.arm64) {
         asm volatile (
@@ -2035,6 +2161,9 @@ pub fn main() void {
     const pool = poolOffset(argv[0]);
     const marker = if (pool == null) parseMarker(argv[0]) else null;
     if (pthread_key_create(&g_tp_key, null) != 0) _exit(126); // guest thread-pointer slot
+    if (pthread_key_create(&g_exit_key, null) != 0) _exit(126);
+    if (pthread_key_create(&g_stk_key, null) != 0) _exit(126);
+    lc_stk_tsd = g_stk_key * 8;
     const base = mapChannel(argv[1]);
     g_base = base;
     g_chan = if (marker) |m| @ptrCast(@alignCast(base + m[0])) else slotAt(base, 0);

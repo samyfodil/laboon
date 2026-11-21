@@ -255,12 +255,14 @@ extern "c" fn signal(sig: c_int, h: *const fn (c_int) callconv(.C) void) usize;
 const CLONE_CHILD_SETTID: u64 = 0x1000000;
 
 // The supervisor pokes a process with SIGUSR1 (Darwin 30) to make it notice a
-// freshly queued signal. The HVF stub takes pending signals at syscall
-// boundaries (see dispatchSyscall), so the kick only needs to not kill the stub;
-// a kick that lands inside hv_vcpu_run cancels the run and vmm.run() re-enters.
-fn sigKickNoop(_: c_int) callconv(.C) void {}
+// freshly queued signal. A thread in a syscall takes it as the syscall ends
+// (dispatchSyscall); one running guest code is stopped for its run loop to
+// deliver it (vmm.kickRunning).
+fn sigKick(_: c_int) callconv(.C) void {
+    vmm.kickRunning();
+}
 fn installSigKick() void {
-    _ = signal(30, sigKickNoop);
+    _ = signal(30, sigKick);
 }
 
 // unblockKick lets kicks (SIGUSR1) in: a fork child starts with them blocked
@@ -382,6 +384,7 @@ pub fn main() void {
     vmm.g_chan_path = chan_path; // so a forked child maps the same channel
     if (!chan.init()) _exit(126);
     if (!vmm.initThreads(base)) _exit(124); // futex buckets + threads; base for sibling slots
+    vmm.account(ch);
     installSigKick();
     // A respawn is an execve; if the process is traced, stop at the new image's
     // entry before running it (the ptrace exec-event stop).
@@ -394,8 +397,9 @@ pub fn main() void {
 fn runLoop(vm: *vmm.Vmm, ch: *chan.Chan) noreturn {
     while (true) {
         if (ch.stdio & vmm.STDIO_SINGLESTEP != 0) vm.enableStep(); // ptrace single-step
-        const ev = vm.run() catch _exit(1);
+        const ev = vm.run(ch) catch _exit(1);
         switch (ev) {
+            .signal => vm.deliverAsync(ch, chan.exchange),
             .syscall => |sc| {
                 // Memory and futex syscalls are serviced against the VM RAM
                 // locally; the rest go to the supervisor over the channel.
@@ -493,6 +497,7 @@ fn forkChildMain(argv: [][*:0]u8) noreturn {
     const ch: *chan.Chan = @ptrCast(@alignCast(base + m.child_off));
     if (!chan.init()) _exit(126);
     if (!vmm.initThreads(base)) _exit(124);
+    vmm.account(ch);
     installSigKick();
     unblockKick(); // a kick that came before the handler was held, not fatal
     // A traced child takes its first stop before this is answered, and its

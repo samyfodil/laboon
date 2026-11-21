@@ -14,3 +14,9 @@ import (
 func fileIdent(_ string, fi os.FileInfo) (id uint64, nlink uint64, ok bool) {
 	return core.FileID(fi)
 }
+
+// pathDevIno is the identity a node of the file at hp reports, which a POSIX
+// os.FileInfo carries.
+func pathDevIno(_ string, fi os.FileInfo) (dev, ino uint64) {
+	return HostDevIno(fi)
+}

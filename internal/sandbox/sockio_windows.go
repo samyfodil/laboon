@@ -388,7 +388,7 @@ func (g *dguest) unixSend(s *dsock, iovs [][2]uint64, total int, dest []byte, ri
 			}
 			return sErr(lxEOPNOTSUPP)
 		}
-		key, _, e := g.unixKey(dest, false)
+		key, _, e := g.unixKey(s, dest, false)
 		if e != 0 {
 			return sErr(e)
 		}

@@ -837,7 +837,7 @@ func (g *dguest) fchmod(fd int64, mode uint32) int64 {
 		// handled in place below.) A host that keeps no mode for the object
 		// (a Windows socket or pipe) leaves it to the description.
 		if hostfs.Modeless(d.f) {
-			d.fx.perm.Store(permSet | mode&0o7777)
+			d.perm().Store(permSet | mode&0o7777)
 			return 0
 		}
 		if err := d.f.Chmod(os.FileMode(mode & 0o7777)); err != nil {

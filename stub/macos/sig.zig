@@ -62,6 +62,7 @@ pub const Thread = extern struct {
 pub const Proc = extern struct {
     _res: u64,
     pending: u64, // the process-directed pending bits
+    mem: u64, // what the stub process leading this slot has mapped, for the run's memory cap
 };
 
 comptime {
@@ -76,6 +77,7 @@ comptime {
     std.debug.assert(@offsetOf(Thread, "saved") == 60);
     std.debug.assert(@offsetOf(Thread, "saved_mask") == 64);
     std.debug.assert(@offsetOf(Proc, "pending") == 8);
+    std.debug.assert(@offsetOf(Proc, "mem") == 16);
     std.debug.assert(@sizeOf(Thread) <= PROC_OFF);
     std.debug.assert(@sizeOf(Proc) <= STRIDE - PROC_OFF);
 }
@@ -88,6 +90,7 @@ pub const NR_RT_SIGPROCMASK: u64 = 135;
 pub const NR_RT_SIGPENDING: u64 = 136;
 pub const NR_RT_SIGTIMEDWAIT: u64 = 137;
 pub const NR_RT_SIGRETURN: u64 = 139;
+const NR_EXIT: u64 = 93; // arm64; trapEnter serves arm64 only
 const NR_RESTART_SYSCALL: u64 = 128;
 // epipeRaises matches these against frame[8], which is the raw guest number
 // (asm-generic on arm64, x86-64 on x86-64), not the translated dispatch number.
@@ -196,6 +199,18 @@ const DwStack = extern struct { sp: u64, size: u64, flags: c_int };
 
 extern "c" fn sigaction(sig: c_int, act: *const DwSigaction, old: ?*DwSigaction) c_int;
 extern "c" fn signal(sig: c_int, handler: usize) usize;
+extern "c" fn pthread_key_create(key: *c_ulong, destructor: ?*const anyopaque) c_int;
+extern "c" fn pthread_setspecific(key: c_ulong, value: ?*const anyopaque) c_int;
+extern "c" fn pthread_getspecific(key: c_ulong) ?*anyopaque;
+extern "c" fn getsegmentdata(mhp: *const anyopaque, segname: [*:0]const u8, size: *u64) ?[*]u8;
+extern const _mh_execute_header: u8;
+extern fn lc_tc_busy() callconv(.C) void;
+
+// lc_busy_tsd is the byte offset, from a thread's TSD base, of the slot that
+// holds its tl.busy, which tramp_common sets as it enters the stub.
+export var lc_busy_tsd: u64 = 0;
+// g_text is the stub's own __TEXT segment.
+var g_text: [2]u64 = .{ 0, 0 };
 extern "c" fn sigaltstack(ss: *const DwStack, old: ?*DwStack) c_int;
 extern "c" fn pthread_sigmask(how: c_int, set: ?*const u32, old: ?*u32) c_int;
 const SIG_UNBLOCK: c_int = 2;
@@ -279,8 +294,15 @@ const Tls = struct {
     word: u32 = 0,
     waiting: bool = false,
     futex: u64 = 0,
-    // kicked: a kick came while busy, since this syscall began (cpSys).
+    // kicked: a kick came while busy, or as the thread entered the stub,
+    // since the last look for signals (cpSys).
     kicked: u32 = 0,
+    // The guest state the thread goes back to, recorded before busy clears:
+    // a kick that lands before the guest runs delivers onto it (guestState).
+    leaving: bool = false,
+    leave_frame: [*]u64 = undefined,
+    leave_x0: u64 = 0,
+    leave_sp: u64 = 0,
     // The pending switch handed to the brk trap: the guest state to load and
     // the signal to deliver onto it first.
     switch_ctx: Ctx = undefined,
@@ -304,6 +326,33 @@ fn neg(e: i64) u64 {
 // sigRunOff, in slot 0's stride).
 pub fn runProcs() u32 {
     return @atomicLoad(u32, @as(*const u32, @ptrCast(@alignCast(g_area + 0x2000))), .acquire);
+}
+
+// runMemCap is the run's memory cap, 0 for none (sigRunOff + 8).
+pub fn runMemCap() u64 {
+    return @atomicLoad(u64, @as(*const u64, @ptrCast(@alignCast(g_area + 0x2000 + 8))), .acquire);
+}
+
+fn procAt(slot: usize) *Proc {
+    return @ptrCast(@alignCast(g_area + slot * STRIDE + PROC_OFF));
+}
+
+// procMem is what the stub process leading slot has mapped.
+pub fn procMem(slot: usize) u64 {
+    return @atomicLoad(u64, &procAt(slot).mem, .acquire);
+}
+
+pub fn setProcMem(slot: usize, n: u64) void {
+    @atomicStore(u64, &procAt(slot).mem, n, .release);
+}
+
+// othersMem is what every stub process but the one leading slot has mapped.
+pub fn othersMem(slot: usize) u64 {
+    var n: u64 = 0;
+    for (0..chan.MAX_SLOTS) |s| {
+        if (s != slot) n +|= procMem(s);
+    }
+    return n;
 }
 
 fn thrAt(slot: usize) *Thread {
@@ -365,16 +414,15 @@ pub fn traceState() *TraceState {
 }
 
 // publishFrame records a traced thread's guest state at a trapped syscall:
-// x0..x30 from the trap frame, the guest sp just above it (the 784-byte frame
-// plus the island's two 16-byte pushes), the resume pc, and NZCV. The
-// supervisor reads this for the syscall stop and GETREGS.
+// x0..x30 from the trap frame, the guest sp (proc.guestSp), the resume pc,
+// and NZCV. The supervisor reads this for the syscall stop and GETREGS.
 pub fn publishFrame(frame: [*]u64, pc: u64) void {
     if (!tstate.arm64) @compileError("publishFrame: x86-64 frame image pending the trampoline register frame (AMD64.md 1e/1f)");
     const s = traceState();
     s.kind = 1;
     s.dirty = 0;
     for (0..31) |i| s.regs.x[i] = frame[i];
-    s.regs.sp = @intFromPtr(frame) + 816;
+    s.regs.sp = proc.guestSp(frame);
     s.regs.pc = pc;
     s.regs.pstate = frame[31] & 0xf0000000;
 }
@@ -405,6 +453,12 @@ fn ld(p: *const u64) u64 {
 // before Seatbelt, which forbids sigaction.
 pub fn install(chan_base: [*]u8) void {
     g_area = chan_base + AREA_OFF;
+    var key: c_ulong = 0;
+    if (pthread_key_create(&key, null) != 0) _exit(126);
+    lc_busy_tsd = key * 8;
+    var n: u64 = 0;
+    const text = getsegmentdata(&_mh_execute_header, "__TEXT", &n) orelse _exit(126);
+    g_text = .{ @intFromPtr(text), @intFromPtr(text) + n };
     const block: u32 = (1 << (DW_SIGUSR1 - 1)) | (1 << (DW_SIGUSR2 - 1));
     const flags = DW_SA_SIGINFO | DW_SA_ONSTACK;
     const fault = DwSigaction{ .handler = onFault, .mask = block, .flags = flags };
@@ -426,6 +480,7 @@ fn bind(slot: usize) void {
 
 pub fn startThread(slot: usize) void {
     bind(slot);
+    _ = pthread_setspecific(lc_busy_tsd / 8, &tl.busy);
     if (mmap(null, ALT_SIZE, 3, 0x1002, -1, 0)) |p| {
         if (@intFromPtr(p) != std.math.maxInt(usize)) tl.alt = @intFromPtr(p);
     }
@@ -450,8 +505,17 @@ pub fn enterGuest() void {
 }
 
 pub fn enter() void {
-    @atomicStore(u32, &tl.kicked, 0, .seq_cst);
     setBusy(&tl, true);
+    tl.leaving = false;
+}
+
+// leaveTo records the guest state this thread goes back to, before busy
+// clears: the frame's registers with x0 and sp, at the frame's resume pc.
+pub fn leaveTo(frame: [*]u64, x0: u64, sp: u64) void {
+    tl.leave_frame = frame;
+    tl.leave_x0 = x0;
+    tl.leave_sp = sp;
+    tl.leaving = true;
 }
 
 // clearKick answers the kicks so far: the caller looks for signals next.
@@ -660,13 +724,13 @@ fn stopSelf(sig: u32) void {
 // ---- contexts -------------------------------------------------------------------
 
 // fromFrame loads the guest state tramp_common saved: x0..x30 at 0, NZCV at
-// 248, FPCR|FPSR<<32 at 256, q0..q31 at 272; the guest sp is the frame plus the
-// 784-byte frame and the island's two 16-byte pushes.
+// 248, FPCR|FPSR<<32 at 256, q0..q31 at 272; the guest sp from the island's
+// sp at 784 (proc.guestSp).
 fn fromFrame(c: *Ctx, frame: [*]u64, x0: u64, pc: u64) void {
     if (!tstate.arm64) return; // x86-64 serves from the mcontext, not a saved frame
     for (0..31) |i| c.x[i] = frame[i];
     c.x[0] = x0;
-    c.sp = @intFromPtr(frame) + 816;
+    c.sp = proc.guestSp(frame);
     c.pc = pc;
     c.pstate = frame[31] & 0xf0000000;
     c.fpcr = @truncate(frame[32]);
@@ -1091,26 +1155,28 @@ fn x64Deliver() void {
 
 // A trap wx.zig placed for an svc is served as the svc's island would serve
 // it: trapEnter pushes the guest's x16 and x17 and lc_trap_ret's address
-// below its sp, as an island does, and enters tramp_common with x17 the pc to
-// resume at. tramp_common returns through lc_trap_ret, which restores x16 and
-// x17 and traps once more, for trapReturn to pop the frame and resume the
-// guest there: no register is free to branch with.
+// below its sp, past the same gap an island skips, and enters tramp_common
+// with x17 the pc to resume at. tramp_common returns through lc_trap_ret,
+// which restores x16 and x17 and traps once more, for trapReturn to pop the
+// pushes and resume the guest at the pc tramp_common left in the island's
+// spare slot: no register is free to branch with. A thread's exit goes to its
+// own stack instead, as its island would.
 fn trapEnter(mc: *std.c.mcontext_t) void {
-    const sp = mc.ss.sp;
+    const own = if (mc.ss.regs[8] == NR_EXIT) @intFromPtr(pthread_getspecific(@import("root").g_stk_key)) else 0;
+    const sp = if (own != 0) own else mc.ss.sp;
     setBusy(&tl, true);
-    const ok = put(u64, sp - 16, mc.ss.regs[16]) and put(u64, sp - 8, mc.ss.regs[17]) and put(u64, sp - 32, @intFromPtr(&lc_trap_ret));
+    const ok = put(u64, sp - 144, mc.ss.regs[16]) and put(u64, sp - 136, mc.ss.regs[17]) and put(u64, sp - 160, @intFromPtr(&lc_trap_ret));
     setBusy(&tl, false);
     if (!ok) die(SIGSEGV);
     mc.ss.regs[17] = mc.ss.pc + 4;
-    mc.ss.sp = sp - 32;
-    mc.ss.pc = @intFromPtr(&@import("root").tramp_common);
+    mc.ss.sp = sp - proc.ISLAND_PUSH;
+    mc.ss.pc = if (own != 0) @intFromPtr(&@import("root").tramp_common_here) else @intFromPtr(&@import("root").tramp_common);
 }
 
 export fn lc_trap_ret() callconv(.Naked) noreturn {
     if (tstate.arm64) {
         asm volatile (
-            \\ ldr x17, [sp, #136]
-            \\ ldr x16, [sp, #128]
+            \\ ldp x16, x17, [sp, #16]
             \\ brk #0x5d
         );
     } else {
@@ -1119,9 +1185,9 @@ export fn lc_trap_ret() callconv(.Naked) noreturn {
 }
 
 fn trapReturn(mc: *std.c.mcontext_t) void {
-    const frame: [*]const u64 = @ptrFromInt(mc.ss.sp);
-    mc.ss.pc = frame[33];
-    mc.ss.sp += 816;
+    const island: [*]const u64 = @ptrFromInt(mc.ss.sp);
+    mc.ss.pc = island[1];
+    mc.ss.sp += proc.ISLAND_PUSH;
 }
 
 fn doSwitch(mc: *std.c.mcontext_t) void {
@@ -1164,6 +1230,7 @@ pub fn afterSyscall(frame: [*]u64, r0: u64) ?u64 {
     if (!isRestart(r0)) {
         // Fast path. A kick from here on redirects the thread itself; one
         // that came earlier found busy set, but its signal is visible now.
+        if (tstate.arm64) leaveTo(frame, r0, proc.guestSp(frame));
         setBusy(s, false);
         const t = s.rec;
         const pend = @atomicLoad(u64, &t.pending, .monotonic) | @atomicLoad(u64, &s.prec.pending, .monotonic);
@@ -1233,6 +1300,7 @@ noinline fn pendingAfter(frame: [*]u64, r0: u64) ?u64 {
             if (@as(i64, @bitCast(r0)) == -ERESTART_RESTARTBLOCK) frame[8] = NR_RESTART_SYSCALL;
             return null;
         }
+        if (tstate.arm64) leaveTo(frame, r0, proc.guestSp(frame));
         setBusy(&tl, false);
         if (pendingAllowed(~ld(&thr().mask)) == 0) return r0;
         setBusy(&tl, true);
@@ -1240,6 +1308,88 @@ noinline fn pendingAfter(frame: [*]u64, r0: u64) ?u64 {
 }
 
 // ---- Darwin handlers ------------------------------------------------------------
+
+// guestState loads the guest state a kick delivers onto, or reports the
+// thread on its way into the stub. Out of busy sections a thread can still be
+// in transit between the guest and the stub: in an island, in tramp_common,
+// or in the stub on its way back. Its registers then are partly the stub's,
+// so the guest state comes from where the transit keeps it: the frame it
+// returns from, or the island's own saves. A thread on its way in leaves the
+// signal to the syscall it enters.
+fn guestState(mc: *std.c.mcontext_t, c: *Ctx) bool {
+    if (!tstate.arm64) {
+        fromMc(c, mc);
+        return true;
+    }
+    const pc = mc.ss.pc;
+    if (pc >= g_text[0] and pc < g_text[1]) {
+        if (pc >= @intFromPtr(&@import("root").tramp_common) and pc < @intFromPtr(&lc_tc_busy)) return false;
+        if (!tl.leaving) return false;
+        fromLeave(c);
+        return true;
+    }
+    fromMc(c, mc);
+    const at = pc & ~@as(u64, 63);
+    const off = pc - at;
+    const w: *const [16]u32 = @ptrFromInt(at);
+    const q: *const [8]u64 = @ptrFromInt(at);
+    const common = @intFromPtr(&@import("root").tramp_common);
+    if (w[0] == 0xa9b747f0 and w[2] == 0xf81f0ff0 and w[5] == 0xd61f0200 and q[5] == at + 24 and q[7] == common) {
+        if (off < 24 or !tl.leaving) return false;
+        fromLeave(c);
+    } else if (w[0] == 0xd53bd070 and w[2] == 0xb4000050 and w[3] == 0x9100021f and w[10] == 0xd61f0200 and q[7] == @intFromPtr(&@import("root").tramp_common_here)) {
+        if (off < 44 or !tl.leaving) return false;
+        fromLeave(c);
+    } else if (w[0] & ~@as(u32, 31) == 0xd53bd060 and w[1] == tpLoad(w[0] & 31, w[0] & 31) and w[2] >> 26 == 5) {
+        // mrs xN, tpidrro_el0; ldr xN, [xN, #key*8]; b resume
+        const ret = bTarget(at + 8, w[2]);
+        switch (off) {
+            0 => c.pc = ret - 4,
+            4 => {
+                c.x[w[0] & 31] = @intFromPtr(pthread_getspecific(@import("root").g_tp_key));
+                c.pc = ret;
+            },
+            else => c.pc = ret,
+        }
+    } else if (w[0] & ~@as(u32, 31) == 0xf8170fe0 and w[1] == 0xd53bd060 | (w[0] & 31) and w[3] == 0xf84907e0 | (w[0] & 31) and w[4] >> 26 == 5) {
+        // str xS, [sp, #-144]!; mrs xS, tpidrro_el0; str xN, [xS, #key*8];
+        // ldr xS, [sp], #144; b resume
+        const ret = bTarget(at + 16, w[4]);
+        if (off >= 4 and off <= 12) {
+            c.x[w[0] & 31] = load(mc.ss.sp) orelse return false;
+            c.sp = mc.ss.sp + 144;
+        }
+        c.pc = if (off < 12) ret - 4 else ret;
+    } else if (w[0] & ~@as(u32, 31) == 0x58000040 and w[1] >> 26 == 5 and q[1] == @import("root").CTR_EL0_VALUE) {
+        // ldr xN, Lctr; b resume
+        const ret = bTarget(at + 4, w[1]);
+        c.pc = if (off == 0) ret - 4 else ret;
+    }
+    return true;
+}
+
+fn fromLeave(c: *Ctx) void {
+    fromFrame(c, tl.leave_frame, tl.leave_x0, tl.leave_frame[33]);
+    c.sp = tl.leave_sp;
+}
+
+fn tpLoad(rt: u32, rn: u32) u32 {
+    const key: u32 = @intCast(@import("root").g_tp_key);
+    return 0xf9400000 | (key << 10) | (rn << 5) | rt;
+}
+
+fn bTarget(from: u64, insn: u32) u64 {
+    const imm: i64 = @as(i32, @bitCast(insn << 6)) >> 6;
+    return from +% @as(u64, @bitCast(imm * 4));
+}
+
+// load reads a word of the guest's stack from a kick, where busy is clear:
+// a fault in the copy then comes back as null.
+fn load(addr: u64) ?u64 {
+    setBusy(&tl, true);
+    defer setBusy(&tl, false);
+    return get(u64, addr);
+}
 
 fn kickSelf(ctx: ?*anyopaque) void {
     if (!tl.ready) return;
@@ -1258,7 +1408,11 @@ fn kickSelf(ctx: ?*anyopaque) void {
     if (tl.in_handler or pendingAllowed(~ld(&thr().mask)) == 0) return;
     const uc: *std.c.ucontext_t = @ptrCast(@alignCast(ctx.?));
     var c: Ctx = undefined;
-    fromMc(&c, uc.mcontext);
+    if (!guestState(uc.mcontext, &c)) {
+        // On its way into the stub: the syscall it enters looks for signals.
+        @atomicStore(u32, &tl.kicked, 1, .seq_cst);
+        return;
+    }
     tl.in_handler = true;
     defer tl.in_handler = false;
     if (dispatchAll(&c)) toMc(uc.mcontext, &c);
@@ -1326,8 +1480,15 @@ fn faultSignal(dsig: c_int, mc: *const std.c.mcontext_t, info: *Info) u32 {
                 if (dfsc == 0x21) {
                     sig = SIGBUS;
                     code = BUS_ADRALN;
-                } else if (far >= PAGEZERO_END and mem.mapped(far, far + 1)) {
-                    code = SEGV_ACCERR;
+                } else if (far < PAGEZERO_END) {} else if (mem.protAt(far)) |p| {
+                    // An access the mapping permits that Darwin still could not
+                    // serve -- a page of a file mapping past the file's end -- is
+                    // Linux's SIGBUS; one it does not permit, a protection failure.
+                    const need: u32 = if (esr >> 26 >= 0x24) (if (esr & (1 << 6) != 0) 2 else 1) else 4;
+                    if (dsig == DW_SIGBUS and dfsc & 0x3c == 0x04 and p & need != 0) {
+                        sig = SIGBUS;
+                        code = BUS_ADRERR;
+                    } else code = SEGV_ACCERR;
                 }
             },
             0x22, 0x26 => {
@@ -1422,8 +1583,8 @@ fn faultSignal(dsig: c_int, mc: *const std.c.mcontext_t, info: *Info) u32 {
 
 // idReg serves an mrs of an AArch64 ID register that Darwin traps at EL0
 // where Linux emulates it: the feature ID registers from the host's HWCAP
-// (hwcap.isar), MPIDR_EL1 as a single uniprocessor view and REVIDR_EL1 as no
-// errata. The registers that also carry layout values keep trapping. It
+// (hwcap.isar), MIDR_EL1 as the chip's P-core (hwcap.midr), MPIDR_EL1 as a
+// single uniprocessor view and REVIDR_EL1 as no errata. The registers that also carry layout values keep trapping. It
 // writes the value into the guest register and steps past the mrs; false if
 // the instruction is not one it serves.
 fn idReg(mc: *std.c.mcontext_t) bool {
@@ -1433,6 +1594,7 @@ fn idReg(mc: *std.c.mcontext_t) bool {
         0xd5380600 => is[0], // ID_AA64ISAR0_EL1
         0xd5380620 => is[1], // ID_AA64ISAR1_EL1
         0xd5380640 => is[2], // ID_AA64ISAR2_EL1
+        0xd5380000 => hwcap.midr, // MIDR_EL1
         0xd53800a0 => 0x80000000, // MPIDR_EL1: bit 31 RES1, affinity 0
         0xd53800c0 => 0, // REVIDR_EL1
         else => return false,
@@ -1456,7 +1618,7 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
     // windows, so a SIGTRAP falls through to the generic delivery.
     if (tstate.arm64) {
         if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_sig_switch)) return doSwitch(mc);
-        if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_trap_ret) + 8) return trapReturn(mc);
+        if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_trap_ret) + 4) return trapReturn(mc);
         if (dsig_in == DW_SIGTRAP and tl.ready) {
             if (ool.exit(tl.slot, mc)) |e| {
                 if (e.jit) jit.initThread(); // back to execute mode
@@ -1551,7 +1713,7 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
     }
     }
     if (!tl.ready or tl.busy) {
-        _ = signal(dsig, DW_SIG_DFL); // a fault in the stub itself: crash for real
+        _ = signal(dsig_in, DW_SIG_DFL); // a fault in the stub itself: crash for real
         return;
     }
     // A fault while building a frame (an unusable guest stack) is fatal, as
@@ -1602,7 +1764,7 @@ pub noinline fn handle(nr: u64, frame: [*]u64) ?u64 {
     return switch (nr) {
         NR_RT_SIGPROCMASK => sysSigprocmask(frame[0], frame[1], frame[2], frame[3]),
         NR_RT_SIGPENDING => sysSigpending(frame[0], frame[1]),
-        NR_SIGALTSTACK => sysSigaltstack(frame[0], frame[1], if (tstate.arm64) @intFromPtr(frame) + 816 else frame[proc.XR_RSP]),
+        NR_SIGALTSTACK => sysSigaltstack(frame[0], frame[1], if (tstate.arm64) proc.guestSp(frame) else frame[proc.XR_RSP]),
         NR_RT_SIGRETURN => sysSigreturn(frame),
         NR_RT_SIGSUSPEND => sysSigsuspend(frame),
         NR_RT_SIGTIMEDWAIT => sysSigtimedwait(frame[0], frame[1], frame[2], frame[3]),
@@ -1671,7 +1833,7 @@ fn sysSigaltstack(ss: u64, oss: u64, sp: u64) u64 {
 // the process with SIGSEGV as the kernel's badframe path does.
 fn sysSigreturn(frame: [*]u64) u64 {
     if (!tstate.arm64) return sysSigreturnX64(frame);
-    const sp = @intFromPtr(frame) + 816;
+    const sp = proc.guestSp(frame);
     if (sp & 15 != 0) die(SIGSEGV);
     const uc = sp + 128;
     const mc = uc + UC_MCONTEXT;

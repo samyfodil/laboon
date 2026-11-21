@@ -31,6 +31,9 @@ func (d *dfile) unref() {
 	if d.pathFD != nil {
 		d.pathFD.Close()
 	}
+	if d.pinned != nil {
+		d.pinned.unref()
+	}
 	if d.ev != nil {
 		d.ev.w.Close()
 	}

@@ -56,7 +56,8 @@ fn neg(e: i64) u64 {
 
 // resumeFrame enters the guest with the register state saved in a trampoline
 // frame (tramp_common's layout: x0..x30 at 0..240, NZCV at 248, FPCR|FPSR<<32
-// at 256, the resume pc at 264, q0..q31 at 272..784), but on stack sp and with
+// at 256, the resume pc at 264, q0..q31 at 272..784, the island's sp at 784),
+// but on stack sp and with
 // x0 = 0: what a clone child sees on Linux. x16 carries the branch and is not
 // restored, as on the trampoline's own return path.
 pub fn resumeFrame(frame: [*]const u64, sp: u64) callconv(.C) noreturn {
@@ -140,13 +141,25 @@ pub fn resumeFrame(frame: [*]const u64, sp: u64) callconv(.C) noreturn {
     unreachable;
 }
 
-pub const FRAME_BYTES: usize = 784;
+pub const FRAME_BYTES: usize = 800;
+
+// ISLAND_PUSH is what an island takes below the guest's sp: the 128 bytes it
+// skips, which Linux leaves alone across svc (Go's runtime.clone keeps values
+// at -24..-8(sp) over a gettid), and its two 16-byte pushes. The frame itself
+// is on the thread's own stack, with the island's sp at 784.
+pub const ISLAND_PUSH: u64 = 160;
+
+// guestSp is the guest's sp at the svc a trampoline frame serves.
+pub fn guestSp(frame: [*]const u64) u64 {
+    return frame[98] + ISLAND_PUSH;
+}
 
 // resumeIsland returns to the guest from a trampoline frame as tramp_common
-// does, with x0 = 0: every register restored from the frame (x16 and x17 by
-// the site's own epilogue, whose address the island pushed at frame+784, and
-// which pops the frame and branches back to the site). A fork child that is a
-// fresh stub resumes this way at the fork's return.
+// does, with x0 = 0: every register restored from the frame, then back on the
+// island's sp (frame+784) to the site's own epilogue, whose address the island
+// pushed there; it restores x16 and x17, pops the island's 160 bytes and
+// branches back to the site. A fork child that is a fresh stub resumes this
+// way at the fork's return.
 pub fn resumeIsland(frame: [*]u64) callconv(.C) noreturn {
     frame[0] = 0;
     if (!tstate.arm64) {
@@ -213,8 +226,12 @@ pub fn resumeIsland(frame: [*]u64) callconv(.C) noreturn {
         \\ ldp x6,  x7,  [sp, #48]
         \\ ldp x4,  x5,  [sp, #32]
         \\ ldp x2,  x3,  [sp, #16]
-        \\ ldp x0,  x1,  [sp, #0]
         \\ ldr x16, [sp, #784]
+        \\ ldr x17, [sp, #264]
+        \\ str x17, [x16, #8]
+        \\ ldp x0,  x1,  [sp, #0]
+        \\ mov sp, x16
+        \\ ldr x16, [sp]
         \\ br  x16
         :
         : [frame] "{x0}" (frame),

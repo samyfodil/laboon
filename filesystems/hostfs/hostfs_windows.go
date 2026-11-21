@@ -55,6 +55,15 @@ var winMeta struct {
 	m      map[fileKey]uint32
 	own    map[fileKey][2]uint32 // lower files' owners, when not root
 	loaded map[string]bool       // lower roots whose .lcmeta is in m
+	times  map[fileKey]setTime   // the exact times a guest last set
+}
+
+// setTime is the atime and mtime a guest set on a file, to the nanosecond, and
+// the FILETIMEs, in 100ns ticks, that the host keeps of them: stat reports the
+// exact times while the host's still match.
+type setTime struct {
+	ts [2]syscall.Timespec
+	ft [2]windows.Filetime
 }
 
 func metaGet(k fileKey) (uint32, bool) {
@@ -77,6 +86,23 @@ func metaDel(k fileKey) {
 	winMeta.mu.Lock()
 	defer winMeta.mu.Unlock()
 	delete(winMeta.m, k)
+	delete(winMeta.times, k)
+}
+
+func timesSet(k fileKey, t setTime) {
+	winMeta.mu.Lock()
+	defer winMeta.mu.Unlock()
+	if winMeta.times == nil {
+		winMeta.times = map[fileKey]setTime{}
+	}
+	winMeta.times[k] = t
+}
+
+func timesGet(k fileKey) (setTime, bool) {
+	winMeta.mu.Lock()
+	defer winMeta.mu.Unlock()
+	t, ok := winMeta.times[k]
+	return t, ok
 }
 
 type WinFS struct {
@@ -87,11 +113,6 @@ type WinFS struct {
 // HostONonblock is the host open flag for a non-blocking open; Windows files
 // have none.
 const HostONonblock = 0
-
-// FifoRendezvous is false: Windows has no real FIFOs (a named-pipe node is
-// metadata only), so a FIFO open goes straight to the backend with no
-// reader/writer rendezvous.
-const FifoRendezvous = false
 
 func NewHostFS(rootAbs, upperAbs, workAbs string) HostFS {
 	fs := &WinFS{rootAbs: rootAbs, upperAbs: upperAbs, workAbs: workAbs}
@@ -323,6 +344,14 @@ func byHandleStat(fi *windows.ByHandleFileInformation) HostStat {
 	if m, ok := metaGet(k); ok {
 		st.mode = m
 	}
+	if t, ok := timesGet(k); ok {
+		if fi.LastAccessTime == t.ft[0] {
+			st.atime = t.ts[0]
+		}
+		if fi.LastWriteTime == t.ft[1] {
+			st.mtime, st.ctime = t.ts[1], t.ts[1]
+		}
+	}
 	return st
 }
 
@@ -424,15 +453,16 @@ func FstatOf(f *os.File) (HostStat, error) {
 func HostPath(root, gp string) string {
 	var b strings.Builder
 	b.WriteString(root)
+	sep := !strings.HasSuffix(root, `\`)
 	for _, c := range strings.Split(gp, "/") {
 		if c == "" {
 			continue
 		}
-		b.WriteByte('\\')
+		if sep {
+			b.WriteByte('\\')
+		}
+		sep = true
 		b.WriteString(EscapeName(c))
-	}
-	if b.Len() == len(root) && !strings.HasSuffix(root, `\`) {
-		return root
 	}
 	return b.String()
 }
@@ -521,8 +551,12 @@ func (fs *WinFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
 		return nil, &os.PathError{Op: "open", Path: p, Err: err}
 	}
 	if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		e := lxELOOP
+		if isSockHandle(h) {
+			e = lxENXIO
+		}
 		windows.CloseHandle(h)
-		return nil, &os.PathError{Op: "open", Path: p, Err: lxELOOP}
+		return nil, &os.PathError{Op: "open", Path: p, Err: e}
 	}
 	if truncAppend {
 		if err := truncateSame(p, &fi); err != nil {
@@ -563,10 +597,64 @@ func (fs *WinFS) hLstat(p string) (os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	st := byHandleStat(fi)
 	if fi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return nil, &os.PathError{Op: "lstat", Path: p, Err: lxELOOP}
+		if !isSock(p) {
+			return nil, &os.PathError{Op: "lstat", Path: p, Err: lxELOOP}
+		}
+		st.mode = lxSIFSCK | st.mode&0o7777
 	}
-	return &winInfo{name: UnescapeName(filepath.Base(p)), st: byHandleStat(fi)}, nil
+	return &winInfo{name: UnescapeName(filepath.Base(p)), st: st}, nil
+}
+
+// ioReparseTagAFUnix marks the reparse point a Winsock AF_UNIX bind leaves as
+// the socket's name.
+const ioReparseTagAFUnix = 0x80000023
+
+// isSockHandle reports whether h is a host AF_UNIX socket's name.
+func isSockHandle(h windows.Handle) bool {
+	var ti struct{ attrs, tag uint32 }
+	if windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo, (*byte)(unsafe.Pointer(&ti)), uint32(unsafe.Sizeof(ti))) != nil {
+		return false
+	}
+	return ti.attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 && ti.tag == ioReparseTagAFUnix
+}
+
+func isSock(p string) bool {
+	h, err := openAttr(p, windows.FILE_READ_ATTRIBUTES)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(h)
+	return isSockHandle(h)
+}
+
+// sunPathMax is the room Winsock's sockaddr_un has for a path and its NUL.
+const sunPathMax = 108
+
+// hReachSock hands op the host path of the AF_UNIX socket at p.
+func (fs *WinFS) hReachSock(p string, op func(addr string) error) error {
+	if !fs.exact(p) {
+		return notExist("connect", p)
+	}
+	if !isSock(p) {
+		return lxECONNREFUSED
+	}
+	if len(p) >= sunPathMax {
+		return lxENAMETOOLONG
+	}
+	return op(p)
+}
+
+// hBindSock has bind make the AF_UNIX socket at p.
+func (fs *WinFS) hBindSock(p string, bind func(addr string) error) error {
+	if !fs.exact(filepath.Dir(p)) {
+		return notExist("bind", p)
+	}
+	if len(p) >= sunPathMax {
+		return lxENAMETOOLONG
+	}
+	return bind(p)
 }
 
 func (fs *WinFS) hReadlink(p string) (string, error) {
@@ -747,7 +835,14 @@ func (fs *WinFS) hChmod(p string, mode uint32) error {
 func setTimes(h windows.Handle, atime, mtime syscall.Timespec) error {
 	a := windows.NsecToFiletime(syscall.TimespecToNsec(atime))
 	m := windows.NsecToFiletime(syscall.TimespecToNsec(mtime))
-	return windows.SetFileTime(h, nil, &a, &m)
+	if err := windows.SetFileTime(h, nil, &a, &m); err != nil {
+		return err
+	}
+	var fi windows.ByHandleFileInformation
+	if windows.GetFileInformationByHandle(h, &fi) == nil {
+		timesSet(handleKey(&fi), setTime{ts: [2]syscall.Timespec{atime, mtime}, ft: [2]windows.Filetime{a, m}})
+	}
+	return nil
 }
 
 func (fs *WinFS) hUtimes(p string, atime, mtime syscall.Timespec) error {

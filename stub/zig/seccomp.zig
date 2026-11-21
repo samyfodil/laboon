@@ -16,7 +16,8 @@
 //
 // Admitted calls that are not harmless with any argument are pinned to what
 // the stub itself passes: clone to a fork or a thread (a guest thread: a
-// thread), tgkill to the kick signal, recvmsg to the descriptor socket, close
+// thread), tgkill to the kick signal (a guest thread: to its own process,
+// SELF_PID, which confineGuest fills in), recvmsg to the descriptor socket, close
 // to descriptors the stub does not keep (it keeps 0-2 stdio, 4 the lifeline
 // and 5 the socket; 3, the channel, is closed early and is where a received
 // descriptor lands first), seccomp to adding a filter to the calling thread,
@@ -25,8 +26,9 @@
 // in this thread (another thread took it).
 //
 // The policies are constants, which the Go tests read from the built stub and
-// run. install prefixes one with the text-range check, whose bounds are only
-// known at run time.
+// run. load prefixes one with the text-range check, whose bounds are only
+// known at run time, and fills in the guest's SELF_PID: the base policy, which
+// a fork inherits, cannot name the process.
 
 const stub = @import("stub.zig");
 const arch = stub.arch;
@@ -92,8 +94,6 @@ fn at(l: L, i: Ins) Ins {
     return r;
 }
 
-// argIs admits a syscall whose argument i equals one of vals, kills it
-// otherwise.
 // argFrom admits a syscall whose argument i is one or at least lo (below
 // 2^32), kills it otherwise.
 fn argFrom(comptime l: L, comptime i: u32, comptime one: u32, comptime lo: u32) [5]Ins {
@@ -106,6 +106,8 @@ fn argFrom(comptime l: L, comptime i: u32, comptime one: u32, comptime lo: u32) 
     };
 }
 
+// argIs admits a syscall whose argument i equals one of vals, kills it
+// otherwise.
 fn argIs(comptime l: L, comptime i: u32, comptime vals: []const u32) [3 + vals.len]Ins {
     var r: [3 + vals.len]Ins = undefined;
     r[0] = at(l, ld(argHi(i)));
@@ -115,9 +117,21 @@ fn argIs(comptime l: L, comptime i: u32, comptime vals: []const u32) [3 + vals.l
     return r;
 }
 
-// policy builds a filter admitting syscalls, pinning clone to clones and
-// read/write/writev to stdio when stdio is set.
-fn policy(comptime syscalls: []const stub.SYS, comptime clones: []const u32, comptime stdio: bool) []const Ins {
+// SELF_PID stands in the guest policy for the process's pid, which no pid
+// equals (pid_max is at most 2^22).
+pub const SELF_PID: u32 = 0xffff_fff0;
+
+// tgkillSelf admits tgkill of the kick signal to the process SELF_PID names.
+fn tgkillSelf() [8]Ins {
+    return .{
+        at(.tgkill, ld(argHi(0))), jeq(0, .next, .kill),                   ld(argLo(0)), jeq(SELF_PID, .next, .kill),
+        ld(argHi(2)),              jeq(0, .next, .kill),                   ld(argLo(2)), jeq(stub.sig.KICK, .allow, .kill),
+    };
+}
+
+// policy builds a filter admitting syscalls, pinning clone to clones; a
+// guest's also pins tgkill to its own process and read/write/writev to stdio.
+fn policy(comptime syscalls: []const stub.SYS, comptime clones: []const u32, comptime confined: bool) []const Ins {
     var p: [3 + syscalls.len]Ins = undefined;
     p[0] = ld(ARCH);
     p[1] = jeq(arch.AUDIT_ARCH, .next, .kill);
@@ -129,14 +143,14 @@ fn policy(comptime syscalls: []const stub.SYS, comptime clones: []const u32, com
             .recvmsg => .recvmsg,
             .close => .close,
             .seccomp => .seccomp,
-            .read, .write, .writev => if (stdio) .stdio else .allow,
+            .read, .write, .writev => if (confined) .stdio else .allow,
             else => .allow,
         };
         p[i] = jeq(nr(s), to, .next);
     }
     const r = p ++ [_]Ins{ret(RET_KILL_PROCESS)} ++
         argIs(.clone, 0, clones) ++
-        argIs(.tgkill, 2, &.{stub.sig.KICK}) ++
+        (if (confined) tgkillSelf() else argIs(.tgkill, 2, &.{stub.sig.KICK})) ++
         argIs(.recvmsg, 0, &.{stub.XFER}) ++
         argFrom(.close, 0, 3, stub.XFER + 1) ++
         // seccomp(SECCOMP_SET_MODE_FILTER, 0, prog): a filter for this thread
@@ -190,17 +204,17 @@ extern var etext: u8;
 // way. A bad architecture, or the stub's own out-of-policy call, still kills.
 pub fn install() void {
     if (stub.sys(nr(.prctl), PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0, 0) != 0) stub.die(121);
-    load(&lc_seccomp_filter);
+    load(&lc_seccomp_filter, null);
 }
 
 // confineGuest adds lc_seccomp_guest_filter to the calling thread, which is
 // about to run the guest (and its threads, which inherit it). It starts the
 // process's hop thread first, which must keep only lc_seccomp_filter.
 pub fn confineGuest() void {
-    load(&lc_seccomp_guest_filter);
+    load(&lc_seccomp_guest_filter, @truncate(stub.sys(nr(.getpid), 0, 0, 0, 0, 0, 0)));
 }
 
-fn load(comptime filter: anytype) void {
+fn load(comptime filter: anytype, pid: ?u32) void {
     const lo: u64 = @intFromPtr(&__ehdr_start);
     const hi: u64 = @intFromPtr(&etext);
     if (lo >> 32 != hi >> 32) stub.die(120);
@@ -212,6 +226,11 @@ fn load(comptime filter: anytype) void {
     f[4] = .{ .code = JGE_K, .jt = 0, .jf = 1, .k = @truncate(hi) };
     f[5] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = RET_TRAP | stub.sig.SECCOMP_TRAP_TAG };
     f[6..].* = filter.*;
+    if (pid) |p| {
+        for (f[6..]) |*ins| {
+            if (ins.code == JEQ_K and ins.k == SELF_PID) ins.k = p;
+        }
+    }
     const prog = SockFprog{ .len = f.len, .filter = &f };
     if (stub.sys(nr(.seccomp), SET_MODE_FILTER, 0, @intFromPtr(&prog), 0, 0, 0) != 0) stub.die(122);
 }

@@ -119,10 +119,19 @@ func (g *dguest) epollCtl(epfd int64, op int64, fd int64, evAddr uint64) int64 {
 		return k
 	}
 	del := op == lxEpollCtlDel
-	changes := []unix.Kevent_t{
+	var changes []unix.Kevent_t
+	if op == lxEpollCtlMod {
+		// A filter added again keeps how it triggers: one that turns
+		// edge-triggered or oneshot is a new filter.
+		changes = append(changes, want(false, rfd, unix.EVFILT_READ), want(false, wfd, unix.EVFILT_WRITE))
+		if x := vloFd(d); x >= 0 {
+			changes = append(changes, want(false, x, unix.EVFILT_READ))
+		}
+	}
+	changes = append(changes,
 		want(!del && events&lxEpollIn != 0, rfd, unix.EVFILT_READ),
 		want(!del && events&lxEpollOut != 0, wfd, unix.EVFILT_WRITE),
-	}
+	)
 	if x := vloFd(d); x >= 0 {
 		changes = append(changes, want(!del && events&lxEpollIn != 0, x, unix.EVFILT_READ))
 	}
@@ -358,6 +367,11 @@ func (ep *epoll) collect(kev []unix.Kevent_t, max int) []pendEv {
 					if st, ok := sockPollState(r.d, true); r.d.sk != nil && (k.Fflags != 0 || !ok || st&lxPollHup != 0) {
 						ev |= lxEpollHup
 					}
+				}
+			}
+			if r.d.pty != nil { // a terminal's pipes only wake the wait
+				if ev = uint32(r.d.pty.pollState().mask) & (r.events | lxEpollErr | lxEpollHup); ev == 0 {
+					continue
 				}
 			}
 			if _, seen := ready[gfd]; !seen {

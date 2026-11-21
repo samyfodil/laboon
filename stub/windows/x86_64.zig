@@ -15,6 +15,7 @@ const stub = @import("stub.zig");
 const sig = @import("sig.zig");
 const sigx = @import("sig_x86_64.zig");
 const thread = @import("thread.zig");
+const instrcb = @import("instrcb.zig");
 
 extern "ntdll" fn RtlCaptureContext(ctx: *win.CONTEXT) callconv(win.WINAPI) void;
 
@@ -521,6 +522,11 @@ pub fn onException(ep: *win.EXCEPTION_POINTERS) callconv(win.WINAPI) i32 {
     // fault. Let it run: it delivers from the stolen context, and the
     // faulting instruction runs again when that context resumes.
     if (c.Rip == @intFromPtr(&lc_sig_redirect)) return -1;
+    // A guest thread faulting in ntdll got there by a raw syscall the
+    // backstop let through because the kernel resumed it in ntdll (a
+    // service that transfers control, as a callback return does): it is no
+    // guest fault, and ends the guest as the backstop does.
+    if (!stub.ownCode(c.Rip) and sig.inGuest() and instrcb.inNtdll(c.Rip)) stub.die(instrcb.BACKSTOP_KILL);
     // The handler is stub code that talks to the supervisor (isTrap, wxFault's
     // hot/cool, rewritePage, sig.fault): held against a context steal while it
     // runs. A signal that arrives meanwhile is taken on the way out -- the hold
@@ -653,9 +659,10 @@ fn serveUd2(c: *win.CONTEXT) i32 {
     };
     const resume_rip = c.Rip + 2;
     const fx: [*]const u8 = @ptrCast(&c.DUMMYUNIONNAME.FltSave);
-    const t = trap(&f, fx, c.Rsp, resume_rip, c.EFlags);
+    var t = trap(&f, fx, c.Rsp, resume_rip, c.EFlags);
     const r = thread.serve(&t);
     c.Rax = sig.afterSyscall(&t, r); // may NtContinue; else returns the result
+    c.Rsp = t.gsp;
     c.Rip += 2;
     prepareGuestReturn(c);
     return -1; // EXCEPTION_CONTINUE_EXECUTION
@@ -673,8 +680,9 @@ pub fn trapsAt(pc: u64) bool {
 pub fn serveSite(c: *sig.Ctx) void {
     c.rip += 2;
     var f: Frame = undefined;
-    const t = sigx.trapFromCtx(c, c.rax, &f);
+    var t = sigx.trapFromCtx(c, c.rax, &f);
     c.rax = sig.afterSyscall(&t, thread.serve(&t));
+    c.rsp = t.gsp;
 }
 
 // enter starts guest code at entry on stack sp, as the kernel does at exec.

@@ -16,7 +16,6 @@ import (
 const (
 	lxSetTidAddress  = 96
 	lxFutex          = 98
-	lxSetRobustList  = 99
 	lxNanosleep      = 101
 	lxClockGettime   = 113
 	lxClockGetres    = 114
@@ -32,41 +31,6 @@ func init() {
 		g.mp.clearTid[g.pid] = a[0]
 		g.mp.mu.Unlock()
 		return int64(g.pid)
-	}
-	syscalls[lxSetRobustList] = func(g *dguest, a [6]uint64) int64 {
-		if a[1] != 24 { // sizeof(struct robust_list_head) on 64-bit
-			return sErr(lxEINVAL)
-		}
-		g.mp.mu.Lock()
-		g.mp.robust[g.pid] = [2]uint64{a[0], a[1]}
-		g.mp.mu.Unlock()
-		return 0
-	}
-	syscalls[lxGetRobustList] = func(g *dguest, a [6]uint64) int64 {
-		tid := g.pid
-		if p := int(int32(a[0])); p != 0 {
-			gt, ok := g.nsToGlobal(p)
-			if !ok {
-				return sErr(lxESRCH)
-			}
-			tid = gt
-		}
-		g.mp.mu.Lock()
-		hl := g.mp.robust[tid]
-		g.mp.mu.Unlock()
-		if hl[1] == 0 {
-			hl[1] = 24
-		}
-		var b [8]byte
-		put64(b[:], hl[0])
-		if g.writeMem(a[1], b[:]) != nil {
-			return sErr(lxEFAULT)
-		}
-		put64(b[:], hl[1])
-		if g.writeMem(a[2], b[:]) != nil {
-			return sErr(lxEFAULT)
-		}
-		return 0
 	}
 	syscalls[lxFutex] = func(g *dguest, a [6]uint64) int64 { return g.futex(a) }
 	syscalls[lxClockGettime] = func(g *dguest, a [6]uint64) int64 {
@@ -111,16 +75,27 @@ func init() {
 		return int64(len(b))
 	}
 	syscalls[lxMembarrier] = func(g *dguest, a [6]uint64) int64 {
-		// The global barrier is host-wide: the supervisor can issue it.
-		const query, global = 0, 1
+		// The global barrier is host-wide: the supervisor issues it. The
+		// private expedited barrier and its registration act on the guest's
+		// process, so its hop thread issues them, in the guest's mm.
+		const query, global, privExpedited, regPrivExpedited = 0, 1, 8, 16
 		switch a[0] {
 		case query:
-			return global
+			if a[1] != 0 {
+				return sErr(lxEINVAL)
+			}
+			r, _, en := unix.Syscall(unix.SYS_MEMBARRIER, query, 0, 0)
+			if en != 0 {
+				return global
+			}
+			return int64(r) & (global | privExpedited | regPrivExpedited)
 		case global:
 			if _, _, en := unix.Syscall(unix.SYS_MEMBARRIER, global, 0, 0); en != 0 {
 				return sErr(lxErrno(en))
 			}
 			return 0
+		case privExpedited, regPrivExpedited:
+			return g.host(unix.SYS_MEMBARRIER, a[0], a[1], a[2])
 		}
 		return sErr(lxEINVAL)
 	}

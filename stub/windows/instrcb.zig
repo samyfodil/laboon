@@ -55,6 +55,11 @@ comptime {
 }
 pub extern fn lc_instr_thunk() callconv(.Naked) void;
 
+// inNtdll reports whether pc is in ntdll, once the backstop is installed.
+pub fn inNtdll(pc: u64) bool {
+    return pc -% lc_ntdll_lo < lc_ntdll_span;
+}
+
 // lc_instr_stray runs when a syscall returned outside ntdll: the guest ran a
 // raw syscall the rewriter missed. It does not return.
 export fn lc_instr_stray() callconv(.C) noreturn {

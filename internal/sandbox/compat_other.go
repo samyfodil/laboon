@@ -7,29 +7,6 @@ import (
 	"os"
 )
 
-// get_robust_list on macOS and Windows: the stub answers set_robust_list in
-// the guest (it owns thread state), so the supervisor holds no list to return.
-// Reporting an empty one is the honest, served result -- a thread with no
-// robust list registered -- rather than ENOSYS as on a host that forwards the
-// call. The kernel only walks a robust list to release futexes on thread death,
-// which the sandbox handles at exit regardless.
-func init() {
-	regSys(lxGetRobustList, func(g *dguest, a [6]uint64) int64 {
-		if p := int(int32(a[0])); p != 0 {
-			if _, ok := g.nsToGlobal(p); !ok {
-				return sErr(lxESRCH)
-			}
-		}
-		var head [8]byte // NULL: no list head
-		var size [8]byte
-		put64(size[:], 24) // sizeof(struct robust_list_head)
-		if g.writeMem(a[1], head[:]) != nil || g.writeMem(a[2], size[:]) != nil {
-			return sErr(lxEFAULT)
-		}
-		return 0
-	})
-}
-
 // getcpu reports CPU 0, NUMA node 0: the stub serves no vDSO to agree with.
 func (g *dguest) getcpu(cpu, node uint64) int64 {
 	var z [4]byte

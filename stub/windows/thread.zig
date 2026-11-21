@@ -92,7 +92,7 @@ fn membarrier(cmd: u64, flags: u64) u64 {
     return 0;
 }
 
-pub fn serve(t: *const sig.Trap) u64 {
+pub fn serve(t: *sig.Trap) u64 {
     const nr = t.nr;
     const a = arch.args(t.frame);
     switch (nr) {
@@ -101,7 +101,6 @@ pub fn serve(t: *const sig.Trap) u64 {
             sig.setCtid(a[0]);
             return stub.localTraced(nr, a, t.resume_at, @as(u64, sig.myTid()));
         },
-        NR.set_robust_list => return stub.localTraced(nr, a, t.resume_at, 0),
         NR.futex => return stub.localTraced(nr, a, t.resume_at, futex.handle(a)),
         NR.membarrier => return stub.localTraced(nr, a, t.resume_at, membarrier(a[0], a[1])),
         NR.nanosleep => return stub.localTraced(nr, a, t.resume_at, doSleep(false, a[0], a[1])),
@@ -167,7 +166,6 @@ const Handoff = struct {
     child_stack: u64,
     resume_at: u64,
     flags: u64,
-    win_stack: [3]u64, // the thread's own TEB StackBase/StackLimit/DeallocationStack
     frame: sig.Frame,
 };
 
@@ -182,7 +180,7 @@ var handoffs: [sig.MAX_SLOTS]Handoff = undefined;
 //   REP_FORK   fork the stub (args: slot offset, flags, stack, -, TLS,
 //              child-tid ptr);
 //   REP_RESULT an error.
-fn doClone(t: *const sig.Trap) u64 {
+fn doClone(t: *sig.Trap) u64 {
     const ch = stub.slot();
     ch.kind = 2; // MSG_SYSCALL
     ch.nr = t.nr;
@@ -191,7 +189,7 @@ fn doClone(t: *const sig.Trap) u64 {
     ch.guest_rip = t.resume_at;
     stub.exchangePub(ch);
     if (ch.kind == 1) return ch.ret; // REP_RESULT: an error
-    if (ch.kind == REP_FORK) return doFork(ch);
+    if (ch.kind == REP_FORK) return doFork(t, ch);
     if (ch.kind != REP_CLONE) stub.die(0xE0000006);
 
     const tid = ch.ret;
@@ -270,16 +268,18 @@ fn lc_vfork_wait(c: *sig.Ctx) callconv(.C) noreturn {
 // them the new slot's events the supervisor duplicated in. It takes over its
 // slot and checks in (MSG_FORKED: its OS pid and thread id); the parent
 // closes its copies of those events and reports the child's OS pid.
-fn doFork(ch: *stub.Chan) u64 {
+fn doFork(t: *sig.Trap, ch: *stub.Chan) u64 {
     const gpid = ch.ret;
     const off = ch.args[0];
     const flags = ch.args[1];
+    const stack = ch.args[2];
     const tls = ch.args[4];
     const ctid = ch.args[5];
     const idx = off / stub.SLOT_SIZE;
     const cch: *stub.Chan = @ptrFromInt(stub.chan_base + off);
     const es: HANDLE = cch.stdio;
     const ep: HANDLE = cch.pinfo;
+    const win_stack = sig.winStack(); // the clone's thread is this one, on the same OS stack
     var info = std.mem.zeroes(CloneInfo);
     info.length = @sizeOf(CloneInfo);
     stub.mem.lockAll(); // no other thread is mid-way through the region table
@@ -294,10 +294,20 @@ fn doFork(ch: *stub.Chan) u64 {
         stub.vehUnlock();
         arch.tebStore(stub.SLOT_CHAN, stub.chan_base + off);
         stub.forkReset(idx, es, ep);
-        sig.forkChild(idx, @truncate(arch.tebLoad(0x48)), arch.tebLoad(stub.SLOT_STK));
+        sig.forkChild(idx, @truncate(arch.tebLoad(0x48)), arch.tebLoad(stub.SLOT_STK), win_stack);
         if (flags & CLONE_SETTLS != 0) arch.tebStore(stub.SLOT_TP, tls);
         if (flags & CLONE_CHILD_SETTID != 0) @as(*u32, @ptrFromInt(ctid)).* = @truncate(gpid);
         if (flags & CLONE_CHILD_CLEARTID != 0) sig.setCtid(ctid);
+        if (stack != 0) {
+            // clone's child stack: the guest resumes on it, and the TEB
+            // describes it, as the parent's described the stack it left.
+            t.gsp = stack;
+            if (stub.mem.region(t.gsp -% 8)) |r| {
+                arch.tebStore(0x08, r[1]);
+                arch.tebStore(0x10, r[0]);
+                arch.tebStore(0x1478, r[0]);
+            }
+        }
         cch.kind = MSG_FORKED;
         cch.args[0] = arch.tebLoad(0x40);
         cch.args[1] = arch.tebLoad(0x48);
@@ -330,7 +340,7 @@ fn lc_thread_start(arg: ?*anyopaque) callconv(win.WINAPI) void {
     sig.startThread(idx, os_tid);
     sig.setThread(true, h.ctid);
     arch.prefaultStack();
-    h.win_stack = .{ arch.tebLoad(0x08), arch.tebLoad(0x10), arch.tebLoad(0x1478) };
+    sig.keepWinStack();
     if (stub.mem.region(h.child_stack -% 8)) |r| {
         arch.tebStore(0x08, r[1]);
         arch.tebStore(0x10, r[0]);
@@ -367,14 +377,7 @@ fn threadExit(code: u64) noreturn {
     ch.kind = 2;
     ch.nr = NR_THREAD_GONE;
     ch.args[0] = code;
-    // Put back the thread's own stack in the TEB: thread exit frees
-    // DeallocationStack, which must not be the guest's mapping.
-    if (sig.isThread()) {
-        const h = &handoffs[stub.curSlot()];
-        arch.tebStore(0x08, h.win_stack[0]);
-        arch.tebStore(0x10, h.win_stack[1]);
-        arch.tebStore(0x1478, h.win_stack[2]);
-    }
+    sig.restoreWinStack();
     stub.postReq(ch);
     RtlExitUserThread(@intCast(code & 0xff));
 }

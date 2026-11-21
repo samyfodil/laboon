@@ -55,9 +55,8 @@ type memProc struct {
 	// megabytes of phantom stack already consumed.
 	stackLo, stackHi uint64
 
-	clearTid map[int]uint64    // by thread: the address its exit clears and wakes (CLONE_CHILD_CLEARTID)
-	ownStack map[int]run       // by thread: the stack it unmapped while running on it (unmapOwnStack)
-	robust   map[int][2]uint64 // by thread: {head, len} from set_robust_list, returned by get_robust_list
+	clearTid map[int]uint64 // by thread: the address its exit clears and wakes (CLONE_CHILD_CLEARTID)
+	ownStack map[int]run    // by thread: the stack it unmapped while running on it (unmapOwnStack)
 
 	names  map[uint64]fileName    // for /proc/<pid>/maps (unused on Linux: the host's maps name files)
 	shm    map[uint64]*shmAttach  // SysV segments attached, by address
@@ -65,7 +64,7 @@ type memProc struct {
 }
 
 func newMemProc(pid int) *memProc {
-	m := &memProc{refs: 1, clearTid: map[int]uint64{}, ownStack: map[int]run{}, robust: map[int][2]uint64{}, names: map[uint64]fileName{},
+	m := &memProc{refs: 1, clearTid: map[int]uint64{}, ownStack: map[int]run{}, names: map[uint64]fileName{},
 		shm: map[uint64]*shmAttach{}, semadj: map[int]map[uint16]int{}}
 	m.pid.Store(int64(pid))
 	return m

@@ -58,6 +58,7 @@ extern "c" fn hv_vm_map(addr: *anyopaque, ipa: u64, size: usize, flags: u64) hv_
 extern "c" fn hv_vcpu_create(vcpu: *u64, exit: **VcpuExit, config: ?*anyopaque) hv_return_t;
 extern "c" fn hv_vcpu_destroy(vcpu: u64) hv_return_t;
 extern "c" fn hv_vcpu_run(vcpu: u64) hv_return_t;
+extern "c" fn hv_vcpus_exit(vcpus: [*]const u64, count: u32) hv_return_t;
 extern "c" fn hv_vcpu_set_reg(vcpu: u64, reg: u32, value: u64) hv_return_t;
 extern "c" fn hv_vcpu_get_reg(vcpu: u64, reg: u32, value: *u64) hv_return_t;
 extern "c" fn hv_vcpu_set_sys_reg(vcpu: u64, reg: u32, value: u64) hv_return_t;
@@ -92,6 +93,11 @@ const PTE_XN: u64 = (1 << 53) | (1 << 54); // PXN|UXN: execute-never
 // MMAP_TOP: small anonymous mmaps bump down from here through the first GiB; the
 // stack lives above it (its top is below L3_BASE in hvf_stub.zig).
 pub const MMAP_TOP: u64 = 0x3FB0_0000;
+
+// MMAP_MIN is Linux's mmap_min_addr: nothing is mapped below it, so a null
+// pointer's access faults (Go's nil checks rely on it, and its arm64
+// executables are linked right above it).
+const MMAP_MIN: u64 = 0x10000;
 
 // Extended mmap window [1 GiB, 32 GiB): large mappings that no longer fit the
 // first-GiB arena live here, bumping down from EXT_TOP. It is mapped by 1 GiB
@@ -129,8 +135,6 @@ const NR_MREMAP: u64 = 216;
 const NR_MSYNC: u64 = 227;
 const NR_MINCORE: u64 = 232;
 const NR_MEMBARRIER: u64 = 283;
-const NR_SET_ROBUST_LIST: u64 = 99;
-const NR_GET_ROBUST_LIST: u64 = 100;
 const NR_RT_SIGPENDING: u64 = 136;
 const MS_ASYNC: u64 = 1;
 const MS_INVALIDATE: u64 = 2;
@@ -138,7 +142,6 @@ const MS_SYNC: u64 = 4;
 const MREMAP_MAYMOVE: u64 = 1;
 const MREMAP_FIXED: u64 = 2;
 const MREMAP_DONTUNMAP: u64 = 4;
-const ESRCH: u64 = 3;
 const EPERM: u64 = 1;
 const ENOMEM: u64 = 12;
 const EINVAL: u64 = 22;
@@ -218,6 +221,7 @@ pub const Exit = union(enum) {
     syscall: Syscall,
     fault: Fault, // a real guest exception
     done: void, // guest ran off / brk
+    signal: void, // a signal waits for the thread, which ran guest code
 };
 
 pub const Vmm = struct {
@@ -243,6 +247,7 @@ pub const Vmm = struct {
             const tbl = L3_BASE + k * 0x1000;
             for (0..512) |j| v.put64(tbl + j * 8, (k * 0x200000 + j * 0x1000) | PAGE_RWX);
         }
+        for (0..MMAP_MIN / 0x1000) |j| v.put64(L3_BASE + j * 8, 0);
         // Extend the stage-1 map to [1 GiB, 32 GiB) with 1 GiB block descriptors
         // in L1[1..32] -- one per gigabyte, no extra tables. The extended mmap
         // window lives here; it is RWX (mprotect is enforced only in the first
@@ -349,10 +354,21 @@ pub const Vmm = struct {
 
     // run executes the guest until the next event: a syscall (from the hvc
     // stub), a real fault, or the guest ending.
-    pub fn run(v: *Vmm) Error!Exit {
+    // A signal for the thread stops it: the run publishes its vcpu before it
+    // looks for one, so a kick that comes after the look finds the vcpu to
+    // stop (kickRunning).
+    pub fn run(v: *Vmm, ch: *chan.Chan) Error!Exit {
+        const run_at = &g_running[slotIndex(ch)];
         while (true) {
-            if (hv_vcpu_run(v.vcpu) != HV_SUCCESS) return error.Run;
-            if (v.exit.reason == EXIT_EXCEPTION) break; // else a SIGUSR1 kick canceled the run; re-enter
+            @atomicStore(u64, run_at, v.vcpu + 1, .seq_cst);
+            if (deliverable(sigThreadRec(ch)) != 0 and !v.inVector()) {
+                @atomicStore(u64, run_at, 0, .seq_cst);
+                return .signal;
+            }
+            const r = hv_vcpu_run(v.vcpu);
+            @atomicStore(u64, run_at, 0, .seq_cst);
+            if (r != HV_SUCCESS) return error.Run;
+            if (v.exit.reason == EXIT_EXCEPTION) break;
         }
         if (ec(v.exit.exception.syndrome) != 0x16) {
             var pc: u64 = 0;
@@ -362,6 +378,27 @@ pub const Vmm = struct {
             return Exit{ .fault = .{ .ec = ec(v.exit.exception.syndrome), .iss = iss(v.exit.exception.syndrome), .far = far, .pc = pc } };
         }
         return v.vectored();
+    }
+
+    // inVector reports whether the vcpu is in the VM's own vector page, on
+    // its way to the hvc that ends an exception: a signal waits for the
+    // syscall's end there, which looks for it.
+    fn inVector(v: *Vmm) bool {
+        var pc: u64 = 0;
+        _ = hv_vcpu_get_reg(v.vcpu, REG_PC, &pc);
+        return pc >= VBAR and pc < SIG_RESTORER;
+    }
+
+    // deliverAsync takes the signals waiting for a thread stopped in guest
+    // code, onto the context it was stopped in.
+    pub fn deliverAsync(v: *Vmm, ch: *chan.Chan, exchange: ExchangeFn) void {
+        var x0: u64 = 0;
+        var pc: u64 = 0;
+        var pstate: u64 = 0;
+        _ = hv_vcpu_get_reg(v.vcpu, REG_X0, &x0);
+        _ = hv_vcpu_get_reg(v.vcpu, REG_PC, &pc);
+        _ = hv_vcpu_get_reg(v.vcpu, REG_CPSR, &pstate);
+        _ = v.deliverPending(ch, (ch.stdio & STDIO_TRACED) != 0, null, &x0, &pc, pstate, exchange);
     }
 
     // vectored is the exception the guest took to its vector, whose hvc
@@ -520,7 +557,7 @@ pub const Vmm = struct {
     // or above the table region are left alone. (A multithreaded guest's sibling
     // vcpus flush their own TLBs on their next exit; mprotect is rarely racing.)
     fn vmProtect(v: *Vmm, addr: u64, len: u64, prot: u64) u64 {
-        var va = addr & ~@as(u64, 0xfff);
+        var va = @max(addr & ~@as(u64, 0xfff), MMAP_MIN);
         const end = addr +% len;
         while (va < end and va < L3_BASE) : (va += 0x1000) {
             const l3e = L3_BASE + (va >> 21) * 0x1000 + ((va >> 12) & 0x1ff) * 8;
@@ -562,6 +599,23 @@ pub const Vmm = struct {
     // address Darwin's os_sync waits/wakes on). Returns the result, or null to
     // forward the syscall to the supervisor.
     pub fn handleLocal(v: *Vmm, ch: *chan.Chan, sc: Syscall, exchange: ExchangeFn) ?u64 {
+        if (overCap(growth(sc))) {
+            if (sc.nr == NR_BRK) {
+                heapLock();
+                defer heapUnlock();
+                return g_brk_cur;
+            }
+            return neg(ENOMEM);
+        }
+        const r = v.handleMem(ch, sc, exchange);
+        switch (sc.nr) {
+            NR_MMAP, NR_MUNMAP, NR_MREMAP, NR_BRK => publishMem(),
+            else => {},
+        }
+        return r;
+    }
+
+    fn handleMem(v: *Vmm, ch: *chan.Chan, sc: Syscall, exchange: ExchangeFn) ?u64 {
         switch (sc.nr) {
             NR_MMAP => {
                 const len = (sc.args[1] + 0xfff) & ~@as(u64, 0xfff);
@@ -574,12 +628,15 @@ pub const Vmm = struct {
                     // just handing the address back; mmap(MAP_FIXED) requires
                     // p == addr, which a bump allocation would violate.
                     const addr = sc.args[0] & ~@as(u64, 0xfff);
+                    if (addr < MMAP_MIN) return neg(EPERM);
                     if (addr + len > EXT_TOP) return neg(ENOMEM);
                     if (sc.args[3] & MAP_ANON == 0) {
+                        // Recorded before the fill: the supervisor's writes reach
+                        // only mapped guest memory (guestMapped).
+                        addMap(addr, addr + len, sc.args[2], M_FILE, mapShared(sc.args[3]), sc.args[5], mapName(v, ch, sc, sc.args[4], exchange));
                         const pr = Syscall{ .nr = NR_PREAD64, .args = .{ sc.args[4], addr, sc.args[1], sc.args[5], 0, 0 }, .elr = sc.elr, .spsr = sc.spsr };
                         _ = v.serveSyscall(ch, pr, exchange);
                         vmaRecord(addr, sc.args[1], sc.args[4], sc.args[5], fileWb(sc.args[2], sc.args[3]));
-                        addMap(addr, addr + len, sc.args[2], M_FILE, mapShared(sc.args[3]), sc.args[5], mapName(v, ch, sc, sc.args[4], exchange));
                     } else addMap(addr, addr + len, sc.args[2], M_ANON, mapShared(sc.args[3]), 0, 0);
                     return addr;
                 }
@@ -606,10 +663,10 @@ pub const Vmm = struct {
                     // File-backed: fill the region from the file with a pread64 to
                     // the supervisor (the tail past EOF stays zero). offset is
                     // page-aligned per the guest; a short read zero-fills the rest.
+                    addMap(region, region + len, sc.args[2], M_FILE, mapShared(sc.args[3]), sc.args[5], mapName(v, ch, sc, sc.args[4], exchange));
                     const pr = Syscall{ .nr = NR_PREAD64, .args = .{ sc.args[4], region, sc.args[1], sc.args[5], 0, 0 }, .elr = sc.elr, .spsr = sc.spsr };
                     _ = v.serveSyscall(ch, pr, exchange);
                     vmaRecord(region, sc.args[1], sc.args[4], sc.args[5], fileWb(sc.args[2], sc.args[3]));
-                    addMap(region, region + len, sc.args[2], M_FILE, mapShared(sc.args[3]), sc.args[5], mapName(v, ch, sc, sc.args[4], exchange));
                 } else addMap(region, region + len, sc.args[2], M_ANON, mapShared(sc.args[3]), 0, 0);
                 return region;
             },
@@ -673,20 +730,6 @@ pub const Vmm = struct {
                 return 0;
             },
             NR_MEMBARRIER => return membarrier(sc.args[0], sc.args[1]),
-            NR_SET_ROBUST_LIST => {
-                if (sc.args[1] != 24) return neg(EINVAL); // sizeof(struct robust_list_head)
-                g_robust[slotIndex(ch)] = .{ .head = sc.args[0], .len = sc.args[1] };
-                return 0; // robust-futex death cleanup is not emulated (as the native stub)
-            },
-            NR_GET_ROBUST_LIST => {
-                const thr = sigThreadRec(ch);
-                if (sc.args[0] != 0 and sc.args[0] != @as(u64, thr.tid)) return neg(ESRCH); // self only
-                const r = g_robust[slotIndex(ch)];
-                const base = @intFromPtr(v.ram);
-                if (sc.args[1] != 0) putU64(base, sc.args[1], r.head);
-                if (sc.args[2] != 0) putU64(base, sc.args[2], if (r.len == 0) 24 else r.len);
-                return 0;
-            },
             NR_RT_SIGPENDING => {
                 if (sc.args[1] > 8) return neg(EINVAL);
                 const thr = sigThreadRec(ch);
@@ -841,6 +884,7 @@ pub const Vmm = struct {
         ch.kind = chan.MSG_SYSCALL;
         ch.nr = sc.nr;
         ch.guest_rip = sc.elr;
+        ch.ret = 0; // untagged: the supervisor may write all of an output buffer (see outPrefix in mem.zig)
         for (0..6) |i| ch.args[i] = sc.args[i];
         while (true) {
             exchange(ch);
@@ -943,8 +987,9 @@ pub const Vmm = struct {
     pub fn threadRunLoop(v: *Vmm, ch: *chan.Chan, exchange: ExchangeFn, ctid: u64) void {
         while (true) {
             if (ch.stdio & STDIO_SINGLESTEP != 0) v.enableStep(); // ptrace single-step
-            const ev = v.run() catch return;
+            const ev = v.run(ch) catch return;
             switch (ev) {
+                .signal => v.deliverAsync(ch, exchange),
                 .syscall => |sc| {
                     if (sc.nr == NR_EXIT) return v.threadExit(ch, ctid, sc.args[0]);
                     var s = sc;
@@ -1152,12 +1197,14 @@ pub const Vmm = struct {
     // (LC_SIGSTOP), terminated (LC_SIGDIE), or delivered to a handler onto the
     // post-syscall context (x0 = ret). Returns true if it vectored the vcpu into a
     // handler, so the caller must not resume the syscall normally.
-    pub fn deliverPending(v: *Vmm, ch: *chan.Chan, traced: bool, sc: Syscall, x0: *u64, pc: *u64, pstate: u64, exchange: ExchangeFn) bool {
+    pub fn deliverPending(v: *Vmm, ch: *chan.Chan, traced: bool, sc_in: ?Syscall, x0: *u64, pc: *u64, pstate: u64, exchange: ExchangeFn) bool {
         // A blocking syscall interrupted by a signal comes back as -ERESTART*; it
         // is never exposed. With a handler, SA_RESTART (or ERESTARTNOINTR) restarts
         // by re-executing the svc (pc-4, original args), otherwise the syscall sees
-        // -EINTR; with no handler it just restarts.
-        const restartable = isRestart(@bitCast(x0.*));
+        // -EINTR; with no handler it just restarts. Without a syscall (sc_in null:
+        // the thread was stopped in guest code) x0 is the guest's own.
+        const restartable = sc_in != null and isRestart(@bitCast(x0.*));
+        const sc = sc_in orelse Syscall{ .nr = 0, .args = .{ 0, 0, 0, 0, 0, 0 }, .elr = pc.*, .spsr = pstate };
         const thr = sigThreadRec(ch);
         while (true) {
             const proc = sigProcRec(thr.proc);
@@ -1394,7 +1441,7 @@ const SigThread = extern struct {
     saved: u32,
     saved_mask: u64,
 };
-const SigProc = extern struct { _res: u64, pending: u64 };
+const SigProc = extern struct { _res: u64, pending: u64, mem: u64 };
 const SigReply = extern struct { info: Info, act: Act };
 
 comptime {
@@ -1402,6 +1449,28 @@ comptime {
     std.debug.assert(@offsetOf(SigThread, "pending") == 16);
     std.debug.assert(@offsetOf(SigProc, "pending") == 8);
     std.debug.assert(@sizeOf(Info) == 32);
+}
+
+// g_running holds, per channel slot, the vcpu its thread runs guest code on,
+// plus one (0: none).
+var g_running = [_]u64{0} ** chan.MAX_SLOTS;
+
+fn deliverable(thr: *SigThread) u64 {
+    const proc = sigProcRec(thr.proc);
+    return (@atomicLoad(u64, &thr.pending, .seq_cst) | @atomicLoad(u64, &proc.pending, .seq_cst)) & ~@atomicLoad(u64, &thr.mask, .seq_cst);
+}
+
+// kickRunning stops the vcpus running guest code for threads a signal waits
+// for, for their run loops to deliver it (the supervisor's kick).
+pub fn kickRunning() void {
+    for (&g_running, 0..) |*r, i| {
+        const vc = @atomicLoad(u64, r, .seq_cst);
+        if (vc == 0) continue;
+        const thr: *SigThread = @ptrFromInt(@intFromPtr(g_chan_base) + TRACE_AREA_OFF + i * TRACE_SIG_STRIDE);
+        if (deliverable(thr) == 0) continue;
+        const one = [1]u64{vc - 1};
+        _ = hv_vcpus_exit(&one, 1);
+    }
 }
 
 fn slotIndex(ch: *chan.Chan) usize {
@@ -1928,9 +1997,96 @@ fn mremap(v: *Vmm, ch: *chan.Chan, sc: Syscall, exchange: ExchangeFn) u64 {
     return dst;
 }
 
-// ---- robust_list (per-slot pointer; death cleanup not emulated, as the native stub)
-const RobustSlot = struct { head: u64, len: u64 };
-var g_robust = [_]RobustSlot{.{ .head = 0, .len = 0 }} ** chan.MAX_SLOTS;
+// ---- memory cap: each stub process publishes what its guest has mapped into
+// its leader slot's Proc record, and a call that would take the run's total past
+// the cap fails, as the native stub does (mem.zig).
+var g_acct: usize = 0;
+
+// account makes ch's slot the one this process publishes its total in: its
+// image's, or its fork child's.
+pub fn account(ch: *chan.Chan) void {
+    g_acct = slotIndex(ch);
+    publishMem();
+}
+
+fn runMemCap() u64 {
+    return @atomicLoad(u64, @as(*const u64, @ptrFromInt(@intFromPtr(g_chan_base) + TRACE_AREA_OFF + 0x2000 + 8)), .acquire);
+}
+
+fn publishMem() void {
+    if (runMemCap() == 0) return;
+    @atomicStore(u64, &sigProcRec(@intCast(g_acct)).mem, mappedIn(0, std.math.maxInt(u64)), .release);
+}
+
+fn othersMem() u64 {
+    var n: u64 = 0;
+    for (0..chan.MAX_SLOTS) |s| {
+        if (s != g_acct) n +|= @atomicLoad(u64, &sigProcRec(@intCast(s)).mem, .acquire);
+    }
+    return n;
+}
+
+fn pageUp(n: u64) u64 {
+    return (n +| 0xfff) & ~@as(u64, 0xfff);
+}
+
+// growth is how much more a call asks to map, at most.
+fn growth(sc: Syscall) u64 {
+    if (runMemCap() == 0) return 0;
+    switch (sc.nr) {
+        NR_MMAP => {
+            const n = pageUp(sc.args[1]);
+            if (sc.args[3] & MAP_FIXED == 0) return n;
+            const lo = sc.args[0] & ~@as(u64, 0xfff);
+            return n -| mappedIn(lo, lo +| n);
+        },
+        NR_MREMAP => return if (sc.args[3] & MREMAP_DONTUNMAP != 0) pageUp(sc.args[2]) else pageUp(sc.args[2]) -| pageUp(sc.args[1]),
+        NR_BRK => {
+            heapLock();
+            defer heapUnlock();
+            return if (sc.args[0] > g_brk_cur) pageUp(sc.args[0]) -| pageUp(g_brk_cur) else 0;
+        },
+        else => return 0,
+    }
+}
+
+fn overCap(more: u64) bool {
+    if (more == 0) return false;
+    const cap = runMemCap();
+    if (cap == 0) return false;
+    return mappedIn(0, std.math.maxInt(u64)) +| more +| othersMem() > cap;
+}
+
+// mappedIn is how much of [lo, hi) the guest has mapped: the union of its
+// mappings and its heap there, each byte counted once.
+fn mappedIn(lo: u64, hi: u64) u64 {
+    heapLock();
+    const hlo = g_brk_start & ~@as(u64, 0xfff);
+    const hhi = pageUp(g_brk_cur);
+    heapUnlock();
+    g_maps_lock.lock();
+    defer g_maps_lock.unlock();
+    const all = gpa.alloc(MapEnt, g_maps.items.len + 1) catch return 0;
+    defer gpa.free(all);
+    @memcpy(all[0..g_maps.items.len], g_maps.items);
+    var n = g_maps.items.len;
+    if (hhi > hlo) {
+        all[n] = .{ .lo = hlo, .hi = hhi, .off = 0, .aux = 0, .attr = 0 };
+        n += 1;
+    }
+    std.mem.sort(MapEnt, all[0..n], {}, mapLess);
+    var total: u64 = 0;
+    var cur = lo;
+    for (all[0..n]) |e| {
+        const a = @max(e.lo, cur);
+        const b = @min(e.hi, hi);
+        if (b > a) {
+            total += b - a;
+            cur = b;
+        }
+    }
+    return total;
+}
 
 // ---- membarrier (ported from proc.zig): reading each other vcpu thread's
 // registers forces it off its core -- a full memory barrier + context sync, the

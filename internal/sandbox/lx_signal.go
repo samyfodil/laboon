@@ -99,6 +99,9 @@ const (
 	// reads of the run as a whole: how many processes it has (a process
 	// alone shares memory with none: stub/macos/wx.zig).
 	sigRunOff = 0x2000
+	// sigRunMemCap is Config.MaxBytes, which the macOS stubs enforce
+	// together: each publishes what its process has mapped at spMem.
+	sigRunMemCap = sigRunOff + 8
 
 	stProc    = 4
 	stMask    = 8
@@ -118,6 +121,7 @@ const (
 	stInHandler = 76
 
 	spPending = 8
+	spMem     = 16
 
 	rtq      = 32 // queued real-time signal instances per pending set
 	sigRTMIN = 32
@@ -239,6 +243,11 @@ func newSigRun(fs *dfs, mem []byte, ospid int) *sigRun {
 	sr.initThread(0, 0, 1, 1, 0, [3]uint64{})
 	fs.sr.Store(sr)
 	return sr
+}
+
+// setMemCap publishes the run's memory cap in the channel memory mem.
+func setMemCap(mem []byte, n uint64) {
+	atomic.StoreUint64((*uint64)(unsafe.Pointer(&mem[slotsLen+sigRunMemCap])), n)
 }
 
 // countProcs publishes how many processes the run has (sigRunOff). sr.mu
@@ -503,6 +512,7 @@ func (g *dguest) sigFork(child *dguest) {
 		return
 	}
 	sr.st(pOff(child.slot)+spPending, 0)
+	sr.st(pOff(child.slot)+spMem, 0)
 	o := tOff(g.slot)
 	ss := [3]uint64{sr.ld(o + stSsSp), sr.ld(o + stSsSize), uint64(atomic.LoadUint32(sr.p32(o + stSsFlags)))}
 	sr.initThread(child.slot, child.slot, child.pid, child.pid, sr.ld(o+stMask), ss)

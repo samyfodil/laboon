@@ -15,6 +15,7 @@ type bufferPipe struct {
 	buf              []byte
 	head, used       int
 	readers, writers int
+	wgen             uint64 // write ends ever opened, so a FIFO's read open that raced a writer is not stranded
 	stamp            [2]uint64
 }
 
@@ -49,6 +50,7 @@ func (p *bufferPipe) open(mode int64) {
 	}
 	if mode != lxORdonly {
 		p.writers++
+		p.wgen++
 		p.touch(0)
 	}
 }

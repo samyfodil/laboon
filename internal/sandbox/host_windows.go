@@ -48,6 +48,10 @@ func hostAccMode(f *os.File) (acc int64, appendMode bool, err error) {
 
 func setHostAppend(int, bool) {}
 
+// setHostPipeSize has nothing to size: a Windows pipe is a supervisor
+// transport, which F_SETPIPE_SZ resizes through its pipeIO.
+func setHostPipeSize(int, int) lxErrno { return 0 }
+
 // hostHoles reports whether the host reports a file's holes: Windows does not
 // here, so a file is one data extent, as on Linux without holes.
 const hostHoles = false

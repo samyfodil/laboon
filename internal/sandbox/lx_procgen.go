@@ -403,11 +403,11 @@ func (g *dguest) pidDir(t *dguest, task bool) *pnode {
 	ints := func(s string) *pnode { return pwfile(s + "\n") }
 	return pdir(func() []pchild {
 		pi.mu.Lock()
-		exe, exeFD, argv, env := pi.exe, pi.exeFD, pi.argv, pi.env
+		exe, exePin, argv, env := pi.exe, pi.exePin, pi.argv, pi.env
 		pi.mu.Unlock()
 		cwd := p.getCwd()
 		kids := []pchild{
-			{"exe", p.exeNode(exe, exeFD)},
+			{"exe", p.exeNode(exe, exePin)},
 			{"cwd", plink(cwd)},
 			{"root", plink("/")},
 			{"cmdline", pstr(nulJoin(argv))},

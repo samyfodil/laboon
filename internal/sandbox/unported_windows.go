@@ -12,8 +12,9 @@ import "sync"
 type runInfo struct{}
 
 // memProc is a process's stub pairing: w is the stub (shared by the
-// process's threads and, until it execs, a CLONE_VM child). SysV IPC state is
-// tracked as on darwin but no segment can be attached yet.
+// process's threads and, until it execs, a CLONE_VM child). Its SysV
+// attachments and SEM_UNDO adjustments are settled when the address space
+// ends (endWinProcess), not per thread, so release does nothing.
 type memProc struct {
 	w       *wguest
 	mu      sync.Mutex

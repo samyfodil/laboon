@@ -86,19 +86,19 @@ func pmap(s string, put func(w *dguest, b []byte) lxErrno) *pnode {
 }
 func plink(t string) *pnode { return &pnode{kind: pLink, perm: 0o777, target: t} }
 
-// exeNode serves /proc/<pid>/exe. When the exec'd inode is pinned it is a
+// exeNode serves /proc/<pid>/exe. When the exec'd file is pinned it is a
 // descriptor-backed magic link (openable after its path is gone, with the
 // " (deleted)" suffix Linux shows); otherwise it is a plain symlink to the
 // exe path.
-func (g *dguest) exeNode(exe string, exeFD *os.File) *pnode {
-	if exeFD == nil {
+func (g *dguest) exeNode(exe string, pin *dfile) *pnode {
+	if pin == nil {
 		return plink(exe)
 	}
 	target := exe
 	if _, e := g.lstatGuest(exe); e == lxENOENT {
 		target += " (deleted)"
 	}
-	return &pnode{kind: pFdObj, perm: 0o777, fd: &dfile{pathFD: exeFD, gp: exe, stub: -1}, target: target}
+	return &pnode{kind: pFdObj, perm: 0o777, fd: pin, target: target}
 }
 
 func (n *pnode) child(name string) *pnode {
@@ -166,8 +166,8 @@ type procState struct {
 type procInfo struct {
 	mu     sync.Mutex
 	exe    string
-	exeFD  *os.File // a confined O_PATH handle pinning the exec'd inode, so /proc/<pid>/exe resolves it after its name is removed (nil: fall back to the exe path)
-	comm   string   // the name exec was given; "" means exe's
+	exePin *dfile // the exec'd file, pinned so /proc/<pid>/exe resolves it after its name is removed (nil: fall back to the exe path)
+	comm   string // the name exec was given; "" means exe's
 	argv   []string
 	env    []string
 	start  time.Time
@@ -227,20 +227,33 @@ func (fs *dfs) provisionShm() {
 func (pi *procInfo) forked() *procInfo {
 	pi.mu.Lock()
 	defer pi.mu.Unlock()
-	return &procInfo{exe: pi.exe, comm: pi.comm, argv: pi.argv, env: pi.env, start: time.Now(),
+	if pi.exePin != nil {
+		pi.exePin.refs.Add(1)
+	}
+	return &procInfo{exe: pi.exe, exePin: pi.exePin, comm: pi.comm, argv: pi.argv, env: pi.env, start: time.Now(),
 		vmas: append([]vma(nil), pi.vmas...), img: pi.img, interp: pi.interp}
 }
 
 // noteExec records the new program. The env is not replaced: the stub enters
 // the new image with its own (inherited) environment, which is what the guest
 // actually sees.
-func (g *dguest) noteExec(gp, prog string, argv []string, exeFD *os.File) {
+func (g *dguest) noteExec(gp, prog string, argv []string, pin *dfile) {
 	pi := g.pi
 	pi.mu.Lock()
-	if pi.exeFD != nil {
-		pi.exeFD.Close()
+	if pi.exePin != nil {
+		pi.exePin.unref()
 	}
-	pi.exe, pi.exeFD, pi.comm, pi.argv, pi.vmas, pi.img, pi.interp = gp, exeFD, path.Base(prog), argv, nil, nil, ""
+	pi.exe, pi.exePin, pi.comm, pi.argv, pi.vmas, pi.img, pi.interp = gp, pin, path.Base(prog), argv, nil, nil, ""
+	pi.mu.Unlock()
+}
+
+// dropExe lets go of the exec'd file at the process's end.
+func (pi *procInfo) dropExe() {
+	pi.mu.Lock()
+	if pi.exePin != nil {
+		pi.exePin.unref()
+		pi.exePin = nil
+	}
 	pi.mu.Unlock()
 }
 
@@ -500,8 +513,19 @@ type pipeIO interface {
 type pipeObj struct {
 	io   pipeIO
 	mu   sync.Mutex
-	ends [2]*dfile    // a live description of the read and the write end
-	sz   atomic.Int32 // F_SETPIPE_SZ capacity, 0 for the default
+	ends [2]*dfile     // a live description of the read and the write end
+	sz   atomic.Int32  // F_SETPIPE_SZ capacity, 0 for the default
+	perm atomic.Uint32 // permSet | the mode fchmod gave the pipe's inode, which both ends share
+}
+
+// perm is where the mode fchmod gave d's object lives when the host keeps
+// none for it: a pipe's on the pipe, which both ends share as their inode,
+// anything else's on the description.
+func (d *dfile) perm() *atomic.Uint32 {
+	if d.pipe != nil {
+		return &d.pipe.perm
+	}
+	return &d.fx.perm
 }
 
 // pipeSize is the capacity F_GETPIPE_SZ reports, shared by both ends of a
@@ -566,6 +590,9 @@ func (g *dguest) reopen(d *dfile, flags int64) (*dfile, lxErrno) {
 		}
 		return nil, lxENXIO
 	}
+	if d.pinned != nil {
+		return g.reopen(d.pinned, flags)
+	}
 	if d.pathFD != nil {
 		// A pinned O_PATH handle (an O_PATH fd or /proc/<pid>/exe): re-open the
 		// object it holds, with the requested access mode, surviving its name
@@ -610,7 +637,7 @@ func (g *dguest) reopen(d *dfile, flags int64) (*dfile, lxErrno) {
 				return nil, e
 			}
 			p.io.open(acc)
-			nd := &dfile{f: f, gp: "pipe:", stub: -1, pipe: p}
+			nd := &dfile{f: f, gp: d.gp, stub: -1, pipe: p}
 			nd.fx.oflags, nd.fx.hasFlags = acc, true
 			return nd, 0
 		}
@@ -1094,7 +1121,7 @@ func (t *dguest) fdNode(d *dfile) *pnode {
 		if t.pseudoMount(name) {
 			return plink(name)
 		}
-		if d.fx.opath && d.pathFD != nil {
+		if d.fx.opath && (d.pathFD != nil || d.pinned != nil) {
 			// An O_PATH fd pins its inode; /proc/<pid>/fd/<n> is the kernel's magic
 			// link to that open object, not a re-resolution of the name it shows.
 			// Open reopens the pinned descriptor, so it still works when the name is

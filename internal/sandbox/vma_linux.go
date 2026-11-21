@@ -252,7 +252,7 @@ func (m *memProc) place(hint, n, flags uint64, anon bool) (uint64, bool) {
 	}
 	obs := m.obstacles()
 	if hint != 0 {
-		if h := alignUp(hint); h >= minAddr && h <= vmTaskSize-n && m.clear(obs, h, h+n) {
+		if h := hint &^ (pageSize - 1); h >= minAddr && h <= vmTaskSize-n && m.clear(obs, h, h+n) {
 			return h, true
 		}
 	}

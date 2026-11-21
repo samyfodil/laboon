@@ -20,6 +20,7 @@ const (
 	lxMincore       = 232
 	lxMlock2        = 284
 	lxGetcpu        = 168
+	lxSetRobustList = 99
 	lxGetRobustList = 100
 	lxMembarrier    = 283
 

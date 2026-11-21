@@ -263,7 +263,7 @@ func (g *dguest) vfFstat(d *dfile) (lxStat, lxErrno) {
 		st.size = sb.size0()
 		st.blocks = (st.size + 511) / 512
 	}
-	if p := d.fx.perm.Load(); p&permSet != 0 {
+	if p := d.perm().Load(); p&permSet != 0 {
 		st.mode = st.mode&^0o7777 | p&0o7777
 	}
 	return st, 0

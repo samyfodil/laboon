@@ -107,34 +107,7 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 		ppid, sig = g.ps.ppid, g.ps.exitSignal
 	}
 	ps := g.ps.forkState(gpid, ppid, sig)
-	if r.flags&lxCloneNewUser != 0 {
-		// clone into a new user namespace: the child is root there, with every
-		// capability (a sandbox clones itself this way).
-		ps.cred.userns = true
-		ps.cred.capEff, ps.cred.capPrm, ps.cred.capBnd, ps.cred.capInh = capAll, capAll, capAll, capAll
-	}
-	if r.flags&lxCloneNewPid != 0 {
-		// clone into a new pid namespace: the child is pid 1 there.
-		ps.ns = g.ps.ns.child(fs.nextNsID)
-		fs.nextNsID++
-	} else if g.ps.childPidNs != nil {
-		// a prior unshare(CLONE_NEWPID) placed the caller's children here.
-		ps.ns = g.ps.childPidNs
-	}
-	if r.flags&lxCloneNewNet != 0 {
-		// clone into a new (empty) network namespace: no host network there.
-		ps.netns.Store(int32(fs.nextNsID))
-		fs.nextNsID++
-	}
-	if r.flags&lxCloneNewUts != 0 {
-		ps.uts = g.utsNS().clone()
-	}
-	if r.flags&lxCloneNewNs != 0 {
-		// clone into a new mount namespace: its mounts are dropped when it empties.
-		ps.mntns = fs.nextNsID
-		fs.nextNsID++
-	}
-	ps.ns.register(gpid)
+	g.cloneNamespaces(ps, gpid, r.flags)
 	parentPid := g.ps.ns.seen(ps) // the child's pid as the parent's namespace sees it
 	ps.ft = child.ft
 	ps.comm[gpid] = g.ps.comm[g.pid]
@@ -453,24 +426,7 @@ func (g *dguest) cloneVMProc(r cloneReq, cfg Config) int {
 		ppid, sig = g.ps.ppid, g.ps.exitSignal
 	}
 	ps := g.ps.forkState(gpid, ppid, sig)
-	if r.flags&lxCloneNewPid != 0 {
-		ps.ns = g.ps.ns.child(fs.nextNsID)
-		fs.nextNsID++
-	} else if g.ps.childPidNs != nil {
-		ps.ns = g.ps.childPidNs
-	}
-	if r.flags&lxCloneNewNet != 0 {
-		ps.netns.Store(int32(fs.nextNsID))
-		fs.nextNsID++
-	}
-	if r.flags&lxCloneNewUts != 0 {
-		ps.uts = g.utsNS().clone()
-	}
-	if r.flags&lxCloneNewNs != 0 {
-		ps.mntns = fs.nextNsID
-		fs.nextNsID++
-	}
-	ps.ns.register(gpid)
+	g.cloneNamespaces(ps, gpid, r.flags)
 	parentPid := g.ps.ns.seen(ps)
 	ps.shared, ps.ospid, ps.checkedIn = true, g.ps.ospid, true
 	ps.ft = ft

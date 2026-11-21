@@ -371,7 +371,7 @@ func (d *dfile) isRegular() bool {
 }
 
 func (d *dfile) isPipe() bool {
-	if d.f == nil || d.ev != nil || d.ep != nil || d.fx.in != nil {
+	if d.f == nil || d.ev != nil || d.ep != nil || d.fx.in != nil || d.pty != nil {
 		return false
 	}
 	if d.name() == "pipe:" {

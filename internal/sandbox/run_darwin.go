@@ -21,7 +21,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/samyfodil/laboon/filesystems/hostfs"
-	"github.com/samyfodil/laboon/filesystems/memfs"
 	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/rewrite"
 	macstub "github.com/samyfodil/laboon/stub/macos"
@@ -169,8 +168,6 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	}
 	defer os.RemoveAll(rtmp)
 
-	// The guest program, its #! interpreters and its dynamic linker resolve
-	// through the root's Namespace like any guest path (progResolver).
 	rootPath, isHost := HostRootPath(cfg.RootFS)
 	if isHost && rootPath != "" {
 		abs, err := filepath.Abs(rootPath)
@@ -181,28 +178,47 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 			return 0, fmt.Errorf("laboon: root: %w", err)
 		}
 	}
-	// A host root resolves from its canonical path, as the run's own Namespace
-	// does: the confined backend refuses a symlink in the root's own components
-	// (macOS's /var). Without a root the guest's / is empty but for the program.
-	progRoot := cfg.RootFS
-	var progNS *namespace.Namespace
-	switch {
-	case isHost && rootPath != "":
-		progRoot = HostRoot(rootPath)
-	case progRoot == nil:
-		progRoot = memfs.NewMemFS()
-		at, mfs, err := programBind(path, progRoot)
-		if err != nil {
+
+	// Shared channel region (a MAP_SHARED temp file whose path the stub maps).
+	chanFile, err := os.CreateTemp(rtmp, "lc-chan-*")
+	if err != nil {
+		return 0, err
+	}
+	defer os.Remove(chanFile.Name())
+	defer os.Remove(chanFile.Name() + ".sb") // the stubs' compiled Seatbelt profile
+	defer chanFile.Close()
+	if err := writeSeatbeltPaths(chanFile.Name(), rootPath); err != nil {
+		return 0, err
+	}
+	defer os.Remove(chanFile.Name() + ".paths")
+	if err := chanFile.Truncate(chanLen); err != nil {
+		return 0, err
+	}
+	mem, err := unix.Mmap(int(chanFile.Fd()), 0, chanLen, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		return 0, err
+	}
+	defer unix.Munmap(mem)
+	setMemCap(mem, cfg.MaxBytes) // before a stub maps anything
+
+	done := make(chan struct{})
+
+	// The shared run state (filesystem + process table) outlives any one guest
+	// process, so serve does not own it. Every forked child references it.
+	fs, err := newDfs(cfg.RootFS, cfg.Upper, mem, done, rtmp)
+	if err != nil {
+		return 0, err
+	}
+	defer fs.close()
+	if cfg.RootFS == nil {
+		if path, err = fs.bindProgram(path); err != nil {
 			return 0, fmt.Errorf("laboon: program: %w", err)
 		}
-		progNS = namespace.NewNamespace(progRoot)
-		progNS.MountShadow(at, mfs)
-		path = at
 	}
-	if progNS == nil {
-		progNS = namespace.NewNamespace(progRoot)
-	}
-	res := &progResolver{tmp: rtmp, ns: progNS}
+
+	// The guest program, its #! interpreters and its dynamic linker resolve as
+	// the guest's own paths do: through the run's filesystem and its mounts.
+	res := &progResolver{tmp: rtmp, ns: fs.progNS(cfg.Mounts)}
 	gp := path
 	guestPath, err := res.host(gp)
 	if err != nil {
@@ -280,27 +296,6 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 		defer cleanInterp()
 		interpSitesPath = p
 	}
-
-	// Shared channel region (a MAP_SHARED temp file whose path the stub maps).
-	chanFile, err := os.CreateTemp(rtmp, "lc-chan-*")
-	if err != nil {
-		return 0, err
-	}
-	defer os.Remove(chanFile.Name())
-	defer os.Remove(chanFile.Name() + ".sb") // the stubs' compiled Seatbelt profile
-	defer chanFile.Close()
-	if err := writeSeatbeltPaths(chanFile.Name(), rootPath); err != nil {
-		return 0, err
-	}
-	defer os.Remove(chanFile.Name() + ".paths")
-	if err := chanFile.Truncate(chanLen); err != nil {
-		return 0, err
-	}
-	mem, err := unix.Mmap(int(chanFile.Fd()), 0, chanLen, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
-	if err != nil {
-		return 0, err
-	}
-	defer unix.Munmap(mem)
 
 	// A non-PIE low-linked ET_EXEC cannot be mapped in the stub's address space
 	// (the __PAGEZERO wall), so it runs in a VM via the HVF stub. The channel and
@@ -387,20 +382,6 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	}
 	defer context.AfterFunc(ctx, func() { cmd.Process.Kill() })()
 
-	done := make(chan struct{})
-
-	// The shared run state (filesystem + process table) outlives any one guest
-	// process, so serve does not own it. Every forked child references it.
-	fs, err := newDfs(cfg.RootFS, cfg.Upper, mem, done, rtmp)
-	if err != nil {
-		return 0, err
-	}
-	defer fs.close()
-	if cfg.RootFS == nil {
-		if err := fs.bindProgram(path); err != nil {
-			return 0, fmt.Errorf("laboon: program: %w", err)
-		}
-	}
 	defer fs.term.close()
 	if term != nil {
 		fs.adoptCtty(term.fd, 1)
@@ -497,7 +478,7 @@ func serve(ch *channel, fs *dfs, mp *memProc, cfg Config) (int, error) {
 	if err := g.applyInitDir(cfg); err != nil {
 		return 0, err
 	}
-	publishControl(cfg, g.ps.ospid, fs)
+	publishControl(cfg, fs.initOspid, fs)
 	defer revokeControl(cfg)
 	code, err := serveLoop(g, cfg)
 	if err == errLeaderGone {
@@ -763,6 +744,9 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 		default:
 			if h, ok := handler(gnr); ok && generic {
 				ch.page.ret = uint64(g.fromGeneric(nr, a, h(g, ga)))
+				if cfg.Trace != nil {
+					fmt.Fprintf(cfg.Trace, "[pid %d]   -> ret=%#x\n", g.pid, ch.page.ret)
+				}
 				g.ptraceSyscallExit(int64(ch.page.ret))
 				ch.reply(repResult)
 				break

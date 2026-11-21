@@ -28,9 +28,6 @@ import (
 // HostONonblock is the host open flag for a non-blocking open.
 const HostONonblock = unix.O_NONBLOCK
 
-// FifoRendezvous: this backend has real FIFOs, so FIFO opens rendezvous.
-const FifoRendezvous = true
-
 type LinuxFS struct{ rootAbs string }
 
 func NewHostFS(rootAbs, upperAbs, workAbs string) HostFS {

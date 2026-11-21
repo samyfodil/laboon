@@ -590,8 +590,11 @@ pub fn fault(esr: u32, far: u64, pc: u64, st: *Step) Verdict {
         if (fsc == 0x04 and jitted.contains(page)) return .handled;
         // A write to a shared page frozen for a hot one, which another thread
         // thawed meanwhile: the host never maps a shared page executable, so
-        // one writable now refused the write only while frozen.
-        if (ec == 0x24 and esr & (1 << 6) != 0) {
+        // one writable now refused the write only while frozen, or as another
+        // view of its memory was remapped, which the host reports as no page
+        // there at all. A page of a file mapping past the file's end has none
+        // for real, and the fault is the guest's.
+        if (ec == 0x24 and esr & (1 << 6) != 0 and !(fsc == 0x04 and mem.pastEnd(far))) {
             if (regionAt(page)) |r| {
                 if (r.lo <= page and r.inherit == VM_INHERIT_SHARE and r.prot & PROT_WRITE != 0) return .handled;
             }

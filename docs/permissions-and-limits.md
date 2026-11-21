@@ -30,8 +30,8 @@ sockets beneath it, so a mount is an explicit grant of access.
 
 Writable-plus-executable guest memory is allowed by default for JITs such as V8;
 `WithRejectRWX()` refuses it. There is no default memory cap. `WithMaxMemory`
-limits mapped address space on Linux and stub-process committed memory on
-Windows; **macOS does not enforce it yet**.
+limits mapped address space on Linux and macOS, and stub-process committed
+memory on Windows. The cap covers all of the run's processes together.
 
 These controls and their semantics are documented in
 [../options.go](../options.go) and

@@ -17,6 +17,10 @@ import (
 // can write too, so a reply is only ever a result the guest could have had
 // anyway. A host call whose meaning is the calling thread's -- a futex wait,
 // its TLS, its exit -- stays on that thread's channel.
+// leaderHoldsSlot is false: a slot is freed once its stub process is gone
+// (freeStubSlot), which a gone leader's is only with its process.
+const leaderHoldsSlot = false
+
 const (
 	hopReqOff = chanLen
 	hopRepOff = hopReqOff + maxSlots*slotSize
@@ -72,7 +76,7 @@ type hopTable struct {
 func hopRuns(nr uintptr) bool {
 	switch nr {
 	case unix.SYS_MMAP, unix.SYS_MPROTECT, unix.SYS_MUNMAP, unix.SYS_MREMAP, unix.SYS_MADVISE,
-		unix.SYS_MSYNC, unix.SYS_MINCORE, unix.SYS_CLOSE, unix.SYS_RECVMSG:
+		unix.SYS_MSYNC, unix.SYS_MINCORE, unix.SYS_CLOSE, unix.SYS_RECVMSG, unix.SYS_MEMBARRIER:
 		return true
 	}
 	return false

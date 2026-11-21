@@ -32,6 +32,7 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	if e != 0 {
 		return fail(e)
 	}
+	defer t.drop()
 	argv, e := dg.readArgv(argvAddr)
 	if e != 0 {
 		return fail(e)
@@ -103,9 +104,14 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 		dg.mp.pid.Store(int64(le32(dg.mem[dg.slot*slotSize+stubHostTid:])))
 	}
 	oldTid := dg.ptraceExecTid()
-	dg.takeOverGroup()
+	// As Linux's de_thread, the other threads are gone before the old image
+	// is: one still running would fault in it, and the kernel's update of
+	// its rseq area there would kill the process.
+	for _, ch := range dg.takeOverGroup() {
+		ch.awaitGone()
+	}
 	dg.execDone(path.Base(t.gp))
-	dg.noteExec(t.gp, t.gp, argv, pinExeFD(pf.f))
+	dg.noteExec(t.gp, t.gp, argv, exePinOf(pf.f, t.gp))
 	dg.mp.detachAll(dg) // exec detaches every SysV segment
 	m := dg.mp
 	m.mu.Lock()

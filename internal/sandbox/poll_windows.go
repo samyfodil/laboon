@@ -63,18 +63,6 @@ func init() {
 	}
 }
 
-// pollState is d's Linux poll mask now and a stamp that changes whenever the
-// mask may have (for EPOLLET).
-type pollState struct {
-	mask  uint16
-	stamp uint64
-}
-
-const (
-	pollInSet  = lxPollIn | lxPollRdnorm
-	pollOutSet = lxPollOut | lxPollWrnorm
-)
-
 func (g *dguest) pollOf(d *dfile) pollState {
 	switch {
 	case d.pipe != nil && d.pipe.io != nil:

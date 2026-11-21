@@ -66,6 +66,7 @@ type pstate struct {
 
 	leaderGone bool          // the leader exited first; the last thread ends the process
 	leaderCode int           // its exit code, the process's status on Linux
+	heldSlot   int           // the gone leader's slot, which holds the process's signal record: finishGroup frees it
 	ended      chan struct{} // closed when a leader-gone process's last thread ends
 
 	exiting  bool // exit_group (or the leader's exit) was called
@@ -323,10 +324,6 @@ var (
 	// execHook runs at every successful execve, past the point of no return
 	// (the signal code resets handled signals to their defaults).
 	execHook = func(g *dguest) {}
-
-	// sessionEnded runs when the leader of session sid exits: its controlling
-	// terminal, if the host implements terminals, is released.
-	sessionEnded = func(fs *dfs, sid int) {}
 )
 
 // beginExit runs at exit_group (or the leader's exit) before the stub's host
@@ -401,9 +398,13 @@ func (fs *dfs) processExit(ps *pstate, code int, clean bool) {
 		tracekill, released = fs.tracing.processExit(ps)
 	}
 	ps.stopSig, ps.contPending = 0, false
+	var pi *procInfo
 	for tid, p := range fs.procs {
 		if p.ps == ps {
 			if tid == ps.tgid {
+				if p.g != nil {
+					pi = p.g.pi
+				}
 				delete(fs.procs, tid)
 				continue
 			}
@@ -449,6 +450,9 @@ func (fs *dfs) processExit(ps *pstate, code int, clean bool) {
 	if dropNs != 0 {
 		fs.dropMntnsMounts(dropNs)
 	}
+	if pi != nil {
+		pi.dropExe()
+	}
 	for _, w := range wakes {
 		fs.endServe(w.tid, w.stop, w.ch)
 	}
@@ -462,7 +466,7 @@ func (fs *dfs) processExit(ps *pstate, code int, clean bool) {
 		procSignal(fs, deathsig[i], deathsig[i+1])
 	}
 	if leader {
-		sessionEnded(fs, ps.tgid)
+		fs.endSession(ps.tgid)
 	}
 	if parent != 0 {
 		childExited(fs, parent, ps.tgid, sig, status)
@@ -552,12 +556,20 @@ func (fs *dfs) leaderExited(g *dguest, code int) int {
 	fs.mu.Lock()
 	ps := g.ps
 	ps.leaderGone, ps.leaderCode = true, code
+	// Its pid lives on with the process, but its channel's slot is freed
+	// now and may be another's before the process ends.
+	if p := fs.procs[ps.tgid]; p != nil && p.ch == g.ch {
+		p.ch = nil
+	}
 	if ps.ended == nil {
 		ps.ended = make(chan struct{})
 	}
 	ended := ps.ended
 	ps.threads--
 	last := ps.threads == 0
+	if !last && leaderHoldsSlot {
+		ps.heldSlot, g.slotHeld = g.slot, true
+	}
 	fs.mu.Unlock()
 	if last {
 		fs.finishGroup(ps, nil)
@@ -594,7 +606,12 @@ func (fs *dfs) finishGroup(ps *pstate, err error) {
 		close(ps.ended)
 		ps.ended = nil
 	}
+	held := ps.heldSlot
+	ps.heldSlot = 0
 	fs.mu.Unlock()
+	if held > 0 {
+		fs.freeSlot(held)
+	}
 }
 
 // forgetProc removes a process that never ran (its fork failed in the stub).
@@ -747,7 +764,8 @@ func (g *dguest) waitChild(w waitSel, exited, stopped, continued bool) (waitEven
 
 // dead reports whether this channel's stub is gone (the run is ending or the
 // process was killed), so a supervisor-side block must give up. A Windows
-// process has no stop channel: its stub's process handle tells (ended).
+// channel's stop closes only once its slot is ended; until then its stub's
+// process handle tells (ended).
 func (c *hostChan) dead() bool {
 	select {
 	case <-c.done:

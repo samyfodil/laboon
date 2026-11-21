@@ -299,6 +299,12 @@ pub fn panic(_: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     die(125);
 }
 
+// exitIfDead ends the calling thread once the supervisor is done with its
+// slot.
+pub fn exitIfDead(ch: *Chan) void {
+    if (@atomicLoad(u32, &ch.state, .seq_cst) == ST_DEAD) _ = sys(nr(.exit), 0, 0, 0, 0, 0, 0);
+}
+
 // answered reports whether the supervisor has acted on the request: a reply,
 // or ST_DEAD, on which the thread exits.
 fn answered(ch: *Chan) bool {
@@ -866,6 +872,7 @@ export fn stub_main(sp: u64) callconv(.C) noreturn {
     // blocks most signals. Unblock everything so our handlers can run.
     unblockSignals();
     sig.installHandlers();
+    clearOnExit(ch);
     landlock.restrict();
     seccomp.install();
 
@@ -888,6 +895,14 @@ export fn stub_main(sp: u64) callconv(.C) noreturn {
     arch.enter(ch.args[0], ch.args[1]);
 }
 
+// clearOnExit has the kernel zero and wake ch's alive word when the calling
+// thread, a process's first, is gone, as CLONE_CHILD_CLEARTID does for the
+// threads the stub clones: the supervisor waits on it for the thread's end.
+fn clearOnExit(ch: *Chan) void {
+    @atomicStore(u32, &ch.alive, 1, .seq_cst);
+    _ = sys(nr(.set_tid_address), @intFromPtr(&ch.alive), 0, 0, 0, 0, 0);
+}
+
 // startHop starts this process's hop thread (arch lc_hop_loop) on the request
 // page req.
 fn startHop(req: u64) void {
@@ -901,6 +916,7 @@ pub const MAX_ERRNO: u64 = @bitCast(@as(i64, -4096));
 // child's first thread (lc_fork_child).
 export fn lc_hop_forked(cs: u64, req: u64, ctx: u64, stack: u64, cap: u64) callconv(.C) noreturn {
     winBase = req & ~(WIN_SIZE - 1);
+    clearOnExit(@ptrFromInt(cs));
     arch.forkChildOn(scratchTop(@ptrFromInt(cs)), cs, req, ctx, stack, cap);
 }
 

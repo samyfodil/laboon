@@ -246,3 +246,34 @@ func (fs *dfs) superseded(g *dguest) bool {
 	p := fs.procs[g.pid]
 	return p != nil && p.ch != g.ch
 }
+
+// cloneNamespaces places the new process ps, global pid gpid, in the
+// namespaces clone's flags ask for and gives it a pid in each pid namespace
+// it is seen from. The caller holds fs.mu.
+func (g *dguest) cloneNamespaces(ps *pstate, gpid int, flags uint64) {
+	fs := g.dfs
+	if flags&lxCloneNewUser != 0 {
+		// The child is root in its new user namespace, with every capability
+		// (a sandbox clones itself this way).
+		ps.cred.userns = true
+		ps.cred.capEff, ps.cred.capPrm, ps.cred.capBnd, ps.cred.capInh = capAll, capAll, capAll, capAll
+	}
+	if flags&lxCloneNewPid != 0 {
+		ps.ns = g.ps.ns.child(fs.nextNsID) // where the child is pid 1
+		fs.nextNsID++
+	} else if g.ps.childPidNs != nil {
+		ps.ns = g.ps.childPidNs // a prior unshare(CLONE_NEWPID) placed the caller's children here
+	}
+	if flags&lxCloneNewNet != 0 {
+		ps.netns.Store(int32(fs.nextNsID)) // empty: no host network there
+		fs.nextNsID++
+	}
+	if flags&lxCloneNewUts != 0 {
+		ps.uts = g.utsNS().clone()
+	}
+	if flags&lxCloneNewNs != 0 {
+		ps.mntns = fs.nextNsID // its mounts are dropped when it empties
+		fs.nextNsID++
+	}
+	ps.ns.register(gpid)
+}

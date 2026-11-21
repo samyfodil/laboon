@@ -365,6 +365,9 @@ func (ep *epoll) collect(hev []unix.EpollEvent, max int) []pendEv {
 			continue // a registration since dropped
 		}
 		ev := e.Events & (r.events | unix.EPOLLERR | unix.EPOLLHUP)
+		if r.d.pty != nil { // a terminal's pipes only wake the wait
+			ev = uint32(r.d.pty.pollState().mask) & (r.events | unix.EPOLLERR | unix.EPOLLHUP)
+		}
 		if ev&unix.EPOLLHUP != 0 && vnetHalfOpen(r.d) {
 			// TCP's CLOSE_WAIT has not hung up (vnetHalfOpen). Asked for
 			// nothing it reports, it is watched edge-triggered from now, so

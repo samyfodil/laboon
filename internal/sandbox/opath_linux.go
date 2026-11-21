@@ -84,5 +84,16 @@ func pinExeFD(f *os.File) *os.File {
 	return os.NewFile(uintptr(fd), "exe")
 }
 
+// exePinOf is /proc/<pid>/exe's pin of the exec'd file f (pinExeFD).
+func exePinOf(f *os.File, gp string) *dfile {
+	p := pinExeFD(f)
+	if p == nil {
+		return nil
+	}
+	d := &dfile{pathFD: p, gp: gp, stub: -1}
+	d.refs.Store(1)
+	return d
+}
+
 // procFdPath is the /proc magic link that names fd of this process.
 func procFdPath(fd int) string { return "/proc/self/fd/" + strconv.Itoa(fd) }

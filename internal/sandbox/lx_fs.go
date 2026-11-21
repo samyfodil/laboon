@@ -338,6 +338,17 @@ func (fs *dfs) guestNS(g *dguest) *namespace.Namespace {
 	return ns
 }
 
+// progNS is the view a program the run starts is found in: the root with
+// Config.Mounts on it, as each guest's Namespace has them.
+func (fs *dfs) progNS(mounts []Mount) *namespace.Namespace {
+	ns := namespace.NewNamespace(fs.overlay)
+	fs.ensureBinds(mounts)
+	for _, m := range fs.binds {
+		ns.MountShadow(m.at, m.mfs)
+	}
+	return ns
+}
+
 // ensureBinds builds the Config.Mounts once: each mounts its FileSystem at the
 // guest path. The FileSystem is whatever the caller composed — hostfs.Dir for a
 // confined host-directory bind (which forwards an AF_UNIX connect under it to the
@@ -346,14 +357,14 @@ func (fs *dfs) guestNS(g *dguest) *namespace.Namespace {
 // bindProgram makes the host program a rootless run names reachable at its own
 // path in the guest's empty root, and nothing else of the host: a read-only bind
 // of that one file, its parent directories made in the root as a mount target's
-// are.
-func (fs *dfs) bindProgram(host string) error {
+// are. It returns the program's guest path.
+func (fs *dfs) bindProgram(host string) (string, error) {
 	at, mfs, err := programBind(host, fs.rootFS)
 	if err != nil {
-		return err
+		return "", err
 	}
 	fs.binds = append(fs.binds, dynMount{at: at, mfs: mfs})
-	return nil
+	return at, nil
 }
 
 // programBind returns the guest path and the read-only single-file filesystem
@@ -368,7 +379,7 @@ func programBind(host string, root core.FileSystem) (string, core.FileSystem, er
 		return "", nil, err
 	}
 	dir, name := filepath.Split(real)
-	hfs := hostfs.NewHostDirFS(dir, hostfs.NewRawHostFS(""))
+	hfs := hostfs.NewHostDirFS(filepath.Clean(dir), hostfs.NewRawHostFS(""))
 	hfs.SetConfine(true)
 	n, err := hfs.Lookup(hfs.Root(), name)
 	if err != nil {
@@ -458,6 +469,14 @@ func (fs *dfs) allocSlot() int {
 		}
 	}
 	return -1
+}
+
+// releaseSlot frees g's slot once its serve loop is done, unless g led a
+// process that lives on without it (slotHeld).
+func (fs *dfs) releaseSlot(g *dguest) {
+	if !g.slotHeld {
+		fs.freeSlot(g.slot)
+	}
 }
 
 func (fs *dfs) freeSlot(i int) {
@@ -620,13 +639,14 @@ func (fs *dfs) setWhite(gp string, on bool) {
 // created by fork share the dfs and the open-file descriptions in their tables.
 type dguest struct {
 	*dfs
-	cfg  Config
-	ch   *hostChan
-	mem  []byte // shared channel region
-	slot int    // this process's channel slot (its scratch lives there)
-	pid  int    // guest pid for a process, guest tid for a thread (what gettid returns)
-	tgid int    // thread-group id: the process pid getpid returns (== pid for a process)
-	ppid int
+	cfg    Config
+	ch     *hostChan
+	mem    []byte           // shared channel region
+	slot   int              // this process's channel slot (its scratch lives there)
+	pid    int              // guest pid for a process, guest tid for a thread (what gettid returns)
+	robust [2]atomic.Uint64 // set_robust_list's head and length
+	tgid   int              // thread-group id: the process pid getpid returns (== pid for a process)
+	ppid   int
 
 	ft       *ftable              // open-file table: shared across a thread group (CLONE_FILES), copied by fork
 	pfs      *procFs              // umask and cwd: shared by threads, copied by fork
@@ -637,6 +657,7 @@ type dguest struct {
 	pnsBuild bool                 // vns is building pns; guards re-entry (a mount point that walks a /proc fd link)
 
 	isThread bool // created by clone(CLONE_VM): its exit (nr 93) retires only this slot
+	slotHeld bool // it led a process that outlived it, which keeps its slot (leaderExited)
 
 	rseqReg  [3]uint64 // the thread's registered rseq area, length and signature (Linux)
 	forkTid  int       // a fork child's host pid, before its stub reports it (Linux)
@@ -707,8 +728,9 @@ type dfile struct {
 	epw      epWatch     // the epolls this description is registered in
 	fx       fileX       // status flags, O_PATH, memfd seals, inotify, locks
 	pathFD   *os.File    // O_PATH: a confined host O_PATH handle pinning the object (f stays nil), so it survives its name being removed and can be re-opened for exec/stat
+	pinned   *dfile      // O_PATH where the host has no such handle: the regular file held open for reading, for the same
 	tfd      *timerfd    // set for a timerfd (f is its readiness pipe's read end)
-	pty      *ptmx       // set for a pty master (darwin), any terminal end (windows)
+	pty      *ptmx       // set for any end of a supervisor terminal (tty.go)
 	mem      *memFile    // set for a synthetic /proc or /sys file (no host file)
 	pipe     *pipeObj    // set for a pipe end: both ends, for reopening via /proc/<pid>/fd
 	fifo     *fifoRv     // set for a named-pipe end: its open rendezvous, to drop its count on close
@@ -1941,6 +1963,10 @@ func (g *dguest) fcntl(fd, cmd int64, arg uint64) int64 {
 			if e := d.pipe.io.resize(int32(n)); e != 0 {
 				return sErr(e)
 			}
+		} else if hfd, ok := d.hostFd(); ok {
+			if e := setHostPipeSize(hfd, int(n)); e != 0 {
+				return sErr(e)
+			}
 		}
 		d.pipeSize().Store(int32(n))
 		return n
@@ -1998,6 +2024,9 @@ func (g *dguest) fdStatOf(d *dfile) (lxStat, lxErrno) {
 	if d.fx.opath {
 		return g.statGuest(d.name())
 	}
+	if d.pty != nil {
+		return g.ptyStat(d)
+	}
 	if d.vf != nil { // a regular file, whatever backs it
 		return g.vfFstat(d)
 	}
@@ -2014,14 +2043,14 @@ func (g *dguest) fdStatOf(d *dfile) (lxStat, lxErrno) {
 			return lxStat{}, osErrno(err)
 		}
 		st := nodeStat(info.Attr(), info.ID())
-		if p := d.fx.perm.Load(); p&permSet != 0 {
+		if p := d.perm().Load(); p&permSet != 0 {
 			st.mode = st.mode&^0o7777 | p&0o7777
 		}
 		return st, 0
 	}
 	if d.vinfo != nil { // a mknod'd device or a directory: its vfs-node stat, not the raw backing fd's
 		st := nodeStat(d.vinfo.Attr(), d.vinfo.ID())
-		if p := d.fx.perm.Load(); p&permSet != 0 {
+		if p := d.perm().Load(); p&permSet != 0 {
 			st.mode = st.mode&^0o7777 | p&0o7777
 		}
 		return st, 0
@@ -2041,7 +2070,7 @@ func (g *dguest) fdStatOf(d *dfile) (lxStat, lxErrno) {
 		return anonStat(ino), 0
 	}
 	st := g.linuxStat(fi)
-	if p := d.fx.perm.Load(); p&permSet != 0 {
+	if p := d.perm().Load(); p&permSet != 0 {
 		st.mode = st.mode&^0o7777 | p&0o7777
 	}
 	return st, 0

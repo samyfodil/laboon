@@ -33,6 +33,7 @@ func (g *dguest) execve(dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	if e != 0 {
 		return fail(e)
 	}
+	defer t.drop()
 	host, prefix, skip, gp := t.src, t.prefix, t.skip, t.gp
 	// The dynamic linker is resolved from the process root and made a private
 	// copy through the Namespace, the same as the program (execTarget) was.
@@ -81,7 +82,7 @@ func (g *dguest) execve(dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	// reads how to place it here.
 	atomic.StoreUint32(&g.ch.page.alive, layout)
 	if respawn {
-		return g.execRespawn(host, interpHost, mainSites, interpSites, prefix, argvAddr, skip, envpAddr, gp, targetHvf)
+		return g.execRespawn(&t, host, interpHost, mainSites, interpSites, prefix, argvAddr, skip, envpAddr, gp, targetHvf)
 	}
 
 	strs := append([]string{host, interpHost, mainSites, interpSites}, prefix...)
@@ -101,7 +102,7 @@ func (g *dguest) execve(dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	g.closeExec() // drop close-on-exec fds; the rest survive the exec
 	execHook(g)
 	g.execDone(path.Base(gp))
-	g.noteExec(gp, gp, argv, nil)
+	g.noteExec(gp, gp, argv, g.exePin(&t))
 	g.dfs.mu.Lock()
 	c := g.ps.cred
 	g.dfs.mu.Unlock()
@@ -254,7 +255,7 @@ func (fs *dfs) isMainStub(ospid int) bool {
 // carry over. argv and envp are read from the old image first, so a bad
 // pointer still fails the call with EFAULT. A CLONE_VM child's old stub is
 // its parent's: only its thread there ends.
-func (g *dguest) execRespawn(host, interpHost, mainSites, interpSites string, prefix []string, argvAddr, skip, envpAddr uint64, gp string, targetHvf bool) bool {
+func (g *dguest) execRespawn(t *execTarget, host, interpHost, mainSites, interpSites string, prefix []string, argvAddr, skip, envpAddr uint64, gp string, targetHvf bool) bool {
 	fail := func(e lxErrno) bool {
 		g.ch.page.ret = errno(e)
 		return false
@@ -315,7 +316,7 @@ func (g *dguest) execRespawn(host, interpHost, mainSites, interpSites string, pr
 	}
 	g.takeOverGroup()
 	g.execDone(path.Base(gp))
-	g.noteExec(gp, gp, argv, nil)
+	g.noteExec(gp, gp, argv, g.exePin(t))
 
 	fs.mu.Lock()
 	c := g.ps.cred

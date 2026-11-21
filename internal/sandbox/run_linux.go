@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"syscall"
@@ -103,7 +102,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	}
 	defer fs.close()
 	if cfg.RootFS == nil {
-		if err := fs.bindProgram(prog); err != nil {
+		if prog, err = fs.bindProgram(prog); err != nil {
 			return 0, fmt.Errorf("laboon: program: %w", err)
 		}
 	}
@@ -173,11 +172,6 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	fs.run = &runInfo{stubFile: stubFile, chanFile: chanFile, life: lifeline, entryOff: entryOff,
 		pgid: cmd.Process.Pid, xfer: xferSup}
 	exe := path.Clean("/" + prog)
-	if cfg.RootFS == nil { // rootless: the program path is a host path
-		if exe, err = filepath.Abs(prog); err != nil {
-			return 0, err
-		}
-	}
 	fs.initProcfs(cmd.Process.Pid, exe, cfg.Args, cfg.Env, std.files)
 	fs.newInitProc(cmd.Process.Pid, prog, cfg.User)
 	fs.serveResize(std) // deliver terminal resizes (SIGWINCH) to the guest
@@ -230,7 +224,8 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	if err := boot(dg, src, argv, cfg.Env); err != nil {
 		return 0, err
 	}
-	publishControl(cfg, cmd.Process.Pid, fs)
+	leader := cmd.Process.Pid // every stub of the run is in its process group
+	publishControl(cfg, func() int { return leader }, fs)
 	defer revokeControl(cfg) // backstop for an early return before join()
 	code, err := serveGuest(dg)
 	if err == errLeaderGone {

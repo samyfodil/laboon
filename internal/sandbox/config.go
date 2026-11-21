@@ -20,6 +20,10 @@ import (
 // out-of-policy call); on macOS the Seatbelt allowlist denies.
 var ErrKilled = errors.New("guest killed by the syscall backstop: rejected syscall")
 
+// errNoBackstop refuses NoRewrite on a host with no syscall backstop to
+// mediate the guest's raw syscalls (windows/arm64).
+var errNoBackstop = errors.New("syscall rewriting cannot be turned off on this host: it has no syscall backstop")
+
 var defaultCache = sync.OnceValue(rewrite.DefaultCache)
 
 // discarded reports whether w is a standard output stream that goes to the
@@ -77,8 +81,11 @@ type Config struct {
 	// Cache memoizes rewriting by code content. Nil uses
 	// rewrite.DefaultCache, shared by all runs in this process.
 	Cache *rewrite.Cache
-	// NoRewrite skips syscall rewriting, to demonstrate that the stub's
-	// seccomp filter kills a guest whose syscalls reach the kernel.
+	// NoRewrite skips syscall rewriting, so every guest syscall is a raw one
+	// that reaches the host's backstop: on Linux and macOS it is served
+	// through the trap, as a rewritten site is; on windows/amd64 the
+	// instrumentation-callback backstop kills the guest (ErrKilled); and
+	// windows/arm64, which has no backstop, refuses to run (errNoBackstop).
 	NoRewrite bool
 	// RejectRWX refuses writable+executable guest memory: a mapping or
 	// protection change asking for both fails with EACCES (W^X). Without it
@@ -109,9 +116,9 @@ type Config struct {
 	// destination ports; any other port is refused. It applies on its own or
 	// together with the domain/CIDR rules.
 	AllowPorts []int
-	// MaxBytes caps the guest's memory (0 = unlimited): its mapped address
-	// space on Linux, its stubs' committed memory on Windows (the job's
-	// limit); not enforced on macOS.
+	// MaxBytes caps the guest's memory (0 = unlimited): its processes'
+	// mapped address space together on Linux and macOS, its stubs' committed
+	// memory on Windows (the job's limit).
 	MaxBytes uint64
 	// Control, if set, receives a handle to the running guest: its host leader
 	// pid and a way to signal its init process (Control.Pid / Control.Signal),

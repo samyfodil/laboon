@@ -62,7 +62,7 @@ func (r *procRun) startPooled(fs *dfs) *pooledStub {
 	if idx < 0 {
 		return nil
 	}
-	ch := &hostChan{channel: newChannel(fs.mem, idx, 0, fs.done, nil)}
+	ch := newHostChan(newChannel(fs.mem, idx, 0, fs.done, nil))
 	pg := ch.page
 	pg.state, pg.kind, pg.stubSleep, pg.supSleep, pg.rip, pg.alive = 0, 0, 0, 0, 0, 0
 	var err error

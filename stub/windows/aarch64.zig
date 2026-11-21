@@ -814,9 +814,10 @@ fn serveUdf(c: *win.CONTEXT) i32 {
     var f = Frame{ .x = c.DUMMYUNIONNAME.X, .nzcv = c.Cpsr, .resume_at = c.Pc + 4, .gsp = c.Sp, .q = undefined, .fpcr = c.Fpcr, .fpsr = c.Fpsr };
     for (&f.q, c.V) |*d, s| d.* = @bitCast(s);
     sigx.publishFrame(&f);
-    const t = sig.Trap{ .frame = &f, .gsp = c.Sp, .resume_at = c.Pc + 4, .site = c.Pc, .nr = f.x[8] };
+    var t = sig.Trap{ .frame = &f, .gsp = c.Sp, .resume_at = c.Pc + 4, .site = c.Pc, .nr = f.x[8] };
     const r = thread.serve(&t);
     c.DUMMYUNIONNAME.X[0] = sig.afterSyscall(&t, r);
+    c.Sp = t.gsp;
     c.Pc += 4;
     resumeGuest(c);
     return -1;
@@ -833,8 +834,9 @@ pub fn trapsAt(pc: u64) bool {
 pub fn serveSite(c: *sig.Ctx) void {
     c.pc += 4;
     var f: Frame = undefined;
-    const t = sigx.trapFromCtx(c, c.x[8], &f);
+    var t = sigx.trapFromCtx(c, c.x[8], &f);
     c.x[0] = sig.afterSyscall(&t, thread.serve(&t));
+    c.sp = t.gsp;
 }
 
 // enter starts guest code at entry on stack sp, as the kernel does at exec:

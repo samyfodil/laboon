@@ -2,12 +2,11 @@
 // goes, to what it does: it opens no path, binds and connects no socket, and
 // signals no process but its own (the supervisor serves the guest's kill).
 // Its seccomp filters already admit no call that names a path or a port, so
-// the file and network rules are a second fence; the scope is the one only
-// Landlock draws: a stub thread may send its kick signal with tgkill, which
-// seccomp cannot pin to the stub's own pid, so on a kernel without Landlock's
-// signal scope (ABI 6) a guest that reaches the stub's text can send SIGURG
-// to any process of the user. Every later thread and fork inherits the
-// domain. Without Landlock this does nothing.
+// the file and network rules are a second fence, as is the signal scope (ABI
+// 6): a guest thread's filter admits tgkill of the kick signal only to its own
+// process, but the base filter, which a fork inherits and so cannot name the
+// process, admits it to any. Every later thread and fork inherits the domain.
+// Without Landlock this does nothing.
 
 const stub = @import("stub.zig");
 const nr = stub.nr;

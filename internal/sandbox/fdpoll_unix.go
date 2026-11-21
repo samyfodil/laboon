@@ -45,7 +45,7 @@ func pollReqOf(d *dfile) (pollReq, bool) {
 	}
 	rfd, wfd := kqFds(d)
 	r := pollReq{rfd: rfd, wfd: wfd, xfd: vloFd(d)}
-	if d.ep == nil && d.ev == nil && d.tfd == nil {
+	if d.ep == nil && d.ev == nil && d.tfd == nil && d.pty == nil {
 		var st unix.Stat_t
 		if unix.Fstat(rfd, &st) == nil {
 			switch st.Mode & unix.S_IFMT {
@@ -280,10 +280,13 @@ func (g *dguest) selectFor(nfds int64, rAddr, wAddr, xAddr uint64, timeout time.
 
 // kqFds returns the host fds a kqueue watches for d's read and write
 // readiness. An eventfd's readiness lives on its pipe: read end for IN, write
-// end for OUT.
+// end for OUT; a terminal's on its side's two pipes (tty_unix.go).
 func kqFds(d *dfile) (rfd, wfd int) {
 	if d.ev != nil {
 		return hostFd(d.f), hostFd(d.ev.w)
+	}
+	if d.pty != nil {
+		return hostFd(d.f), d.pty.readyOut()
 	}
 	fd := hostFd(d.f)
 	return fd, fd

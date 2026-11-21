@@ -164,8 +164,12 @@ func vnetHalfOpen(d *dfile) bool {
 // is just masked to what the guest asked for, with HUP and ERR always
 // delivered. Because every result bit comes from a watch the guest requested
 // (or is HUP/ERR), a non-empty result never maps to zero, so pollFor never
-// mutes an fd here.
-func pollRevents(r pollRes, ev uint16, _ *dfile) uint16 {
+// mutes an fd here. A terminal's state is the supervisor's; its pipes only
+// wake the wait.
+func pollRevents(r pollRes, ev uint16, d *dfile) uint16 {
+	if d != nil && d.pty != nil {
+		return d.pty.pollState().mask & (ev | lxPollHup | lxPollErr)
+	}
 	var rev uint16
 	if r.in {
 		rev |= ev & (lxPollIn | lxPollRdnorm)

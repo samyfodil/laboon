@@ -20,6 +20,40 @@ type execTarget struct {
 	src    execSrc  // the ELF that runs, as the host reads it
 	prefix []string // argv a #! chain adds
 	skip   uint64   // guest argv entries the prefix replaces
+	elf    string   // the guest path of the ELF that runs, when it was found by path
+	from   *dfile   // the descriptor the ELF runs from (AT_EMPTY_PATH, proc-fd), referenced until drop or exePin
+}
+
+// drop releases the descriptor t holds, if exePin has not taken it.
+func (t *execTarget) drop() {
+	if t.from != nil {
+		t.from.unref()
+		t.from = nil
+	}
+}
+
+// exePin is what /proc/<pid>/exe holds of the program an exec ran: the
+// descriptor's file when it ran one (its name may be gone), else the file at
+// the ELF's path, opened for reading. nil leaves the link path-based.
+func (g *dguest) exePin(t *execTarget) *dfile {
+	if d := t.from; d != nil {
+		t.from = nil
+		if p := d.pinned; p != nil {
+			p.refs.Add(1)
+			d.unref()
+			d = p
+		}
+		if d.vf == nil {
+			d.unref()
+			return nil
+		}
+		return d
+	}
+	loc, err := g.vns().Resolve(t.elf, true)
+	if err != nil {
+		return nil
+	}
+	return g.pinOpen(t.elf, loc.Node)
 }
 
 const maxArgStrlen = 32 * 4096 // Linux's MAX_ARG_STRLEN
@@ -106,11 +140,15 @@ func (g *dguest) readCStrN(addr uint64, max int) (string, error) {
 	return string(b), nil
 }
 
-// takeOverGroup retires the process's other threads at an exec (the old stub,
-// and every thread in it, is already gone). A non-leader thread that execs
-// becomes the leader, with the process's pid as its tid, as on Linux; the old
-// leader's serve loop then ends without ending the process.
-func (g *dguest) takeOverGroup() {
+// takeOverGroup retires the process's other threads at an exec. A non-leader
+// thread that execs becomes the leader, with the process's pid as its tid, as
+// on Linux; the old leader's serve loop then ends without ending the process.
+// It returns the retired threads' channels: where they share the exec's stub,
+// their host threads must be gone before its address space is cleared. The
+// thread's robust list goes with its old image, as Linux drops it at exec.
+func (g *dguest) takeOverGroup() []*hostChan {
+	g.robust[0].Store(0)
+	g.robust[1].Store(0)
 	type wake struct {
 		tid  int
 		ch   *hostChan
@@ -152,10 +190,15 @@ func (g *dguest) takeOverGroup() {
 		fs.tracing.takeOver(g, old)
 	}
 	fs.mu.Unlock()
+	chs := make([]*hostChan, 0, len(wakes))
 	for _, w := range wakes {
 		fs.retire(w.tid, w.stop, w.ch)
+		if w.ch != nil {
+			chs = append(chs, w.ch)
+		}
 	}
 	fs.sigTakeOver(old, ps.tgid)
+	return chs
 }
 
 // execDirSuffix fails an exec path that ends in "/", "/." or "/..": its last
@@ -201,6 +244,9 @@ func (g *dguest) execDirSuffix(dirfd int64, prog string) lxErrno {
 // unmounts and unlinks the name before execing the fd). own reports whether the
 // loader must close the returned file after dup'ing it.
 func (g *dguest) descExec(d *dfile) (rf *os.File, own bool, e lxErrno) {
+	if d.pinned != nil {
+		return g.descExec(d.pinned)
+	}
 	if d.isDir || d.ev != nil || d.ep != nil || d.sk != nil || d.sf != nil || d.tfd != nil || d.pid != 0 {
 		return nil, false, lxEACCES
 	}
@@ -258,6 +304,7 @@ func (g *dguest) execTarget(dirfd int64, pathAddr, argvAddr uint64, flags int64)
 	var gp, filename string
 	var fexec *os.File // AT_EMPTY_PATH / proc-fd: run this open file, not whatever its path names now
 	var fexecOwn, fexecChecked bool
+	var from *dfile
 	switch {
 	case prog == "" && flags&lxAtEmptyPath == 0:
 		return fail(lxENOENT)
@@ -273,7 +320,7 @@ func (g *dguest) execTarget(dirfd int64, pathAddr, argvAddr uint64, flags int64)
 		if e != 0 {
 			return fail(e)
 		}
-		gp, filename, fexec, fexecOwn, fexecChecked = d.gp, fmt.Sprintf("/dev/fd/%d", dirfd), rf, own, true
+		gp, filename, fexec, fexecOwn, fexecChecked, from = d.gp, fmt.Sprintf("/dev/fd/%d", dirfd), rf, own, true, d
 	default:
 		if len(prog) >= 4096 {
 			return fail(lxENAMETOOLONG)
@@ -296,7 +343,7 @@ func (g *dguest) execTarget(dirfd int64, pathAddr, argvAddr uint64, flags int64)
 				if e != 0 {
 					return fail(e)
 				}
-				gp, filename, fexec, fexecOwn, fexecChecked = d.gp, prog, rf, own, true
+				gp, filename, fexec, fexecOwn, fexecChecked, from = d.gp, prog, rf, own, true, d
 				break
 			}
 		}
@@ -343,9 +390,13 @@ func (g *dguest) execTarget(dirfd int64, pathAddr, argvAddr uint64, flags int64)
 			if e := checkELF(head); e != 0 {
 				return fail(e)
 			}
-			t.src = s
+			t.src, t.elf = s, cur
 			if depth == 0 {
 				markSrcOwn(&t.src, fexecOwn) // the loader closes a reopened handle after dup
+				if from != nil {
+					from.refs.Add(1)
+					t.from = from
+				}
 			}
 			break
 		}

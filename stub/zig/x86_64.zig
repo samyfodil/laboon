@@ -28,7 +28,7 @@ pub const allowed = [_]stub.SYS{
     .getpid, .gettid,      .futex,          .rt_sigreturn, .rt_sigprocmask, .arch_prctl, .clone,
     .exit,  .exit_group,   .sigaltstack,    .tgkill,     .recvmsg,  .close,  .msync, .mincore,
     .clock_gettime, .clock_getres, .gettimeofday, .getrusage, .getcpu,
-    .rseq,          .restart_syscall,
+    .rseq,          .restart_syscall, .membarrier, .set_tid_address,
 };
 
 // guest is what a guest thread may call (seccomp.zig).

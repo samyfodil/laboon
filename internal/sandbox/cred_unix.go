@@ -41,6 +41,13 @@ func newCredLink(owner ucred) *credLink {
 	return &credLink{owner: [2]ucred{owner, owner}}
 }
 
+// setOwner records the process that holds the end on side.
+func (l *credLink) setOwner(side int, c ucred) {
+	l.mu.Lock()
+	l.owner[side] = c
+	l.mu.Unlock()
+}
+
 // sent records that the endpoint on side sent a message carrying creds c, for
 // its peer to receive. One slot per direction, not a queue: a connected pair's
 // peer is a single process, so the last sender's creds stand (SO_PASSCRED

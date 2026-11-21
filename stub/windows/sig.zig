@@ -227,7 +227,28 @@ const Tls = struct {
     restart_at: u64 = 0, // the syscall site a restart last resumed the guest at
     sleep_deadline: i64 = 0, // the rest of a relative sleep restart_syscall resumes (Linux's restart block), 0: none
     sleep_rem: u64 = 0,
+    win_stack: [3]u64 = .{ 0, 0, 0 }, // the OS thread's own TEB StackBase/StackLimit/DeallocationStack
 };
+
+// keepWinStack records the calling OS thread's own stack, which the TEB
+// describes until the guest's stack takes its place.
+pub fn keepWinStack() void {
+    tl().win_stack = .{ stub.arch.tebLoad(0x08), stub.arch.tebLoad(0x10), stub.arch.tebLoad(0x1478) };
+}
+
+pub fn winStack() [3]u64 {
+    return tl().win_stack;
+}
+
+// restoreWinStack puts the thread's own stack back in the TEB before it exits:
+// thread exit frees DeallocationStack, which must not be the guest's mapping.
+pub fn restoreWinStack() void {
+    const w = tl().win_stack;
+    if (w[0] == 0) return;
+    stub.arch.tebStore(0x08, w[0]);
+    stub.arch.tebStore(0x10, w[1]);
+    stub.arch.tebStore(0x1478, w[2]);
+}
 
 fn setBusy(on: u32) void {
     @atomicStore(u32, &thr().busy, on, .seq_cst);
@@ -728,9 +749,10 @@ pub fn resumeCtx(c: *Ctx, nr: u64, r: u64) noreturn {
 
 // forkChild sets up a fork child's only thread: the other threads, their
 // events (not inheritable) and futex waits are the parent's.
-pub fn forkChild(slot: usize, os_tid: u32, stub_sp: u64) void {
+pub fn forkChild(slot: usize, os_tid: u32, stub_sp: u64, win_stack: [3]u64) void {
     for (&tls_blocks) |*b| b.* = .{};
     @atomicStore(u32, &g_threads, 1, .seq_cst);
+    tls_blocks[slot].win_stack = win_stack;
     startThread(slot, os_tid);
     setThread(false, 0);
     setStubSp(stub_sp);

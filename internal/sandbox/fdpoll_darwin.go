@@ -62,7 +62,13 @@ func (g *dguest) hostPoll(reqs []pollReq, always []bool, timeout time.Duration, 
 			byKey[k] = append(byKey[k], i)
 			level[k] = level[k] || lvl
 		}
-		if r.in || r.pri || (r.hup && !r.wronly) {
+		if r.wronly {
+			// A pipe's write end is never readable and its gone reader is
+			// POLLERR, asked for or not: the write filter's EOF.
+			add(r.wfd, unix.EVFILT_WRITE, r.out)
+			continue
+		}
+		if r.in || r.pri || r.hup {
 			add(r.rfd, unix.EVFILT_READ, r.in || r.pri)
 		}
 		if r.xfd >= 0 && r.in {
@@ -169,7 +175,7 @@ func (g *dguest) hostPoll(reqs []pollReq, always []bool, timeout time.Duration, 
 						res[i].hup = true
 					}
 				case unix.EVFILT_WRITE:
-					res[i].out = true
+					res[i].out = reqs[i].out
 					if k.Flags&unix.EV_EOF != 0 {
 						res[i].err = true
 					}
@@ -202,6 +208,9 @@ func (g *dguest) pollHangup(d *dfile) (uint16, bool) {
 // events ev on d. A socket hangup is reinterpreted through sockPollState
 // because Darwin and Linux disagree on when a stream socket has hung up.
 func pollRevents(r pollRes, ev uint16, d *dfile) uint16 {
+	if d != nil && d.pty != nil {
+		return d.pty.pollState().mask & (ev | lxPollHup | lxPollErr)
+	}
 	var rev uint16
 	if r.in {
 		rev |= ev & (lxPollIn | lxPollRdnorm)

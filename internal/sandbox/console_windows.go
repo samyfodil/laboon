@@ -79,7 +79,7 @@ func (fs *dfs) attachConsole(g *dguest) {
 	}
 	c.setup()
 
-	d := fs.term.newDev(fs, g.netState())
+	d := fs.term.newDev(fs, &ttyHub{n: g.netState()}, -1)
 	d.con = c
 	d.sid, d.pgrp = 1, 1
 	d.slaves, d.slaveSeen = 1, true
@@ -219,7 +219,7 @@ func (c *console) pump(d *ttyDev) {
 // raises the signals they generate.
 func (c *console) input(d *ttyDev, in []byte) {
 	c.wmu.Lock()
-	d.n.mu.Lock()
+	d.mu.Lock()
 	if !d.ld.canon() {
 		in = in[:min(len(in), d.ld.room())]
 	}
@@ -227,7 +227,7 @@ func (c *console) input(d *ttyDev, in []byte) {
 	out := d.ld.takeOut(len(d.ld.out))
 	fg := d.pgrp
 	d.touch()
-	d.n.mu.Unlock()
+	d.mu.Unlock()
 	c.writeOut(out)
 	c.wmu.Unlock()
 	for _, s := range sigs {
@@ -240,10 +240,10 @@ func (c *console) input(d *ttyDev, in []byte) {
 func (c *console) write(d *ttyDev, b []byte) lxErrno {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	d.n.mu.Lock()
+	d.mu.Lock()
 	d.ld.output(b)
 	out := d.ld.takeOut(len(d.ld.out))
-	d.n.mu.Unlock()
+	d.mu.Unlock()
 	return c.writeOut(out)
 }
 
@@ -251,9 +251,9 @@ func (c *console) write(d *ttyDev, b []byte) lxErrno {
 func (c *console) flush(d *ttyDev) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	d.n.mu.Lock()
+	d.mu.Lock()
 	out := d.ld.takeOut(len(d.ld.out))
-	d.n.mu.Unlock()
+	d.mu.Unlock()
 	c.writeOut(out)
 }
 

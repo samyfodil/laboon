@@ -21,7 +21,6 @@ const (
 	wExitGroup    = 231
 	wGtod         = 96
 	wSetTid       = 218
-	wRobust       = 273
 	wSigAct       = 13
 	wSigMask      = 14
 	wSigAlt       = 131

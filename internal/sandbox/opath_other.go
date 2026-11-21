@@ -8,11 +8,9 @@ import (
 	"github.com/samyfodil/laboon/core"
 )
 
-// O_PATH (and executing a descriptor whose name is gone) is a Linux feature;
-// elsewhere an O_PATH fd stays path-based and a descriptor exec uses d.f.
+// The host has no O_PATH: an O_PATH fd of a regular file holds it open for
+// reading instead (pinOpen), and other objects stay path-based.
 func pinPathFD(core.Node) *os.File { return nil }
 
 func reopenReadable(*os.File) (*os.File, lxErrno)  { return nil, lxEACCES }
 func reopenMode(*os.File, int) (*os.File, lxErrno) { return nil, lxEACCES }
-
-func pinExeFD(*os.File) *os.File { return nil }

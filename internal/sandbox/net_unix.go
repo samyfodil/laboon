@@ -140,6 +140,7 @@ type dnet struct {
 	mu        sync.Mutex
 	seq       int
 	names     map[string][]byte      // host socket path -> guest sockaddr
+	conns     map[string]*credLink   // a connecting socket's hidden host name -> its connection's creds
 	nodeSocks map[core.NodeID]string // socket node -> the supervisor socket bound for it (bindPath)
 	dnsFrom   map[string]int         // family + server sockaddr -> sender fd
 	dnsPort   map[[2]int][]byte      // {family, sender port} -> server sockaddr
@@ -182,7 +183,7 @@ func (n *dnet) syncIPNetns(netns int32, m *netModel) {
 
 func (g *dguest) netState() *dnet {
 	g.dfs.netOnce.Do(func() {
-		n := &dnet{eg: newEgress(g.cfg), names: map[string][]byte{}, dnsFrom: map[string]int{}, dnsPort: map[[2]int][]byte{}, lent: map[[2]uint64]lent{}, vports: map[vkey]*vport{}, vudps: map[vkey]*vport{}, vconns: map[string]vconn{}, vEphem: 32768, ipNetns: map[uint32]int32{}}
+		n := &dnet{eg: newEgress(g.cfg), names: map[string][]byte{}, conns: map[string]*credLink{}, dnsFrom: map[string]int{}, dnsPort: map[[2]int][]byte{}, lent: map[[2]uint64]lent{}, vports: map[vkey]*vport{}, vudps: map[vkey]*vport{}, vconns: map[string]vconn{}, vEphem: 32768, ipNetns: map[uint32]int32{}}
 		if dir, err := os.MkdirTemp("/tmp", netTmpPrefix()); err == nil {
 			n.dir = dir
 		}
@@ -748,6 +749,10 @@ func (g *dguest) accept4(fd int64, addr, lenAddr uint64, flags int) int64 {
 				if c := g.netState().guestName(su.Name); c != nil {
 					peer = c
 				}
+				if cl := g.netState().takeConn(su.Name); cl != nil {
+					cl.setOwner(1, g.curCred())
+					nd.sk.cl, nd.sk.side = cl, 1
+				}
 			}
 			d.sk.mu.Lock()
 			nd.sk.name = d.sk.name
@@ -817,6 +822,9 @@ func (g *dguest) connect(fd int64, addr, addrlen uint64) int64 {
 	if sk.family == lxAFUnix {
 		reach, canon, e := g.unixTarget(raw)
 		if e != 0 {
+			return sErr(e)
+		}
+		if e := g.connCreds(d); e != 0 {
 			return sErr(e)
 		}
 		err := reach(func(sa *unix.SockaddrUnix) error { return unix.Connect(hfd, sa) })
@@ -893,6 +901,57 @@ func (g *dguest) connect(fd int64, addr, addrlen uint64) int64 {
 		return sErr(osErrno(err))
 	}
 	return 0
+}
+
+// connCreds gives an unnamed AF_UNIX stream socket about to connect a hidden
+// host name in the run's socket directory, under which its credentials wait
+// for the accept: the host stamps the supervisor on both ends, so the name is
+// how the accepted end learns its peer (SO_PEERCRED, SCM_CREDENTIALS). The
+// guest never sees it; its own name stays unnamed.
+func (g *dguest) connCreds(d *dfile) lxErrno {
+	sk := d.sk
+	sk.mu.Lock()
+	skip := sk.typ == lxSockDgram || sk.name != nil || sk.cl != nil || sk.unlink != ""
+	sk.mu.Unlock()
+	if skip {
+		return 0
+	}
+	n := g.netState()
+	n.mu.Lock()
+	n.seq++
+	host := filepath.Join(n.dir, fmt.Sprintf("c%x", n.seq))
+	n.mu.Unlock()
+	hfd := hostFd(d.f)
+	if err := n.bindUnix(hfd, host); err != nil {
+		return osErrno(err)
+	}
+	cl := newCredLink(g.curCred())
+	n.mu.Lock()
+	n.conns[host] = cl
+	if sa, err := unix.Getsockname(hfd); err == nil {
+		if su, ok := sa.(*unix.SockaddrUnix); ok && su.Name != "" {
+			n.conns[su.Name] = cl
+		}
+	}
+	n.mu.Unlock()
+	sk.mu.Lock()
+	sk.cl, sk.side, sk.unlink = cl, 0, host
+	sk.mu.Unlock()
+	return 0
+}
+
+// takeConn returns the credentials a connection from the socket bound at host
+// name carries, once: the accept that receives it.
+func (n *dnet) takeConn(name string) *credLink {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	cl := n.conns[name]
+	for k, v := range n.conns {
+		if v == cl {
+			delete(n.conns, k)
+		}
+	}
+	return cl
 }
 
 // awaitConnect parks a blocking connect until the handshake finishes, then
@@ -1081,7 +1140,7 @@ func (g *dguest) sockIoctl(d *dfile, req, arg uint64) (int64, bool) {
 	)
 	var dw uint
 	switch {
-	case req == lxFionread && d.f != nil && d.ev == nil && d.ep == nil && !d.isDir:
+	case req == lxFionread && d.f != nil && d.ev == nil && d.ep == nil && d.pty == nil && !d.isDir:
 		dw = hostFIONREAD
 	case req == lxSiocatmark && d.sk != nil:
 		dw = hostSIOCATMARK

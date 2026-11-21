@@ -324,7 +324,9 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 			// and can be re-opened for exec (fexecve) or stat, as Linux O_PATH
 			// does. A pseudo/synthetic node has no host file and stays path-based.
 			if loc, err := g.vns().Resolve(gp, false); err == nil {
-				d.pathFD = pinPathFD(loc.Node)
+				if d.pathFD = pinPathFD(loc.Node); d.pathFD == nil {
+					d.pinned = g.pinOpen(gp, loc.Node)
+				}
 			}
 		}
 		return g.installD(d, flags)
@@ -554,6 +556,27 @@ func (g *dguest) install(node core.Node, nf core.File, gp string, flags int64) i
 		d.f, d.hf = f, nf
 	}
 	return g.installD(d, flags)
+}
+
+// pinOpen opens the regular file node at gp for reading, in no fd table: what
+// an O_PATH descriptor or /proc/<pid>/exe holds where the host cannot pin a
+// file without opening it. Each reopen of it is a description of its own (a
+// Dup); nil if node is not a regular file or will not open for reading.
+func (g *dguest) pinOpen(gp string, node core.Node) *dfile {
+	if node.Kind() != core.Reg {
+		return nil
+	}
+	nf, err := node.Open(os.O_RDONLY)
+	if err != nil {
+		return nil
+	}
+	d := &dfile{gp: gp, stub: -1, vf: nf, vn: node, fs: g.dfs}
+	if _, host := hostFdOf(nf); host {
+		d.hf = nf
+	}
+	d.fx.oflags, d.fx.hasFlags = lxORdonly|lxOLargefile, true
+	d.refs.Store(1)
+	return d
 }
 
 func (g *dguest) installD(d *dfile, flags int64) int64 {

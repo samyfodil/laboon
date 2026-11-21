@@ -14,3 +14,13 @@ func fileIdent(hp string, _ os.FileInfo) (id uint64, nlink uint64, ok bool) {
 	}
 	return k.id, uint64(fi.NumberOfLinks), true
 }
+
+// pathDevIno is the identity a node of the file at hp reports: its volume serial
+// and file id, read from a handle as the walk's os.FileInfo carries neither.
+func pathDevIno(hp string, _ os.FileInfo) (dev, ino uint64) {
+	k, _, err := keyOf(hp)
+	if err != nil {
+		return 0, 0
+	}
+	return uint64(k.vol), k.id
+}
