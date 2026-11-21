@@ -810,10 +810,15 @@ func writeSeatbeltPaths(chanPath, root string) error {
 // stub. The supervisor's own architecture does not matter -- a native arm64
 // build hosts an x86-64 guest this way. Both get the patchStub Mach-O edits.
 func signedStubFor(x64 bool) (string, error) {
+	bin, prefix := macstub.BinaryArm64, "stub-"
 	if x64 {
-		return signAdhoc(patchStub(macstub.BinaryAmd64), "stubx64-")
+		bin, prefix = macstub.BinaryAmd64, "stubx64-"
 	}
-	return signAdhoc(patchStub(macstub.BinaryArm64), "stub-")
+	b, err := patchStub(bin)
+	if err != nil {
+		return "", err
+	}
+	return signAdhoc(b, prefix)
 }
 
 // signAdhoc writes bin to the user cache directory under its content hash,
@@ -943,30 +948,77 @@ func needsHvf(elfPath string) bool {
 // code uses x18 as an ordinary register, and Darwin zeroes x18 on context
 // switch except in binaries linked for an old OS, which Zig's SDK cannot link
 // (os_set_custom_x18_abi_enabled is not enough: the kernel drops that
-// per-thread opt-in on every block and core migration). And its
-// LC_FUNCTION_STARTS is emptied: Zig's linker writes entries pointing into the
-// Mach-O header, and Rosetta's ahead-of-time translation of the x86-64 stub
-// trusts them, decoding header bytes on into the first function of __text.
-func patchStub(bin []byte) []byte {
-	const lcBuildVersion = 0x32
-	const lcFunctionStarts = 0x26
-	const macos1012 = 10<<16 | 12<<8
+// per-thread opt-in on every block and core migration). Its LC_FUNCTION_STARTS
+// is emptied: Zig's linker writes entries pointing into the Mach-O header, and
+// Rosetta's ahead-of-time translation of the x86-64 stub trusts them.
+//
+// The x86-64 stub also gives the guest the low 4 GiB, where a non-PIE x86-64
+// program is linked (there is no HVF backend for it): __PAGEZERO shrinks to
+// Linux's mmap_min_addr and a last segment, inaccessible until the stub maps
+// into it, reserves the rest so Darwin places nothing of its own there. The
+// stub loads unslid (MH_PIE cleared), since a slide would move the reserve.
+// It goes last so the segment indices the bind opcodes name stay as they are;
+// the build leaves header room for it (build.sh -headerpad).
+func patchStub(bin []byte) ([]byte, error) {
+	const (
+		lcSegment64      = 0x19
+		lcBuildVersion   = 0x32
+		lcFunctionStarts = 0x26
+		macos1012        = 10<<16 | 12<<8
+		cpuX86_64        = 0x01000007
+		mhPIE            = 0x200000
+		segSize          = 72
+		lowGuest         = 0x10000
+		lowTop           = 4 << 30
+	)
 	b := append([]byte(nil), bin...)
 	le := binary.LittleEndian
-	ncmds := le.Uint32(b[16:])
+	x64 := le.Uint32(b[4:]) == cpuX86_64
+	ncmds, sizeofcmds := le.Uint32(b[16:]), le.Uint32(b[20:])
+	firstData := uint64(len(b))
+	pagezero := uint32(0)
 	off := uint32(32)
 	for i := uint32(0); i < ncmds; i++ {
 		cmd, size := le.Uint32(b[off:]), le.Uint32(b[off+4:])
-		if cmd == lcBuildVersion {
+		switch cmd {
+		case lcBuildVersion:
 			le.PutUint32(b[off+12:], macos1012) // minos
 			le.PutUint32(b[off+16:], macos1012) // sdk
-		}
-		if cmd == lcFunctionStarts {
+		case lcFunctionStarts:
 			le.PutUint32(b[off+12:], 0) // datasize
+		case lcSegment64:
+			if string(bytes.TrimRight(b[off+8:off+24], "\x00")) == "__PAGEZERO" {
+				pagezero = off
+			}
+			nsects := le.Uint32(b[off+64:])
+			for k := uint32(0); k < nsects; k++ {
+				sect := off + segSize + k*80
+				if o := uint64(le.Uint32(b[sect+48:])); o != 0 && o < firstData {
+					firstData = o
+				}
+			}
 		}
 		off += size
 	}
-	return b
+	if !x64 {
+		return b, nil
+	}
+	end := 32 + sizeofcmds
+	if pagezero == 0 || uint64(end)+segSize > firstData {
+		return nil, fmt.Errorf("x86-64 stub: no header room for the low guest reserve")
+	}
+	seg := b[end : end+segSize]
+	le.PutUint32(seg[0:], lcSegment64)
+	le.PutUint32(seg[4:], segSize)
+	copy(seg[8:24], "__LOWGUEST")
+	le.PutUint64(seg[24:], lowGuest)
+	le.PutUint64(seg[32:], lowTop-lowGuest)
+	le.PutUint32(seg[56:], 7) // maxprot rwx; initprot none
+	le.PutUint64(b[pagezero+32:], lowGuest)
+	le.PutUint32(b[16:], ncmds+1)
+	le.PutUint32(b[20:], sizeofcmds+segSize)
+	le.PutUint32(b[24:], le.Uint32(b[24:])&^mhPIE)
+	return b, nil
 }
 
 // headBytes reads up to n leading bytes of the host file at p, for the #! check.

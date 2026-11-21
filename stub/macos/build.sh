@@ -10,6 +10,6 @@ cd "$(dirname "$0")"
 ZIG=${ZIG:-/tmp/zig-linux-x86_64-0.13.0/zig}
 "$ZIG" build-exe -target aarch64-macos -lc -O ReleaseSmall \
 	-femit-bin=stub-arm64.bin stub.zig
-"$ZIG" build-exe -target x86_64-macos -lc -O ReleaseSmall \
+"$ZIG" build-exe -target x86_64-macos -lc -O ReleaseSmall -headerpad 0x200 \
 	-femit-bin=stub-amd64.bin stub.zig
 rm -f stub-arm64.bin.o stub-amd64.bin.o

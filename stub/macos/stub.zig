@@ -111,6 +111,9 @@ pub var g_tp_key: c_ulong = 0;
 var g_threads = std.atomic.Value(u32).init(1);
 
 const PAGE: u64 = tstate.page; // arm64 16 KiB; x86-64 4 KiB under Rosetta
+const ET_EXEC: u16 = 2;
+// LOW_TOP ends the low reserve the x86-64 stub holds for ET_EXEC programs.
+const LOW_TOP: u64 = 4 << 30;
 const SVC0: u32 = 0xd4000001;
 
 // Linux arm64 syscalls and clone flags the stub serves itself.
@@ -1903,6 +1906,7 @@ const Image = struct {
     phnum: u64,
     lo: u64 = 0, // the mapped image (without its island area)
     hi: u64 = 0,
+    exec: bool = false, // ET_EXEC: at its link address
 };
 
 // ElfSrc is where mapElf reads an image from: a file, or memory (the vDSO).
@@ -1967,11 +1971,20 @@ fn loadElf(src: ElfSrc, sites: []const u32, hint: u64, fixed: bool, isl: *Island
     if (minbase == std.math.maxInt(u64)) _exit(4);
     const imageLen = maxend - minbase;
 
-    const tail: u64 = if (fixed) 0 else ISLAND_CAP;
-    const at = if (hint == 0 and !fixed) mem.pickFree(imageLen + tail) else hint;
-    const rp = mmap(@ptrFromInt(at), imageLen + tail, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (if (fixed) MAP_FIXED else 0), -1, 0);
+    // An ET_EXEC goes where it is linked: replacing the low reserve the
+    // x86-64 stub keeps for it (sandbox patchStub), elsewhere only if free.
+    const exec = rd16(d, 16) == ET_EXEC;
+    const low = exec and maxend <= LOW_TOP;
+    const near = fixed or low;
+    const tail: u64 = if (near) 0 else ISLAND_CAP;
+    const at = if (exec) minbase else if (hint == 0 and !fixed) mem.pickFree(imageLen + tail) else hint;
+    const rp = mmap(@ptrFromInt(at), imageLen + tail, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (if (near) MAP_FIXED else 0), -1, 0);
     if (rp == null or rp == MAP_FAILED) return null;
     const rb: u64 = @intFromPtr(rp);
+    if (exec and rb != minbase) {
+        _ = munmap(rp.?, imageLen + tail);
+        return null;
+    }
     mem.noteImage(rb, rb + imageLen + tail);
     const region: [*]u8 = @ptrCast(rp);
     const bias = rb - minbase;
@@ -2019,7 +2032,7 @@ fn loadElf(src: ElfSrc, sites: []const u32, hint: u64, fixed: bool, isl: *Island
     // The islands go after the image, and for an image wider than a b reaches,
     // in arenas near its far sites too (Islands).
     isl.* = Islands{ .size = ISLAND_CAP };
-    if (!fixed) isl.add(rb + imageLen, ISLAND_CAP, 0);
+    if (!near) isl.add(rb + imageLen, ISLAND_CAP, 0);
     for (sites) |s| rewriteSite(isl, rb + s);
     isl.seal();
 
@@ -2062,7 +2075,7 @@ fn loadElf(src: ElfSrc, sites: []const u32, hint: u64, fixed: bool, isl: *Island
         if (mprotect(@ptrFromInt(rb + pg * PAGE), (run - pg) * PAGE, @intCast(protmap[pg])) != 0) _exit(6);
         pg = run;
     }
-    if (!fixed and mprotect(@ptrFromInt(rb + imageLen), ISLAND_CAP, PROT_READ | PROT_EXEC) != 0) _exit(6);
+    if (!near and mprotect(@ptrFromInt(rb + imageLen), ISLAND_CAP, PROT_READ | PROT_EXEC) != 0) _exit(6);
 
     // AT_PHDR: prefer an explicit PT_PHDR, else the first PT_LOAD spanning e_phoff.
     var phdrAddr: u64 = 0;
@@ -2088,7 +2101,7 @@ fn loadElf(src: ElfSrc, sites: []const u32, hint: u64, fixed: bool, isl: *Island
         }
     }
 
-    return .{ .base = bias, .entry = entry, .phdr = phdrAddr, .phent = e_phentsize, .phnum = e_phnum, .lo = rb, .hi = rb + imageLen };
+    return .{ .base = bias, .entry = entry, .phdr = phdrAddr, .phent = e_phentsize, .phnum = e_phnum, .lo = rb, .hi = rb + imageLen, .exec = exec };
 }
 
 // loadAndEnter maps the main guest ELF and, when interpPath is given (the ELF
@@ -2111,7 +2124,7 @@ fn loadAndEnter(path: [*:0]const u8, interpPath: ?[*:0]const u8, mainSites: [*:0
     // the mmap area, as Linux loads them.
     const main_img = mapElf(.{ .file = mf }, readSites(mainSites), if (interpPath != null) mem.hint_exe else 0);
     mf.close();
-    mem.placeBreak(if (interpPath != null) main_img.hi + ISLAND_CAP else mem.ET_DYN_BASE);
+    mem.placeBreak(if (main_img.exec) main_img.hi else if (interpPath != null) main_img.hi + ISLAND_CAP else mem.ET_DYN_BASE);
 
     var enter = main_img.entry;
     var atBase: u64 = 0;
