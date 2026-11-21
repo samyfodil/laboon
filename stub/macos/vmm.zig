@@ -956,7 +956,9 @@ pub const Vmm = struct {
                     @memcpy(window(ch)[0..n], (v.ram + @as(usize, @intCast(ch.args[0])))[0..n]);
                 }
             },
-            chan.REP_POKE => {
+            // The VM's RAM takes the write whatever the guest's page protection,
+            // as ptrace's does (REP_FORCEPOKE).
+            chan.REP_POKE, chan.REP_FORCEPOKE => {
                 ch.ret = @intFromBool(!guestMapped(ch.args[0], ch.args[1], v.ram_len));
                 if (ch.ret == 0) {
                     const n: usize = @intCast(ch.args[1]);
