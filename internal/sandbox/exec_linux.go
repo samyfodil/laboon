@@ -69,7 +69,7 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	defer exe.release()
 	var interp *image
 	if exe.interp != "" {
-		ip, e := dg.guestAbs(lxAtFdcwd, exe.interp)
+		ip, e := dg.walkAt(lxAtFdcwd, exe.interp, true)
 		if e != 0 {
 			return fail(e)
 		}

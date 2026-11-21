@@ -1032,22 +1032,6 @@ func indexByte(b []byte, c byte) int {
 // Linux's, so dirfd arguments must be compared against the Linux constant.
 const lxAtFdcwd = -100
 
-// guestAbs makes a guest path absolute against dirfd (AT_FDCWD is cwd).
-func (g *dguest) guestAbs(dirfd int64, p string) (string, lxErrno) {
-	dirfd = int64(int32(dirfd))
-	if path.IsAbs(p) {
-		return g.within(g.rootDir(), p), 0
-	}
-	if dirfd == lxAtFdcwd {
-		return g.within(g.getCwd(), p), 0
-	}
-	d, ok := g.ft.get(int(dirfd))
-	if !ok {
-		return "", lxEBADF
-	}
-	return g.within(d.name(), p), 0
-}
-
 // rootDir is the overlay-absolute directory the process sees as "/".
 func (g *dguest) rootDir() string {
 	if r := g.chrootRoot(); r != "" {
@@ -1056,65 +1040,46 @@ func (g *dguest) rootDir() string {
 	return "/"
 }
 
-// within joins rel onto the overlay-absolute directory base as the process
-// resolves it: from a base inside the process root, ".." stops at that root as
-// it does at "/". A base outside it (a directory opened before a chroot) climbs
-// freely, as on Linux.
-func (g *dguest) within(base, rel string) string {
-	if root := g.chrootRoot(); root != "" {
-		if r, ok := strings.CutPrefix(base, root); ok && (r == "" || r[0] == '/') {
-			if p := path.Clean("/" + r + "/" + rel); p != "/" {
-				return root + p
-			}
-			return root
-		}
-	}
-	return path.Clean(base + "/" + rel)
+// resolve follows symlinks in gp, an absolute path in the Namespace (already
+// joined onto the process root), and returns the symlink-free path it names. followLast controls
+// the final component (lstat/readlink/unlink don't follow).
+func (g *dguest) resolve(gp string, followLast bool) (string, lxErrno) {
+	w := namespace.Walk{Root: g.rootDir(), Start: "/", FollowLast: followLast}
+	return g.walk(w, strings.TrimLeft(gp, "/"))
 }
 
-// resolve follows symlinks in the guest namespace (an absolute target restarts
-// at the guest root, never the host's) and returns the symlink-free guest path.
-// followLast controls the final component (lstat/readlink/unlink don't follow).
-func (g *dguest) resolve(gp string, followLast bool) (string, lxErrno) {
-	parts := strings.Split(strings.TrimPrefix(path.Clean(gp), "/"), "/")
-	cur := "/"
-	hops := 0
-	for i := 0; i < len(parts); i++ {
-		p := parts[i]
-		if p == "" || p == "." {
-			continue
-		}
-		if p == ".." {
-			cur = g.within(cur, "..")
-			continue
-		}
-		next := path.Join(cur, p)
-		if i == len(parts)-1 && !followLast {
-			return next, 0
-		}
-		t, ok, magic := g.linkTarget(next)
-		if !ok {
-			cur = next
-			continue
-		}
-		if hops++; hops > 40 {
-			return "", lxELOOP
-		}
-		switch {
-		case path.IsAbs(t) && magic:
-			// A procfs magic link (/proc/<pid>/fd/*, exe, ...) names an already-open
-			// object and resolves the same whatever root the follower chrooted to.
-		case path.IsAbs(t):
-			t = g.within(g.rootDir(), t)
-		default:
-			t = g.within(cur, t)
-		}
-		rest := parts[i+1:]
-		parts = append(strings.Split(strings.TrimPrefix(path.Clean(t), "/"), "/"), rest...)
-		i = -1
-		cur = "/"
+// walk resolves p in the guest's Namespace as w says.
+func (g *dguest) walk(w namespace.Walk, p string) (string, lxErrno) {
+	gp, err := w.Path(g.vns(), p)
+	if err != nil {
+		return "", osErrno(err)
 	}
-	return cur, 0
+	return gp, 0
+}
+
+// walkAt resolves the guest path argument p, relative to dirfd, to the
+// symlink-free path it names.
+func (g *dguest) walkAt(dirfd int64, p string, followLast bool) (string, lxErrno) {
+	w := namespace.Walk{Root: g.rootDir(), FollowLast: followLast}
+	if !path.IsAbs(p) {
+		var e lxErrno
+		if w.Start, e = g.startDir(dirfd); e != 0 {
+			return "", e
+		}
+	}
+	return g.walk(w, p)
+}
+
+// startDir is the directory a relative path from dirfd starts at.
+func (g *dguest) startDir(dirfd int64) (string, lxErrno) {
+	if dirfd = int64(int32(dirfd)); dirfd == lxAtFdcwd {
+		return g.getCwd(), 0
+	}
+	d, ok := g.ft.get(int(dirfd))
+	if !ok {
+		return "", lxEBADF
+	}
+	return d.name(), 0
 }
 
 // linkTarget reads gp as a symlink through the overlay (upper wins, whiteouts
@@ -1156,13 +1121,10 @@ func (g *dguest) lookup(dirfd int64, pathAddr uint64, followLast bool) (string, 
 	if len(p) >= 4096 {
 		return "", lxENAMETOOLONG
 	}
-	gp, e := g.guestAbs(dirfd, p)
-	if e != 0 {
-		return "", e
-	}
 	// A trailing slash follows a final symlink and requires a directory.
 	slash := len(p) > 1 && p[len(p)-1] == '/'
-	if gp, e = g.resolve(gp, followLast || slash); e != 0 || !slash {
+	gp, e := g.walkAt(dirfd, p, followLast || slash)
+	if e != 0 || !slash {
 		return gp, e
 	}
 	if fi, e := g.lstatGuest(gp); e == 0 && !fi.IsDir() {
@@ -2439,6 +2401,9 @@ func osErrno(err error) lxErrno {
 	}
 	if errors.Is(err, core.ErrCrossDevice) {
 		return lxEXDEV
+	}
+	if errors.Is(err, core.ErrLoop) {
+		return lxELOOP
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		return lxENOENT

@@ -638,11 +638,8 @@ func (g *dguest) unixKey(raw []byte, create bool) (key any, canon []byte, e lxEr
 	if abstract {
 		return "@" + name, canon, 0
 	}
-	gp, e := g.guestAbs(lxAtFdcwd, name)
+	gp, e := g.walkAt(lxAtFdcwd, name, !create)
 	if e != 0 {
-		return nil, nil, e
-	}
-	if gp, e = g.resolve(gp, !create); e != 0 {
 		return nil, nil, e
 	}
 	if create {

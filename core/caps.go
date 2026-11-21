@@ -57,3 +57,12 @@ func IsReadOnly(fs FileSystem) bool { _, ok := fs.(ReadOnlyFS); return ok }
 type Layered interface {
 	Layer(n Node) (FileSystem, Node)
 }
+
+// MagicLinker is a symlink Node whose target names an object rather than a
+// path under the reader's root, as procfs's fd, cwd and exe links do. When
+// isPath, the target is a path in the namespace and resolves there whatever
+// root the reader has; otherwise (a "net:[4026531840]" token) the link resolves
+// to itself.
+type MagicLinker interface {
+	MagicLink() (target string, isPath bool)
+}

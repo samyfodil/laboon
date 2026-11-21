@@ -10,6 +10,7 @@ import (
 
 	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/filesystems/hostfs"
+	"github.com/samyfodil/laboon/internal/namespace"
 )
 
 // open(2) semantics over the overlay: openat/openat2 flags, O_PATH and
@@ -229,87 +230,23 @@ func (g *dguest) openat2(dirfd int64, pathAddr, howAddr, size uint64) int64 {
 
 // resolveHow resolves p against dirfd under openat2's RESOLVE_* restrictions.
 // IN_ROOT treats dirfd as the root; BENEATH refuses to leave it; NO_SYMLINKS
-// refuses any symlink. Without restrictions it is the ordinary lookup.
+// refuses any symlink and NO_MAGICLINKS a procfs magic link.
 func (g *dguest) resolveHow(dirfd int64, p string, follow bool, resolve uint64) (string, lxErrno) {
-	if resolve&(lxResolveBeneath|lxResolveInRoot|lxResolveNoSymlinks) == 0 {
-		gp, e := g.guestAbs(dirfd, p)
-		if e != 0 {
+	w := namespace.Walk{
+		Root:       g.rootDir(),
+		InRoot:     resolve&lxResolveInRoot != 0,
+		Beneath:    resolve&lxResolveBeneath != 0,
+		NoSymlinks: resolve&lxResolveNoSymlinks != 0,
+		NoMagic:    resolve&(lxResolveNoMagiclinks|lxResolveNoSymlinks) != 0,
+		FollowLast: follow,
+	}
+	if !path.IsAbs(p) || w.InRoot || w.Beneath {
+		var e lxErrno
+		if w.Start, e = g.startDir(dirfd); e != 0 {
 			return "", e
 		}
-		return g.resolve(gp, follow)
 	}
-	base := g.getCwd()
-	if dirfd = int64(int32(dirfd)); dirfd != lxAtFdcwd {
-		d, ok := g.ft.get(int(dirfd))
-		if !ok {
-			return "", lxEBADF
-		}
-		base = d.name()
-	}
-	top := g.rootDir()
-	root := top
-	scoped := resolve&(lxResolveBeneath|lxResolveInRoot) != 0
-	if scoped {
-		root = base
-		if path.IsAbs(p) {
-			if resolve&lxResolveBeneath != 0 {
-				return "", lxEXDEV
-			}
-			p = strings.TrimLeft(p, "/")
-		}
-	}
-	beneath := resolve&lxResolveBeneath != 0
-	parts := strings.Split(p, "/")
-	cur := base
-	if path.IsAbs(p) {
-		cur = root
-	}
-	hops := 0
-	under := func(x string) bool { return root == "/" || x == root || strings.HasPrefix(x, root+"/") }
-	for i := 0; i < len(parts); i++ {
-		c := parts[i]
-		if c == "" || c == "." {
-			continue
-		}
-		if c == ".." {
-			if cur == root || cur == top {
-				if beneath && cur == root {
-					return "", lxEXDEV
-				}
-				continue // ".." at the process root, or the IN_ROOT root, stays there
-			}
-			cur = path.Dir(cur)
-			continue
-		}
-		next := path.Join(cur, c)
-		if i == len(parts)-1 && !follow {
-			return next, 0
-		}
-		t, ok, _ := g.linkTarget(next)
-		if !ok {
-			cur = next
-			continue
-		}
-		if resolve&lxResolveNoSymlinks != 0 {
-			return "", lxELOOP
-		}
-		if hops++; hops > 40 {
-			return "", lxELOOP
-		}
-		if path.IsAbs(t) {
-			if beneath {
-				return "", lxEXDEV
-			}
-			cur = root
-			t = strings.TrimLeft(t, "/")
-		}
-		parts = append(strings.Split(t, "/"), parts[i+1:]...)
-		i = -1
-		if scoped && !under(cur) {
-			return "", lxEXDEV
-		}
-	}
-	return cur, 0
+	return g.walk(w, p)
 }
 
 func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {

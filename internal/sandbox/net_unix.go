@@ -458,7 +458,7 @@ func (g *dguest) unixTarget(raw []byte) (unixReach, []byte, lxErrno) {
 		p := n.abstractPath(g.ps.netns.Load(), name)
 		return func(op func(*unix.SockaddrUnix) error) error { return n.viaShort(p, op) }, canon, 0
 	}
-	gp, e := g.guestAbs(lxAtFdcwd, name)
+	gp, e := g.walkAt(lxAtFdcwd, name, true)
 	if e != 0 {
 		return nil, nil, e
 	}
@@ -602,11 +602,8 @@ func (g *dguest) bind(fd int64, addr, addrlen uint64) int64 {
 // bound at a supervisor path the node's identity finds (nodeSock). It returns
 // the address hfd was bound at, which the kernel reports for it.
 func (g *dguest) bindPath(hfd int, name string) (string, lxErrno) {
-	gp, e := g.guestAbs(lxAtFdcwd, name)
+	gp, e := g.walkAt(lxAtFdcwd, name, false)
 	if e != 0 {
-		return "", e
-	}
-	if gp, e = g.resolve(gp, false); e != 0 {
 		return "", e
 	}
 	if fi, e := g.lstatGuest(path.Dir(gp)); e != 0 {

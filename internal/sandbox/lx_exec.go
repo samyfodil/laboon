@@ -178,10 +178,7 @@ func (g *dguest) execDirSuffix(dirfd int64, prog string) lxErrno {
 			if base == "" {
 				base = "/"
 			}
-			gp, e := g.guestAbs(dirfd, base)
-			if e == 0 {
-				gp, e = g.resolve(gp, true)
-			}
+			gp, e := g.walkAt(dirfd, base, true)
 			if e != 0 {
 				return e
 			}
@@ -284,8 +281,8 @@ func (g *dguest) execTarget(dirfd int64, pathAddr, argvAddr uint64, flags int64)
 		if e := g.execDirSuffix(dirfd, prog); e != 0 {
 			return fail(e)
 		}
-		var e lxErrno
-		if gp, e = g.guestAbs(dirfd, prog); e != 0 {
+		lp, e := g.walkAt(dirfd, prog, false)
+		if e != 0 {
 			return fail(e)
 		}
 		// A /proc/<pid>/fd/<n> (or /dev/fd/<n>) that names an open file with no
@@ -293,7 +290,7 @@ func (g *dguest) execTarget(dirfd int64, pathAddr, argvAddr uint64, flags int64)
 		// descriptor, as execve of that magic link does on Linux. This is how
 		// laboon's own stub is launched (memfd + exec /proc/self/fd/N), so it
 		// lets a guest run laboon under laboon.
-		if loc, rerr := g.vns().Resolve(gp, false); rerr == nil {
+		if loc, rerr := g.vns().Resolve(lp, false); rerr == nil {
 			if d := fdOfPseudo(loc.Node); d != nil {
 				rf, own, e := g.descExec(d)
 				if e != 0 {
@@ -304,15 +301,11 @@ func (g *dguest) execTarget(dirfd int64, pathAddr, argvAddr uint64, flags int64)
 			}
 		}
 		if flags&lxAtSymlinkNofollow != 0 {
-			lp, e := g.resolve(gp, false)
-			if e != 0 {
-				return fail(e)
-			}
 			if _, isLink, _ := g.linkTarget(lp); isLink {
 				return fail(lxELOOP)
 			}
 		}
-		if gp, e = g.resolve(gp, true); e != 0 {
+		if gp, e = g.resolve(lp, true); e != 0 {
 			return fail(e)
 		}
 		filename = prog
@@ -384,11 +377,7 @@ func (g *dguest) execTarget(dirfd int64, pathAddr, argvAddr uint64, flags int64)
 		}
 		prefix = np
 		filename = interp
-		ip, e := g.guestAbs(lxAtFdcwd, interp)
-		if e != 0 {
-			return fail(e)
-		}
-		if cur, e = g.resolve(ip, true); e != 0 {
+		if cur, e = g.walkAt(lxAtFdcwd, interp, true); e != 0 {
 			return fail(e)
 		}
 	}

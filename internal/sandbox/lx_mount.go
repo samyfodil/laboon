@@ -176,11 +176,8 @@ func (g *dguest) mountOverlay(target, data string) int64 {
 // layer's files: the whiteout and opaque markers the nested union reads and
 // writes there are then its own, not hidden by the outer union.
 func (g *dguest) overlayLayer(p string) (core.FileSystem, lxErrno) {
-	gp, e := g.guestAbs(lxAtFdcwd, p)
+	gp, e := g.walkAt(lxAtFdcwd, p, true)
 	if e != 0 {
-		return nil, e
-	}
-	if gp, e = g.resolve(gp, true); e != 0 {
 		return nil, e
 	}
 	loc, err := g.vns().Resolve(gp, true)

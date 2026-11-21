@@ -193,7 +193,7 @@ func (ns *Namespace) ResolveOp(op, p string, followLast bool) (Loc, error) {
 func (ns *Namespace) resolve(p string, followLast bool, hops int) (Loc, error) {
 	if ns.genOf == nil || hops != 0 {
 		var crossed bool
-		return ns.walk(p, followLast, hops, &crossed, "")
+		return ns.walk(p, followLast, hops, &crossed, "", nil)
 	}
 	g := ns.genOf()
 	key := resolveKey{p: p, followLast: followLast}
@@ -206,7 +206,7 @@ func (ns *Namespace) resolve(p string, followLast bool, hops int) (Loc, error) {
 	}
 	ns.cacheMu.Unlock()
 	var crossed bool
-	loc, err := ns.walk(p, followLast, 0, &crossed, "")
+	loc, err := ns.walk(p, followLast, 0, &crossed, "", nil)
 	// Cache only a success that stayed within the versioned overlay root. Skip
 	// it if the walk crossed a mount (a dynamic fs like /proc is not covered by
 	// the overlay's generation, and a /proc/self/fd link can resolve back into
@@ -228,18 +228,94 @@ func (ns *Namespace) resolve(p string, followLast bool, hops int) (Loc, error) {
 	return loc, err
 }
 
-func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, floor string) (Loc, error) {
+// A Walk is how a process resolves a path: under its root, from a starting
+// directory, within the limits openat2 can ask for. Walk.Path resolves with it.
+type Walk struct {
+	Root       string // the process root: ".." stops there and an absolute path or symlink restarts there ("/" if empty)
+	Start      string // the directory a relative path starts from (Root if empty)
+	InRoot     bool   // resolve as if Start were the root (RESOLVE_IN_ROOT)
+	Beneath    bool   // fail with ErrCrossDevice on leaving Start (RESOLVE_BENEATH)
+	NoSymlinks bool   // fail with ErrLoop on any symlink (RESOLVE_NO_SYMLINKS)
+	NoMagic    bool   // fail with ErrLoop on a magic link (RESOLVE_NO_MAGICLINKS)
+	FollowLast bool   // follow a symlink in the final component
+}
+
+// walkOpts carries a Walk into walk; a nil one is a plain Resolve.
+type walkOpts struct {
+	root       string // clean absolute, "" for the namespace root
+	scoped     bool   // root is an openat2 scope: magic links are refused
+	beneath    bool
+	noSymlinks bool
+	noMagic    bool
+	missingOK  bool // a missing final component ends the walk at its path
+}
+
+// Path resolves p as w says and returns the symlink-free absolute path it
+// names, "/" for the root. The final component need not exist (its path is
+// returned for a create); every directory before it must. A procfs magic link
+// resolves to the object it names: a path in the namespace whatever the root,
+// or the link itself.
+func (w Walk) Path(ns *Namespace, p string) (string, error) {
+	root := strings.TrimSuffix("/"+clean(w.Root), "/")
+	start := root
+	if w.Start != "" {
+		start = strings.TrimSuffix("/"+clean(w.Start), "/")
+	}
+	o := &walkOpts{root: root, noSymlinks: w.NoSymlinks, noMagic: w.NoMagic, missingOK: true}
+	if w.InRoot || w.Beneath {
+		o.root, o.scoped, o.beneath = start, true, w.Beneath
+	}
+	p = strings.TrimRight(p, "/")
+	if path.IsAbs(p) {
+		if o.beneath {
+			return "", &fs.PathError{Op: "resolve", Path: p, Err: ErrCrossDevice}
+		}
+		start = o.root
+	}
+	if !o.scoped && o.root == "" && !o.noSymlinks && !o.noMagic && path.IsAbs(p) {
+		// The common case, an unchrooted absolute path: the cached Resolve
+		// answers whenever the path exists.
+		if loc, err := ns.resolve(p, w.FollowLast, 0); err == nil {
+			return absPath(loc.Path), nil
+		}
+	}
+	var crossed bool
+	loc, err := ns.walk(start+"/"+p, w.FollowLast, 0, &crossed, "", o)
+	if err != nil {
+		return "", err
+	}
+	return absPath(loc.Path), nil
+}
+
+func absPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	return p
+}
+
+func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, floor string, o *walkOpts) (Loc, error) {
 	cur := ns.at("")
 	// Split raw, not cleaned: path.Clean collapses "a/link/.." to "a" lexically,
 	// which skips following link. POSIX resolves ".." against the symlink target,
 	// so the walk must see each "." / ".." / "" component (handled below) rather
 	// than a pre-cleaned path.
 	parts := strings.Split(p, "/")
+	last := len(parts) - 1
+	for last > 0 && parts[last] == "" {
+		last-- // a trailing slash leaves the final name the last component
+	}
 	for i, name := range parts {
 		switch name {
 		case "", ".":
 			continue
 		case "..":
+			if o != nil && cur.Path == o.root {
+				if o.beneath {
+					return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: ErrCrossDevice}
+				}
+				continue // ".." at the process root stays there
+			}
 			par := parent(cur.Path)
 			if floor != "" && len(par) < len(floor) {
 				par = floor // a confined symlink's "../" cannot climb above the instance root
@@ -265,12 +341,42 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, fl
 		}
 		child, err := cur.FS.Lookup(cur.Node, name)
 		if err != nil {
+			if o != nil && o.missingOK && i >= last && errors.Is(err, fs.ErrNotExist) {
+				return Loc{FS: cur.FS, Path: childPath}, nil
+			}
 			return Loc{}, err
 		}
-		last := i == len(parts)-1
-		if child.Kind() == Symlink && (!last || followLast) {
+		isLast := i >= last
+		if child.Kind() == Symlink && (!isLast || followLast) {
+			if o != nil && o.noSymlinks {
+				return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: ErrLoop}
+			}
 			if hops++; hops > maxSymlinkHops {
-				return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: errLoop}
+				return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: ErrLoop}
+			}
+			// A magic link names an object (an absolute target, or a token); a
+			// relative target on a MagicLinker is an ordinary symlink (/proc/self).
+			if m, ok := child.(MagicLinker); ok && o != nil {
+				if tgt, isPath := m.MagicLink(); !isPath || path.IsAbs(tgt) {
+					switch {
+					case o.noMagic:
+						return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: ErrLoop}
+					case o.scoped:
+						return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: ErrCrossDevice}
+					case !isPath:
+						if !isLast {
+							return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: ErrNotDir}
+						}
+						cur = Loc{FS: cur.FS, Node: child, Path: childPath}
+						continue
+					}
+					next, err := ns.walk(tgt, true, hops, crossed, "", o.forLink(isLast))
+					if err != nil {
+						return Loc{}, err
+					}
+					cur = next
+					continue
+				}
 			}
 			tgt, err := child.Readlink()
 			if err != nil {
@@ -280,26 +386,36 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, fl
 			// boundary: its links resolve relative to its own mount point, so an
 			// absolute target restarts there and "../" cannot climb out. Any other
 			// filesystem keeps Linux semantics — an absolute target restarts at the
-			// namespace root — which is what a guest tmpfs needs.
+			// process root — which is what a guest tmpfs needs.
 			symFloor := floor
 			if c, ok := cur.FS.(Confined); ok && c.Confined() {
 				symFloor = ns.mountPointOf(cur.Path)
 			}
 			base := cur.Path
 			if path.IsAbs(tgt) {
-				base = symFloor
+				switch {
+				case symFloor != "":
+					base = symFloor
+				case o != nil && o.beneath:
+					return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: ErrCrossDevice}
+				case o != nil:
+					base = o.root
+				default:
+					base = ""
+				}
 			}
 			target := join(base, tgt)
-			if symFloor != "" {
-				// Confined: walk the uncleaned path so the walk's floor-clamped "../"
-				// handling resolves it, instead of join collapsing "../" lexically —
-				// which would let a relative target escape the instance root.
+			if symFloor != "" || o != nil {
+				// Confined, or under a process root: walk the uncleaned path so the
+				// walk's clamped "../" handling resolves it, instead of join
+				// collapsing "../" lexically — which would let a relative target
+				// escape the root.
 				target = base + "/" + tgt
 			}
 			// Resolve the target with walk, not resolve: hops>0 never caches, and
 			// passing crossed through propagates a mount a symlink target traverses
 			// (e.g. a /proc/self/fd link) so the outer result is not cached.
-			next, err := ns.walk(target, true, hops, crossed, symFloor)
+			next, err := ns.walk(target, true, hops, crossed, symFloor, o.forLink(isLast))
 			if err != nil {
 				return Loc{}, err
 			}
@@ -309,6 +425,18 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, fl
 		cur = Loc{FS: cur.FS, Node: child, Path: childPath}
 	}
 	return cur, nil
+}
+
+// forLink is o for the walk of a symlink's target: its final component may be
+// missing only when the link was the path's last (a create through a dangling
+// link makes the target).
+func (o *walkOpts) forLink(last bool) *walkOpts {
+	if o == nil || !o.missingOK || last {
+		return o
+	}
+	c := *o
+	c.missingOK = false
+	return &c
 }
 
 // MountOf returns the mount point covering the clean absolute path p (the
@@ -377,5 +505,3 @@ func join(base, name string) string { return "/" + clean(base+"/"+name) }
 func fastJoin(base, name string) string { return base + "/" + name }
 
 func clean(p string) string { return strings.Trim(path.Clean("/"+p), "/") }
-
-var errLoop = errors.New("vfs: too many symlink levels")

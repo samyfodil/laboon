@@ -37,7 +37,7 @@ func (g *dguest) execve(dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	// The dynamic linker is resolved from the process root and made a private
 	// copy through the Namespace, the same as the program (execTarget) was.
 	linkerHost := func(ip string) (string, error) {
-		gp, e := g.guestAbs(lxAtFdcwd, ip)
+		gp, e := g.walkAt(lxAtFdcwd, ip, true)
 		if e == 0 {
 			var s execSrc
 			if s, e = g.execSource(gp, nil); e == 0 {

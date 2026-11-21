@@ -59,7 +59,9 @@ func Internal(name string) bool {
 	return name == MetaFileName || strings.HasPrefix(name, WhiteoutPrefix)
 }
 
-var errLoop = errors.New("vfs: too many symlink levels")
+// ErrLoop is returned when a path meets too many symlinks, or a symlink the
+// walk was told not to follow; callers map it to ELOOP.
+var ErrLoop = errors.New("vfs: too many symlink levels")
 
 // ErrNotDir is returned when a path descends through a non-directory component;
 // callers map it to the platform's ENOTDIR.

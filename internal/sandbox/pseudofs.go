@@ -136,6 +136,13 @@ func (n *pnodeNode) SetAttr(core.AttrUpdate) error { return pseudoROFS("setattr"
 func (n *pnodeNode) Readlink() (string, error)     { return n.n.target, nil }
 func (n *pnodeNode) Open(int) (core.File, error)   { return nil, errPseudoOpen }
 
+// MagicLink makes procfs's links magic: an fd object or a "net:[id]" token
+// resolves to the link itself, an absolute target names its object by its full
+// path whatever the reader's root.
+func (n *pnodeNode) MagicLink() (string, bool) {
+	return n.n.target, n.n.kind == pLink && !magicTarget(n.n.target)
+}
+
 // devFS is the /dev mount: a union of the synthetic device nodes (null, zero,
 // pts, ...) over the overlay's own /dev (console, shm, whatever the guest made
 // there). A synthetic name wins; every other name comes from the overlay. Like
