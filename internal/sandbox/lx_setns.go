@@ -3,7 +3,6 @@
 package sandbox
 
 import (
-	"path"
 	"strings"
 )
 
@@ -92,19 +91,22 @@ func (fs *dfs) nsBindNetns(p string) (int32, bool) {
 	return ns, ok
 }
 
-// isNsPath reports whether p names a namespace file under /proc (…/ns/net and
-// its siblings), the source of a namespace bind-mount.
-func isNsPath(p string) bool {
-	p = path.Clean(p)
-	if !strings.HasPrefix(p, "/proc/") {
+// nsFile reports whether the path at srcAddr names a namespace file
+// (/proc/<pid>/ns/net and its siblings, as a proc mount serves them), the
+// source of a namespace bind-mount.
+func (g *dguest) nsFile(srcAddr uint64) bool {
+	gp, e := g.lookup(lxAtFdcwd, srcAddr, true)
+	if e != 0 {
 		return false
 	}
-	dir, base := path.Split(p)
-	switch base {
-	case "net", "uts", "ipc", "pid", "mnt", "cgroup", "user", "time",
-		"pid_for_children", "time_for_children":
-	default:
+	n, e, ok := g.pseudo(gp)
+	if !ok || e != 0 || n.kind != pLink || !magicTarget(n.target) {
 		return false
 	}
-	return strings.HasSuffix(path.Clean(dir), "/ns")
+	kind, _, _ := strings.Cut(n.target, ":")
+	switch kind {
+	case "net", "uts", "ipc", "pid", "mnt", "cgroup", "user", "time":
+		return true
+	}
+	return false
 }

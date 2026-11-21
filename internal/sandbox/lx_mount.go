@@ -93,7 +93,7 @@ func (g *dguest) mount(srcAddr, tgtAddr, fsAddr, flags, dataAddr uint64) int64 {
 		return sErr(e)
 	}
 	if flags&msBind != 0 {
-		if s, err := g.readCStr(srcAddr); err == nil && isNsPath(s) {
+		if g.nsFile(srcAddr) {
 			// A container runtime persists a network namespace by bind-mounting
 			// /proc/<pid>/ns/net onto a file under /run/netns. laboon models a
 			// namespace as an id, not a bind-mountable nsfs file; the target
