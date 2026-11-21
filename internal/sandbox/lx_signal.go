@@ -605,7 +605,21 @@ func (fs *dfs) sigTakeOver(tid, tgid int) {
 	nt := newSigThread(tgid, tgid, me.slot)
 	sr.sq.Lock()
 	nt.q.bits, nt.q.info, nt.q.rt = me.q.bits, me.q.info, me.q.rt
+	if p.slot != me.slot {
+		// The process's record moves into the survivor's slot: the old
+		// leader's slot is freed once its serve loop ends.
+		from, to := pOff(p.slot), pOff(me.slot)
+		sr.st(to+spMem, sr.ld(from+spMem))
+		sr.st(from+spPending, 0)
+		sr.st(from+spMem, 0)
+		p.slot, p.q.mirror = me.slot, to+spPending
+		sr.st(p.q.mirror, p.q.word())
+	}
 	sr.sq.Unlock()
+	o := tOff(me.slot)
+	atomic.StoreUint32(sr.p32(o+stProc), uint32(me.slot))
+	atomic.StoreUint32(sr.p32(o+stTid), uint32(tgid))
+	atomic.StoreUint32(sr.p32(o+stTgid), uint32(tgid))
 	p.threads = []*sigThread{nt}
 	sr.threads[tgid] = nt
 }
