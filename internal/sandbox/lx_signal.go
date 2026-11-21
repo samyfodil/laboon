@@ -992,6 +992,7 @@ func (sr *sigRun) parkStopped(g *dguest, t *sigThread) bool {
 	if !parked() {
 		return false
 	}
+	sr.parkCond.Broadcast() // a stop waits for its threads to park (parkStop)
 	for parked() {
 		if !g.condWaitIntrMask(sr.parkCond, sigBit(sigKILL)) {
 			break
