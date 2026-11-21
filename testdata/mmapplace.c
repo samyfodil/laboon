@@ -7,6 +7,7 @@
 // not x86-64); mremap grows in place when it can, and the break moves down.
 // Build it static-pie.
 #define _GNU_SOURCE
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -67,7 +68,18 @@ int main(int argc, char **argv) {
 	// mappings top-down below it.
 	unsigned long sp = (unsigned long)&pg;
 #ifdef __x86_64__
+	// STACK_TOP is the task size, 0x7ffffffff000 unless the system keeps the
+	// top of the space (Rosetta does): the end of what a fixed mapping may
+	// reach, beyond which it fails with ENOMEM.
 	unsigned long stop = 0x7ffffffff000UL, reach = 1UL << 34;
+	for (;;) {
+		void *q = mmap((void *)(stop - pg), pg, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+		if (q != MAP_FAILED)
+			munmap(q, pg);
+		if (q != MAP_FAILED || errno != ENOMEM || stop <= sp)
+			break;
+		stop -= 1UL << 30;
+	}
 #else
 	// STACK_TOP is the task size, one of those an arm64 kernel offers with
 	// the page size it runs: the smallest above the stack.

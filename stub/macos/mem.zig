@@ -166,6 +166,7 @@ const L_SHARED_VALIDATE: u64 = 0x03;
 const L_TYPE: u64 = 0x0f;
 const L_FIXED: u64 = 0x10;
 const L_ANON: u64 = 0x20;
+const L_32BIT: u64 = 0x40; // x86-64 only
 const L_GROWSDOWN: u64 = 0x100;
 const L_DENYWRITE: u64 = 0x800;
 const L_EXECUTABLE: u64 = 0x1000;
@@ -899,7 +900,7 @@ fn placeAt(addr: u64, n: u64, prot: u64, dw: u64, fd: i64, off: u64, noreplace: 
         const at = pick(addr & ~(PAGE - 1), n, anon);
         if (!held) lock.unlock();
         const want = at orelse return neg(ENOMEM);
-        const r = sys(SYS_mmap, want, n, prot, dw, @bitCast(fd), off);
+        const r = sys(SYS_mmap, want, n, prot, dw | (if (inLow(want, want + n)) D_FIXED else 0), @bitCast(fd), off);
         if (r < 0) return lx(r);
         const got: u64 = @bitCast(r);
         if (got == want) {
@@ -1083,6 +1084,14 @@ fn mmap(addr: u64, len: u64, prot_in: u64, flags: u64, fd: u64, off: u64) u64 {
     const noreplace = flags & L_FIXED_NOREPLACE != 0;
     const fixed = !noreplace and flags & L_FIXED != 0;
     if ((fixed or noreplace) and addr & (PAGE - 1) != 0) return neg(EINVAL);
+    if ((fixed or noreplace) and (addr > guest_top or n > guest_top - addr)) return neg(ENOMEM);
+    var hint = addr;
+    if (X86 and flags & L_32BIT != 0 and !fixed and !noreplace) {
+        lock.lock();
+        const at = bottomUp(n, LOW32_LO, LOW32_TOP);
+        lock.unlock();
+        hint = at orelse return neg(ENOMEM);
+    }
     const shared = typ != L_PRIVATE;
     var r: u64 = undefined;
     var file = false;
@@ -1091,7 +1100,7 @@ fn mmap(addr: u64, len: u64, prot_in: u64, flags: u64, fd: u64, off: u64) u64 {
     wx.hold();
     defer wx.release();
     if (flags & L_ANON != 0) {
-        r = mapAnon(addr, n, prot, flags, shared, fixed, noreplace);
+        r = mapAnon(hint, n, prot, flags, shared, fixed, noreplace);
     } else {
         const wshared: u64 = @intFromBool(shared and prot & PROT_WRITE != 0);
         // A file mapped shared and executable: the supervisor's writes to it
@@ -1100,10 +1109,10 @@ fn mmap(addr: u64, len: u64, prot_in: u64, flags: u64, fd: u64, off: u64) u64 {
         const k = root.hostCall(LC_MMAPFD, .{ fd, wshared, code, 0, 0, 0 });
         if (isErr(k)) return k;
         if (k >> 32 == KIND_ZERO) {
-            r = mapAnon(addr, n, prot, flags, shared, fixed, noreplace);
+            r = mapAnon(hint, n, prot, flags, shared, fixed, noreplace);
         } else {
             file = true;
-            r = mapFile(addr, n, prot, shared, fixed, noreplace, @intCast(k & 0xffffffff), fd, off);
+            r = mapFile(hint, n, prot, shared, fixed, noreplace, @intCast(k & 0xffffffff), fd, off);
         }
     }
     if (!isErr(r)) {
@@ -1480,7 +1489,10 @@ fn munmap(addr: u64, len: u64) u64 {
     // wx learns of the unmap before another thread's mapping can land there.
     wx.hold();
     defer wx.release();
-    const r = sys(SYS_munmap, addr, n, 0, 0, 0, 0);
+    const r = if (inLow(addr, addr + n))
+        sys(SYS_mmap, addr, n, 0, D_PRIVATE | D_ANON | D_FIXED | D_NORESERVE, @bitCast(@as(i64, -1)), 0)
+    else
+        sys(SYS_munmap, addr, n, 0, 0, 0, 0);
     if (r < 0) return lx(r);
     dropped(addr, addr + n);
     flushGone();
@@ -1813,8 +1825,23 @@ fn dup(old: u64, nn: u64, flags: u64, new_addr: u64) u64 {
 // from GUEST_BASE, and above it from TOP_LO.
 pub const GUEST_TOP: u64 = 0x6000_0000_0000;
 
+// LOW_LO and LOW_TOP bound the x86-64 stub's low reserve, the guest's own
+// (sandbox patchStub).
+const LOW_LO: u64 = 0x10000;
+// MAP_32BIT goes in the second gigabyte, as x86-64 Linux puts it.
+const LOW32_LO: u64 = 1 << 30;
+const LOW32_TOP: u64 = 2 << 30;
+const LOW_TOP: u64 = 4 << 30;
+
+// inLow reports [lo, hi) inside the low reserve: what the guest leaves there
+// goes back to the reserve rather than to Darwin.
+fn inLow(lo: u64, hi: u64) bool {
+    return X86 and lo >= LOW_LO and hi <= LOW_TOP;
+}
+
 pub fn inWindow(lo: u64, hi: u64) bool {
-    return lo >= GUEST_BASE and hi <= GUEST_TOP or lo >= TOP_LO and hi <= HOST_TOP;
+    return lo >= GUEST_BASE and hi <= GUEST_TOP or lo >= TOP_LO and hi <= HOST_TOP or
+        inLow(lo, hi);
 }
 
 pub const RegionKind = enum(u32) { copy, share, empty, jit };
@@ -2055,7 +2082,9 @@ fn brk(addr: u64) u64 {
     lock.lock();
     defer lock.unlock();
     if (brk_base == 0) {
-        const r = sys(SYS_mmap, if (brk_hint != 0) brk_hint else GUEST_BASE, BRK_RESERVE, 0, D_PRIVATE | D_ANON | D_NORESERVE, @bitCast(@as(i64, -1)), 0);
+        const at = if (brk_hint != 0) brk_hint else GUEST_BASE;
+        const own = inLow(at, at + BRK_RESERVE) and clear(at, at + BRK_RESERVE);
+        const r = sys(SYS_mmap, at, BRK_RESERVE, 0, D_PRIVATE | D_ANON | D_NORESERVE | (if (own) D_FIXED else 0), @bitCast(@as(i64, -1)), 0);
         if (r < 0) return 0;
         brk_base = @bitCast(r);
         takenAdd(brk_base, brk_base + BRK_RESERVE);
