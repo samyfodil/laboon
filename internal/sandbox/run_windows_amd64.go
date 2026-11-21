@@ -114,7 +114,7 @@ func (r *imageRewriter) place(areas []trampArea) {
 
 // imageSalt names the image analysis in cache keys; change it whenever
 // analyzeImage would give a different plan for the same file.
-const imageSalt = "windows-amd64-image-2"
+const imageSalt = "windows-amd64-image-3"
 
 // imagePlan is the plan of every executable segment of src, by its file
 // identity when it has one, else by its contents, with offsets from the
@@ -216,6 +216,9 @@ func (r *imageRewriter) segment(seg []byte, vaddr, elfVaddr uint64) {
 	}
 	for _, s := range r.plan.FS {
 		if o := uint64(s.Off); o >= lo && o+uint64(s.Len) <= hi {
+			if o-uint64(s.Steal) < lo {
+				s.Steal = 0
+			}
 			s.Off = uint32(o - lo)
 			sp.FS = append(sp.FS, s)
 		}

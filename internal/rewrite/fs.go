@@ -8,55 +8,76 @@ import (
 // to 0 on every reschedule) keep it in a per-thread slot at a fixed %gs
 // offset instead, and every %fs-relative guest instruction is rewritten to an
 // island that computes the address from that slot. An instruction too short
-// for the 5-byte jmp (or in a form the island cannot express) is left as is:
-// it faults at a low address and the stub emulates it.
+// for the 5-byte jmp moves into its island with the run of instructions before
+// it, or reaches it through a cave, as a syscall site does; one with neither
+// (or in a form the island cannot express) is left as is: it faults at a low
+// address and the stub emulates it. Windows raises that fault on the thread's
+// own stack, writing below a Go goroutine's 2 KiB into its neighbour's, so a
+// site is left only as a last resort.
 
 // fsIslandMax bounds an island: the spill and reload of a scratch register,
 // the thread-pointer load, the re-encoded instruction and the jump back.
 const fsIslandMax = 64
 
-// FSSite is an instruction with an %fs segment override.
+// FSSite is an instruction with an %fs segment override. Steal, for one too
+// short for the jmp, is the length of the run before it that can move into its
+// island (as Site's), else 0; with none, Cave may be the offset from Off of a
+// five-byte slot of padding no path reaches, within a two-byte jmp of it.
 type FSSite struct {
-	Off uint32
-	Len uint8
+	Off   uint32
+	Len   uint8
+	Steal uint8
+	Cave  int16
 }
 
 // AnalyzeFS finds %fs-relative instructions by a linear sweep.
 func AnalyzeFS(code []byte) []FSSite {
 	var sites []FSSite
+	t := tail{long: -1}
 	for off := 0; off < len(code); {
 		if n := endbrLen(code[off:]); n > 0 {
 			off += n
+			t.long = -1
 			continue
 		}
 		in := x86decode(code[off:])
 		if !in.ok {
 			off++
+			t.long = -1
 			continue
 		}
 		if in.fsMem {
-			sites = append(sites, FSSite{Off: uint32(off), Len: uint8(in.len)})
+			sites = append(sites, fsSite(off, in, &t))
 		}
+		t.add(in, off)
 		off += in.len
 	}
 	return sites
 }
 
+// fsSite records the %fs instruction in at off, with the run before it a jmp
+// can take when the instruction itself is too short for one.
+func fsSite(off int, in x86inst, t *tail) FSSite {
+	s := FSSite{Off: uint32(off), Len: uint8(in.len)}
+	if in.len < 5 {
+		s.Steal = t.steal(off)
+	}
+	return s
+}
+
 // FS memoizes AnalyzeFS by code content.
 func (c *Cache) FS(code []byte) []FSSite {
-	if len(code) >= 1<<28 { // the packed encoding holds a 28-bit offset
-		return AnalyzeFS(code)
-	}
-	offs, _ := c.Offsets("fs-sites-1", code, func() ([]uint32, error) {
+	offs, _ := c.Offsets("fs-sites-2", code, func() ([]uint32, error) {
 		var o []uint32
 		for _, s := range AnalyzeFS(code) {
-			o = append(o, s.Off<<4|uint32(s.Len))
+			o = append(o, s.Off, uint32(s.Len)|uint32(s.Steal)<<8)
 		}
 		return o, nil
 	})
-	sites := make([]FSSite, len(offs))
-	for i, o := range offs {
-		sites[i] = FSSite{Off: o >> 4, Len: uint8(o & 15)}
+	sites := make([]FSSite, len(offs)/2)
+	for i := range sites {
+		o, l := offs[2*i], offs[2*i+1]
+		sites[i] = FSSite{Off: o, Len: uint8(l), Steal: uint8(l >> 8)}
 	}
 	return sites
 }
@@ -90,8 +111,19 @@ func (w *Rewriter) SegmentSlot(tp uint32) {
 // sites left for the fault handler.
 func (w *Rewriter) PatchFS(code []byte, vaddr uint64, sites []FSSite) (left []uint64) {
 	for _, s := range sites {
-		off, n := int(s.Off), int(s.Len)
-		if off+n > len(code) || n < 5 || !w.fsIsland(code[off:off+n], vaddr+uint64(off)) {
+		off, n, run := int(s.Off), int(s.Len), int(s.Steal)
+		ok := false
+		switch {
+		case off+n > len(code):
+		case n >= 5:
+			ok = w.fsJmp(code, vaddr, off, off, n)
+		case run > 0 && run <= off:
+			r := code[off-run : off]
+			ok = runOK(r) && !anyInst(r, hasFS) && w.fsJmp(code, vaddr, off-run, off, n)
+		case s.Cave != 0:
+			ok = w.fsCave(code, vaddr, off, n, off+int(s.Cave))
+		}
+		if !ok {
 			left = append(left, vaddr+uint64(off))
 			continue
 		}
@@ -238,23 +270,65 @@ func (e enc) rebase(r int) []byte {
 
 const regRSP = 4
 
-// fsIsland emits an island for the %fs instruction b at addr and patches b to
-// jump to it.
-func (w *Rewriter) fsIsland(b []byte, addr uint64) bool {
+// fsJmp gives the %fs instruction code[off:off+n] an island with the run
+// code[ins:off] before it and replaces the instruction at ins, the run's first
+// or the %fs one itself, with a jmp to it. The rest keep their bytes, so a
+// branch past ins runs the original code.
+func (w *Rewriter) fsJmp(code []byte, vaddr uint64, ins, off, n int) bool {
+	at, ok := w.fsIsland(code, vaddr, ins, off, n)
+	if ok {
+		jmpOver(code, ins, vaddr+uint64(ins), w.base+at)
+	}
+	return ok
+}
+
+// fsCave gives the %fs instruction code[off:off+n] an island reached through
+// the cave at code[cave:cave+5], padding no path reaches: the instruction
+// becomes a two-byte jmp to the cave, which jumps to the island. Only its own
+// bytes change where code runs.
+func (w *Rewriter) fsCave(code []byte, vaddr uint64, off, n, cave int) bool {
+	r := cave - (off + 2)
+	if n < 2 || cave < 0 || cave+5 > len(code) || r < -128 || r > 127 || cave < off+n && cave+5 > off {
+		return false
+	}
+	for k := 0; k < 5; {
+		l := padLen(code[cave+k:])
+		if l == 0 {
+			return false // not this code: never patch blindly
+		}
+		k += l
+	}
+	at, ok := w.fsIsland(code, vaddr, off, off, n)
+	if !ok {
+		return false
+	}
+	code[cave] = 0xe9
+	binary.LittleEndian.PutUint32(code[cave+1:], uint32(int32(w.base+at-(vaddr+uint64(cave)+5))))
+	code[off], code[off+1] = 0xeb, byte(int8(r))
+	for i := off + 2; i < off+n; i++ {
+		code[i] = 0xcc
+	}
+	return true
+}
+
+// fsIsland appends the island for the run code[ins:off] and the %fs
+// instruction code[off:off+n] after it, and returns its offset in the area.
+func (w *Rewriter) fsIsland(code []byte, vaddr uint64, ins, off, n int) (uint64, bool) {
+	b, addr := code[off:off+n], vaddr+uint64(off)
 	in := x86decode(b)
 	if !in.ok || in.len != len(b) {
-		return false
+		return 0, false
 	}
 	e, ok := splitEnc(b)
 	if !ok || e.base == regRSP {
-		return false
+		return 0, false
 	}
 	// push/pop/call/jmp through %fs memory touch rsp or redirect control flow,
 	// so the island cannot host them (POP is 8f /0; FF /2,/3 call, /4,/5 jmp,
 	// /6 push). Their rip-relative and direct forms carry no %fs operand.
 	if len(e.opcode) == 1 {
 		if e.opcode[0] == 0x8f || (e.opcode[0] == 0xff && e.reg >= 2 && e.reg <= 6) {
-			return false
+			return 0, false
 		}
 	}
 	rexR := 0
@@ -265,14 +339,14 @@ func (w *Rewriter) fsIsland(b []byte, addr uint64) bool {
 	// A high-byte register operand (AH..BH, reg 4..7 with no REX) would become
 	// SPL..DIL if the island re-encodes the instruction with a REX prefix.
 	if e.rex == 0 && e.reg >= 4 && is8bitRegOp(e.opcode) {
-		return false
+		return 0, false
 	}
 	// The registers this instruction uses: the reg operand and the memory
 	// operand's base/index (an %fs instruction has no other register operand).
 	used := map[int]bool{regRSP: true, regOp: true}
 	used[e.base], used[e.index] = true, true
 	back := addr + uint64(len(b))
-	var t []byte
+	t := append([]byte(nil), code[ins:off]...)
 	dst, isLoad := -1, false
 	has66 := false
 	for _, p := range e.prefixes {
@@ -298,7 +372,7 @@ func (w *Rewriter) fsIsland(b []byte, addr uint64) bool {
 			}
 		}
 		if s < 0 {
-			return false
+			return 0, false
 		}
 		t = append(t, 0x48, 0x8d, 0x64, 0x24, 0x80) // lea rsp, [rsp-128]
 		t = append(t, 0x41, 0x50+byte(s&7))         // push s
@@ -317,17 +391,12 @@ func (w *Rewriter) fsIsland(b []byte, addr uint64) bool {
 	}
 	at := uint64(len(w.tramp))
 	if at+uint64(len(t))+5 > w.limit {
-		return false
+		return 0, false
 	}
 	w.tramp = append(w.tramp, t...)
 	w.tramp = append(w.tramp, 0xe9)
 	w.tramp = binary.LittleEndian.AppendUint32(w.tramp, uint32(int32(back-(w.base+uint64(len(w.tramp))+4))))
-	b[0] = 0xe9
-	binary.LittleEndian.PutUint32(b[1:], uint32(int32(w.base+at-(addr+5))))
-	for i := 5; i < len(b); i++ {
-		b[i] = 0xcc
-	}
-	return true
+	return at, true
 }
 
 // movFromGS appends mov r64, gs:[slot].

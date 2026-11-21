@@ -5,6 +5,8 @@ import (
 	"debug/elf"
 	"encoding/binary"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -58,32 +60,146 @@ func TestPatchFS(t *testing.T) {
 	}
 }
 
-// TestFSBinary reports the %fs sites of a real binary: LC_FS_ELF=path.
-func TestFSBinary(t *testing.T) {
-	path := os.Getenv("LC_FS_ELF")
-	if path == "" {
-		t.Skip("LC_FS_ELF not set")
+// TestPatchFSRun: an %fs instruction too short for the jmp moves into its
+// island with the run before it, as Go's thread-local loads do (mov r14, -8;
+// mov r14, fs:[r14]); only the run's first instruction is overwritten, so a
+// branch to the %fs instruction runs it as it was.
+func TestPatchFSRun(t *testing.T) {
+	code := []byte{
+		0x49, 0xc7, 0xc6, 0xf8, 0xff, 0xff, 0xff, // mov r14, -8
+		0x64, 0x4d, 0x8b, 0x36, // mov r14, fs:[r14]
+		0xc3,
 	}
-	f, err := elf.Open(path)
+	for _, sites := range [][]FSSite{AnalyzeFS(code), AnalyzeEntriesFS(code, []int{0}, nil).FS} {
+		c := bytes.Clone(code)
+		if len(sites) != 1 || sites[0] != (FSSite{7, 4, 7, 0}) {
+			t.Fatalf("sites = %v", sites)
+		}
+		const vaddr, base = 0x401000, 0x300000
+		w := New(base, 4096, 0)
+		w.SegmentSlot(0x1678)
+		if left := w.PatchFS(c, vaddr, sites); w.FS != 1 || len(left) != 0 {
+			t.Fatalf("fs = %d left = %#x", w.FS, left)
+		}
+		if c[0] != 0xe9 || !bytes.Equal(c[5:], []byte{0xcc, 0xcc, 0x64, 0x4d, 0x8b, 0x36, 0xc3}) {
+			t.Fatalf("patched code % x", c)
+		}
+		tr := w.Trampolines()
+		p := int(vaddr + 5 + uint64(int32(binary.LittleEndian.Uint32(c[1:]))) - base)
+		for _, want := range []string{"mov r14, -0x8", "lea rsp, ptr [rsp-0x80]", "push r11", "mov r11, qword ptr gs:[0x1678]", "lea r11, ptr [r11+r14]", "mov r14, qword ptr [r11]", "pop r11", "lea rsp, ptr [rsp+0x80]"} {
+			in, err := x86asm.Decode(tr[p:], 64)
+			if got := x86asm.IntelSyntax(in, 0, nil); err != nil || got != want {
+				t.Fatalf("got %q want %q", got, want)
+			}
+			p += in.Len
+		}
+		in, _ := x86asm.Decode(tr[p:], 64)
+		if back := base + uint64(p) + 5 + uint64(int32(binary.LittleEndian.Uint32(tr[p+1:]))); in.Op != x86asm.JMP || back != vaddr+11 {
+			t.Fatalf("jmp back to %#x", back)
+		}
+	}
+}
+
+// TestPatchFSCave: an %fs instruction too short for the jmp, right after a
+// call (Go's systemstack: a return lands on it), reaches its island through
+// the padding after the function; only its own bytes change.
+func TestPatchFSCave(t *testing.T) {
+	code := []byte{
+		0xe8, 0x10, 0x00, 0x00, 0x00, // call 21
+		0x64, 0x48, 0x89, 0x11, // mov fs:[rcx], rdx
+		0x49, 0x89, 0xd6, // mov r14, rdx
+		0xc3,                                           // ret
+		0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // padding
+		0xc3, // 21: ret
+	}
+	p := AnalyzeEntriesFS(code, []int{0}, nil)
+	if len(p.FS) != 1 || p.FS[0] != (FSSite{5, 4, 0, 8}) {
+		t.Fatalf("fs = %v", p.FS)
+	}
+	got, ok := decodePlan(encodePlan(p))
+	if !ok || !slices.Equal(got.FS, p.FS) {
+		t.Fatalf("round trip gave %v", got.FS)
+	}
+	const vaddr, base = 0x401000, 0x300000
+	w := New(base, 4096, 0)
+	w.SegmentSlot(0x1678)
+	if left := w.PatchFS(code, vaddr, p.FS); w.FS != 1 || len(left) != 0 {
+		t.Fatalf("fs = %d left = %#x", w.FS, left)
+	}
+	if !bytes.Equal(code[5:13], []byte{0xeb, 0x06, 0xcc, 0xcc, 0x49, 0x89, 0xd6, 0xc3}) || code[13] != 0xe9 {
+		t.Fatalf("patched code % x", code)
+	}
+	tr := w.Trampolines()
+	at := int(vaddr + 18 + uint64(int32(binary.LittleEndian.Uint32(code[14:]))) - base)
+	for _, want := range []string{"lea rsp, ptr [rsp-0x80]", "push r11", "mov r11, qword ptr gs:[0x1678]", "lea r11, ptr [r11+rcx]", "mov qword ptr [r11], rdx", "pop r11", "lea rsp, ptr [rsp+0x80]"} {
+		in, err := x86asm.Decode(tr[at:], 64)
+		if got := x86asm.IntelSyntax(in, 0, nil); err != nil || got != want {
+			t.Fatalf("got %q want %q", got, want)
+		}
+		at += in.Len
+	}
+	if back := base + uint64(at) + 5 + uint64(int32(binary.LittleEndian.Uint32(tr[at+1:]))); tr[at] != 0xe9 || back != vaddr+9 {
+		t.Fatalf("jmp back to %#x", back)
+	}
+}
+
+// TestFSGoBinary: in a real Go PIE, as the Windows image rewrite plans it
+// (descent from its function entries), every %fs site gets an island but
+// rt0_go's TLS setup, which runs once on the main thread's stack: a site left
+// faults, and Windows raises the fault on the thread's own stack, under a
+// goroutine's 2 KiB of it.
+func TestFSGoBinary(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "gothreads")
+	cmd := exec.Command("go", "build", "-buildmode=pie", "-o", exe, filepath.Join("..", "..", "testdata", "gothreads.go"))
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, b)
+	}
+	f, err := elf.Open(exe)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f.Close()
+	eh, sym := ELFEntries(f)
+	sym = append(sym, f.Entry)
+	text := ExecRanges(f)
+	rt0 := map[uint64]bool{}
+	if syms, err := f.Symbols(); err == nil {
+		for _, s := range syms {
+			if s.Name == "runtime.rt0_go.abi0" || s.Name == "runtime.rt0_go" {
+				for a := s.Value; a < s.Value+s.Size; a++ {
+					rt0[a] = true
+				}
+			}
+		}
+	}
+	islands := 0
 	for _, p := range f.Progs {
 		if p.Type != elf.PT_LOAD || p.Flags&elf.PF_X == 0 {
 			continue
 		}
 		code := make([]byte, p.Filesz)
-		p.ReadAt(code, 0)
-		orig := bytes.Clone(code)
-		w := New(0x100000, 1<<20, 0)
-		w.SegmentSlot(0x1678)
-		sites := AnalyzeFS(code)
-		left := w.PatchFS(code, p.Vaddr, sites)
-		t.Logf("segment %#x: %d fs sites, %d islands, %d left", p.Vaddr, len(sites), w.FS, len(left))
-		for _, a := range left {
-			in, _ := x86asm.Decode(orig[a-p.Vaddr:], 64)
-			t.Logf("  left %#x: % x  %v", a, orig[a-p.Vaddr:a-p.Vaddr+uint64(in.Len)], in)
+		if _, err := p.ReadAt(code, 0); err != nil {
+			t.Fatal(err)
 		}
+		var ents []int
+		for _, e := range append(eh, sym...) {
+			if e >= p.Vaddr && e < p.Vaddr+p.Filesz {
+				ents = append(ents, int(e-p.Vaddr))
+			}
+		}
+		plan := AnalyzeEntriesFS(code, ents, SegmentRanges(text, p.Vaddr, p.Filesz))
+		w := New(0x100000, plan.TrampBytes(), 0)
+		w.SegmentSlot(0x1678)
+		for _, a := range w.PatchFS(code, p.Vaddr, plan.FS) {
+			if !rt0[a] {
+				t.Errorf("%%fs site at %#x left to the fault handler", a)
+			}
+		}
+		islands += w.FS
+	}
+	if islands < 100 {
+		t.Fatalf("%d %%fs islands: the Go runtime has hundreds of thread-local loads", islands)
 	}
 }
 
@@ -98,7 +214,7 @@ func TestDescentFS(t *testing.T) {
 		0xc3,
 	}
 	p := AnalyzeEntriesFS(code, []int{0}, nil)
-	if len(p.FS) != 2 || p.FS[0] != (FSSite{0, 9}) || p.FS[1] != (FSSite{20, 3}) {
+	if len(p.FS) != 2 || p.FS[0] != (FSSite{0, 9, 0, 0}) || p.FS[1] != (FSSite{20, 3, 0, 0}) {
 		t.Fatalf("descent fs = %v", p.FS)
 	}
 	if n := len(AnalyzeFS(code)); n != 3 {
@@ -109,8 +225,8 @@ func TestDescentFS(t *testing.T) {
 func TestPlanEncodingFS(t *testing.T) {
 	for _, p := range []Plan{
 		{Sites: []Site{{1, 5, 0}, {9, 0, -7}}},
-		{Sites: []Site{{1, 5, 0}, {130, 0, 120}}, FS: []FSSite{{3, 9}, {40, 4}}},
-		{FS: []FSSite{{3, 9}}},
+		{Sites: []Site{{1, 5, 0}, {130, 0, 120}}, FS: []FSSite{{3, 9, 0, 0}, {40, 4, 7, 0}, {60, 4, 0, -30}}},
+		{FS: []FSSite{{3, 9, 0, 0}}},
 	} {
 		got, ok := decodePlan(encodePlan(p))
 		if !ok || !slices.Equal(got.Sites, p.Sites) || !slices.Equal(got.FS, p.FS) {

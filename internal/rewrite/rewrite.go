@@ -124,7 +124,7 @@ type Plan struct {
 // site and, on a host that rewrites them (SegmentSlot), an island per %fs
 // site.
 func (p Plan) TrampBytes() uint64 {
-	return headerSize + uint64(len(p.Sites))*2*trampMax + uint64(len(p.FS))*fsIslandMax
+	return headerSize + uint64(len(p.Sites))*2*trampMax + uint64(len(p.FS))*(fsIslandMax+maxStolen)
 }
 
 // Site is a syscall instruction at Off. Steal is the length of the run of

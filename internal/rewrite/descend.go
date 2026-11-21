@@ -1,6 +1,7 @@
 package rewrite
 
 import (
+	"bytes"
 	"cmp"
 	"slices"
 )
@@ -104,7 +105,7 @@ func (d *Descender) trace(off int) {
 			d.sites = append(d.sites, Site{Off: uint32(off), Steal: steal})
 		}
 		if d.FS && in.fsMem {
-			d.fsSites = append(d.fsSites, FSSite{Off: uint32(off), Len: uint8(in.len)})
+			d.fsSites = append(d.fsSites, fsSite(off, in, &t))
 		}
 		if in.relOK {
 			d.AddEntry(off + in.len + in.rel)
@@ -219,6 +220,76 @@ func assignCaves(sites []Site, caves []int) {
 	}
 }
 
+// trapCaves are caves inside runs of int3, the padding compilers put after a
+// call that does not return and between functions: five int3 bytes right after
+// another, which a path reaches only by resuming from the trap that one raises.
+// Descent decodes int3 as an instruction and walks on through them, so they
+// are not caves to it.
+func trapCaves(code []byte) []int {
+	var out []int
+	for i := 0; i < len(code); {
+		j := bytes.IndexByte(code[i:], 0xcc)
+		if j < 0 {
+			break
+		}
+		lo := i + j
+		hi := lo
+		for hi < len(code) && code[hi] == 0xcc {
+			hi++
+		}
+		for c := lo + 1; c+5 <= hi; c += 5 {
+			out = append(out, c)
+		}
+		i = hi
+	}
+	return out
+}
+
+// assignFSCaves gives each %fs site too short for the jmp, with no run to
+// steal, the nearest cave a two-byte jmp at it reaches that no syscall site
+// or other %fs site took.
+func assignFSCaves(fs []FSSite, sites []Site, caves []int) {
+	slices.Sort(caves)
+	caves = slices.Compact(caves)
+	taken := map[int]bool{}
+	take := func(c int) {
+		for k := range 5 {
+			taken[c+k] = true
+		}
+	}
+	free := func(c int) bool {
+		for k := range 5 {
+			if taken[c+k] {
+				return false
+			}
+		}
+		return true
+	}
+	for _, s := range sites {
+		if s.Cave != 0 {
+			take(int(s.Off) + int(s.Cave))
+		}
+	}
+	for i := range fs {
+		s := &fs[i]
+		if s.Len >= 5 || s.Steal != 0 {
+			continue
+		}
+		from := int(s.Off) + 2
+		best := -1
+		j, _ := slices.BinarySearch(caves, from-128)
+		for ; j < len(caves) && caves[j] <= from+127; j++ {
+			if c := caves[j]; free(c) && (best < 0 || abs(c-from) < abs(best-from)) {
+				best = c
+			}
+		}
+		if best >= 0 {
+			take(best)
+			s.Cave = int16(best - int(s.Off))
+		}
+	}
+}
+
 func abs(x int) int {
 	if x < 0 {
 		return -x
@@ -255,6 +326,7 @@ func padLen(b []byte) int {
 func AnalyzeEntriesFS(code []byte, entries []int, scav [][2]int) Plan {
 	d := descendAll(code, entries, scav, true)
 	p := Plan{Sites: d.sites, FS: d.fsSites}
+	assignFSCaves(p.FS, p.Sites, append(d.caves(), trapCaves(code)...))
 	slices.SortFunc(p.Sites, func(a, b Site) int { return cmp.Compare(a.Off, b.Off) })
 	slices.SortFunc(p.FS, func(a, b FSSite) int { return cmp.Compare(a.Off, b.Off) })
 	return p

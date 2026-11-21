@@ -195,16 +195,17 @@ func (c *Cache) store(key [32]byte, p Plan) {
 
 // Plan files are a version byte followed by (offset uint32, steal uint8,
 // cave int16) records, little-endian. The FS version adds the %fs sites: the
-// syscall-site count (uint32) comes first, and (offset uint32, length uint8)
-// records follow the syscall sites. Versions 1 and 2 predate stealing a run
-// before a syscall, 3 and 4 caves; their plans are recomputed.
+// syscall-site count (uint32) comes first, and (offset uint32, length uint8,
+// steal uint8, cave int16) records follow the syscall sites. Versions 1 and 2
+// predate stealing a run before a syscall, 3 and 4 caves, 6 a run or a cave
+// for an %fs instruction; their plans are recomputed.
 const (
 	planVersion   = 5
-	planVersionFS = 6
+	planVersionFS = 7
 )
 
 func encodePlan(p Plan) []byte {
-	b := make([]byte, 1, 5+7*len(p.Sites)+5*len(p.FS))
+	b := make([]byte, 1, 5+7*len(p.Sites)+8*len(p.FS))
 	b[0] = planVersion
 	if len(p.FS) > 0 {
 		b[0] = planVersionFS
@@ -217,7 +218,8 @@ func encodePlan(p Plan) []byte {
 	}
 	for _, s := range p.FS {
 		b = binary.LittleEndian.AppendUint32(b, s.Off)
-		b = append(b, s.Len)
+		b = append(b, s.Len, s.Steal)
+		b = binary.LittleEndian.AppendUint16(b, uint16(s.Cave))
 	}
 	return b
 }
@@ -240,7 +242,7 @@ func decodePlan(b []byte) (Plan, bool) {
 		}
 		n = int(binary.LittleEndian.Uint32(b[1:]))
 		b = b[5:]
-		if n > len(b)/7 || (len(b)-7*n)%5 != 0 {
+		if n > len(b)/7 || (len(b)-7*n)%8 != 0 {
 			return Plan{}, false
 		}
 	default:
@@ -250,8 +252,8 @@ func decodePlan(b []byte) (Plan, bool) {
 	for i := 0; i < n; i, b = i+1, b[7:] {
 		p.Sites = append(p.Sites, Site{Off: binary.LittleEndian.Uint32(b), Steal: b[4], Cave: int16(binary.LittleEndian.Uint16(b[5:]))})
 	}
-	for ; len(b) > 0; b = b[5:] {
-		p.FS = append(p.FS, FSSite{Off: binary.LittleEndian.Uint32(b), Len: b[4]})
+	for ; len(b) > 0; b = b[8:] {
+		p.FS = append(p.FS, FSSite{Off: binary.LittleEndian.Uint32(b), Len: b[4], Steal: b[5], Cave: int16(binary.LittleEndian.Uint16(b[6:]))})
 	}
 	return p, true
 }
