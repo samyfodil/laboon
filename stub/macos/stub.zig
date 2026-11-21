@@ -476,6 +476,7 @@ pub fn serveTrap(mc: *std.c.mcontext_t, avx: bool) void {
     sig.g_sigmc = mc;
     sig.enter();
     while (true) {
+        sig.openKicks();
         const r = serveSyscall(&frame);
         if (sig.g_sig_delivered) {
             sig.g_sig_delivered = false;

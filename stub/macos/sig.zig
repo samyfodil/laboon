@@ -219,8 +219,8 @@ export var lc_busy_tsd: u64 = 0;
 var g_text: [2]u64 = .{ 0, 0 };
 extern "c" fn sigaltstack(ss: *const DwStack, old: ?*DwStack) c_int;
 extern "c" fn pthread_sigmask(how: c_int, set: ?*const u32, old: ?*u32) c_int;
+const SIG_BLOCK: c_int = 1;
 const SIG_UNBLOCK: c_int = 2;
-const SIG_SETMASK: c_int = 3;
 const KICK_MASK: u32 = (1 << (DW_SIGUSR1 - 1)) | (1 << (DW_SIGUSR2 - 1));
 extern "c" fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) ?*anyopaque;
 extern "c" fn pthread_self() usize;
@@ -524,6 +524,21 @@ pub fn enterGuest() void {
 pub fn enter() void {
     setBusy(&tl, true);
     tl.leaving = false;
+}
+
+// x86-64 serves a syscall inside the trap handler, whose mask blocks the
+// kick signals: openKicks lets them in for the serve, so a kick ends a
+// blocking wait as on arm64, and closeKicks shuts them out before busy
+// clears, so a later one waits for the handler's return and lands in the
+// guest's context.
+pub fn openKicks() void {
+    var k: u32 = KICK_MASK;
+    _ = pthread_sigmask(SIG_UNBLOCK, &k, null);
+}
+
+fn closeKicks() void {
+    var k: u32 = KICK_MASK;
+    _ = pthread_sigmask(SIG_BLOCK, &k, null);
 }
 
 // leaveTo records the guest state this thread goes back to, before busy
@@ -1273,6 +1288,7 @@ fn epipeRaises(frame: [*]u64) bool {
 pub fn afterSyscall(frame: [*]u64, r0: u64) ?u64 {
     const s = &tl;
     if (!s.ready) return r0;
+    if (!tstate.arm64) closeKicks();
     if (@as(i64, @bitCast(r0)) == -EPIPE and epipeRaises(frame)) raiseSelf(SIGPIPE, SI_USER);
     if (!isRestart(r0)) {
         // Fast path. A kick from here on redirects the thread itself; one
@@ -1985,20 +2001,6 @@ fn waitLocal(allow: u64, deadline: i64) bool {
     @atomicStore(bool, &tl.waiting, true, .seq_cst);
     defer @atomicStore(bool, &tl.waiting, false, .seq_cst);
     if (pendingAllowed(allow) != 0) return true;
-    // x86-64 serves the blocking sig syscalls inside the fault handler, which
-    // runs with the kick signals (USR1/USR2) blocked, so the supervisor's kick
-    // cannot cut the wait short. Open them around it: a kick that landed while
-    // they were blocked is delivered on the unblock, and the handler sets the
-    // word so the wait returns at once. arm64 waits outside any handler, where
-    // they are already open, so it leaves the mask alone.
-    var saved: u32 = 0;
-    if (!tstate.arm64) {
-        var k: u32 = KICK_MASK;
-        _ = pthread_sigmask(SIG_UNBLOCK, &k, &saved);
-    }
-    defer if (!tstate.arm64) {
-        _ = pthread_sigmask(SIG_SETMASK, &saved, null);
-    };
     if (deadline == 0) {
         futex.waitWord(&tl.word, 0, 0);
         return true;
