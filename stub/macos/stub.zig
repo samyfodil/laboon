@@ -2291,6 +2291,7 @@ fn poolRun(base: [*]u8) noreturn {
 }
 
 pub fn main() void {
+    mem.noteHost();
     const argv = std.os.argv;
     if (argv.len < 6) _exit(2);
     const pool = poolOffset(argv[0]);

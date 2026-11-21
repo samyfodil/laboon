@@ -1824,10 +1824,43 @@ const ExtInfo = extern struct {
 };
 
 // hostRegion is Darwin's own memory inside the guest's window, which every
-// process has of its own: the shared region (a submap), at the top of an
-// x86-64 address space, and Rosetta's runtime (VM_MEMORY_ROSETTA tags).
-fn hostRegion(info: BasicInfo, ext: ExtInfo) bool {
-    return info.reserved != 0 or ext.user_tag >= 230 and ext.user_tag <= 239;
+// process has of its own; on x86-64 the window holds much of it. The shared
+// region is a submap; malloc's zones, thread stacks and Rosetta's allocations
+// carry their VM tags; and what lay there before the stub ran (Rosetta's
+// runtime, the first zones) noteHost recorded.
+fn hostRegion(info: BasicInfo, ext: ExtInfo, lo: u64, hi: u64) bool {
+    if (info.reserved != 0) return true;
+    switch (ext.user_tag) {
+        1...13, 30, 230...239 => return true,
+        else => {},
+    }
+    for (host_at_start[0..nhost]) |r| {
+        if (r.lo < hi and lo < r.hi) return true;
+    }
+    return false;
+}
+
+var host_at_start: [64]Range = undefined;
+var nhost: usize = 0;
+
+// noteHost records what lies in the guest's upper window when the stub
+// starts, before any guest memory: the host's.
+pub fn noteHost() void {
+    const t = mach_task_self();
+    var a: u64 = TOP_LO;
+    while (a < HOST_TOP and nhost < host_at_start.len) {
+        var ra = a;
+        var size: u64 = 0;
+        var info: BasicInfo = undefined;
+        var count: c_uint = @sizeOf(BasicInfo) / 4;
+        var obj: c_uint = 0;
+        if (mach_vm_region(t, &ra, &size, VM_REGION_BASIC_INFO_64, &info, &count, &obj) != 0) break;
+        if (obj != 0) _ = mach_port_deallocate(t, obj);
+        if (ra >= HOST_TOP) break;
+        host_at_start[nhost] = .{ .lo = ra, .hi = ra + size };
+        nhost += 1;
+        a = ra + size;
+    }
 }
 
 const Range = struct { lo: u64, hi: u64 };
@@ -1875,7 +1908,7 @@ pub fn forkRegions(out: *std.ArrayList(ForkRegion)) bool {
             var ext: ExtInfo = undefined;
             var ecount: c_uint = @sizeOf(ExtInfo) / 4;
             if (mach_vm_region(task, &ea, &esize, VM_REGION_EXTENDED_INFO, &ext, &ecount, &obj) != 0) break;
-            if (info.inherit != VM_INHERIT_NONE and !hostRegion(info, ext)) {
+            if (info.inherit != VM_INHERIT_NONE and !hostRegion(info, ext, lo, hi)) {
                 // A shared region stays shared even before anything is
                 // written to it; a private one never written is only a place.
                 const kind: RegionKind = if (info.inherit == VM_INHERIT_SHARE)
