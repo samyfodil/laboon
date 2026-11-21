@@ -16,7 +16,8 @@ pub const Counts = extern struct { rss: u64 = 0, pss: u64 = 0, pss_dirty: u64 = 
 // SmapEnt is a mapping with its counts.
 pub const SmapEnt = extern struct { e: MapEnt, c: Counts };
 
-const HOST_PAGE: u64 = 0x4000;
+// The page mincore reports by: Darwin's 16 KiB, or 4 KiB in a Rosetta task.
+const HOST_PAGE: u64 = if (@import("builtin").cpu.arch == .x86_64) 0x1000 else 0x4000;
 const VM_REGION_EXTENDED_INFO: c_int = 13;
 const SM_COW: u8 = 1;
 const SM_SHARED: u8 = 4;
