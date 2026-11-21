@@ -119,6 +119,7 @@ const ARCH_GET_GS: u64 = 0x1004;
 // x86-64 number.
 const NO_LOCAL: u64 = ~@as(u64, 0);
 const STDIO_TRACED: u64 = 1 << 63; // the supervisor set this thread as ptrace-traced
+const STDIO_SECCOMP: u64 = 1 << 61; // its process has a seccomp filter: each call is checked first
 const NR_VFORK_WAIT: u64 = 0x1_0000_0001; // stub->supervisor only, not a Linux number
 const NR_THREAD_GONE: u64 = 0x1_0000_0002; // a thread ended; no reply expected
 const NR_FORKED: u64 = 0x1_0000_0003; // the child's host pid (0: none), right after a fork
@@ -584,7 +585,23 @@ fn archPrctl(frame: [*]u64) u64 {
     }
 }
 
+// seccompCheck posts the call in frame for the verdict of its process's
+// seccomp filters before it is served: the result when they decided it, null
+// to serve it.
+fn seccompCheck(frame: [*]u64) ?u64 {
+    const ch = g_chan;
+    ch.kind = chan.MSG_SECCOMP;
+    ch.nr = frame[8];
+    ch.guest_rip = frame[33];
+    for (0..6) |i| ch.args[i] = frame[i];
+    const r = serveReplies(ch, frame);
+    return if (ch.args[0] != 0) r else null;
+}
+
 fn serveSyscall(frame: [*]u64) u64 {
+    if (g_chan.stdio & STDIO_SECCOMP != 0) {
+        if (seccompCheck(frame)) |r| return r;
+    }
     // No tpidr_el0 juggling: the guest's thread pointer lives in a TSD slot (see
     // g_tp_key), reached by the rewritten mrs/msr sites, and libSystem's own TLS
     // rides tpidrro_el0, which the kernel keeps per-thread. The physical

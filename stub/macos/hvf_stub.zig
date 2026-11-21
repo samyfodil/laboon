@@ -401,6 +401,7 @@ fn runLoop(vm: *vmm.Vmm, ch: *chan.Chan) noreturn {
         switch (ev) {
             .signal => vm.deliverAsync(ch, chan.exchange),
             .syscall => |sc| {
+                if (vm.filtered(ch, sc, chan.exchange)) continue;
                 // Memory and futex syscalls are serviced against the VM RAM
                 // locally; the rest go to the supervisor over the channel.
                 // set_tid_address has no supervisor handler -- rewrite it to

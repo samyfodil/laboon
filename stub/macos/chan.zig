@@ -17,6 +17,7 @@ pub const MSG_SYSCALL: u64 = 2;
 pub const MSG_HOSTRET: u64 = 3;
 pub const MSG_FORKED: u64 = 4;
 pub const MSG_TRACE_LOCAL: u64 = 5; // an in-guest-served syscall, posted only for its ptrace stops
+pub const MSG_SECCOMP: u64 = 7; // a call to run past the guest's seccomp filters before it is served
 
 // Reply kinds (supervisor -> stub). Must match chanabi.go.
 pub const REP_RESULT: u64 = 1;

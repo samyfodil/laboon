@@ -74,6 +74,10 @@ func serveGuest(dg *dguest) (int, error) {
 			ch.reply(repResult)
 			continue
 		}
+		if pg.kind == msgSeccomp {
+			dg.seccompCheck()
+			continue
+		}
 		if pg.kind != msgSyscall {
 			return 0, errProtocol
 		}

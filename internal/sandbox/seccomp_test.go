@@ -51,3 +51,18 @@ func TestSeccompSigreturn(t *testing.T) {
 		t.Fatalf("code %d err %v (want 42: rt_sigreturn trapped -> SIGSYS -> exit 42)\n%s", code, err, out.String())
 	}
 }
+
+// TestSeccompKill runs testdata/seccomp_kill.c: SECCOMP_RET_KILL_PROCESS must
+// end the process with SIGSYS though the guest installed a SIGSYS handler and
+// blocked SIGSYS.
+func TestSeccompKill(t *testing.T) {
+	root, bin := guestRoot(t, "seccomp_kill")
+	var out bytes.Buffer
+	code, err := Run(context.Background(), bin, Config{
+		Args:   []string{"seccomp_kill"},
+		Stdout: &out, Stderr: &out, RootFS: HostRoot(root),
+	})
+	if err != nil || code != 0 || !bytes.Contains(out.Bytes(), []byte("SECKILL-OK")) {
+		t.Fatalf("code %d err %v\n%s", code, err, out.String())
+	}
+}

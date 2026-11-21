@@ -292,6 +292,65 @@ func (g *dguest) seccompVerdict(nr uint32, args [6]uint64, ip uint64) uint32 {
 	return worst
 }
 
+// applySeccomp runs the installed filters on a real guest syscall and reports
+// how to answer it: handled is true when the syscall must not run, with ret the
+// value the guest sees.
+func (g *dguest) applySeccomp(nr uint32, args [6]uint64, ip uint64) (ret int64, handled bool) {
+	v := g.seccompVerdict(nr, args, ip)
+	switch v & secRetActionFull {
+	case secRetAllow & secRetActionFull, secRetLog & secRetActionFull:
+		return 0, false
+	case secRetErrno & secRetActionFull:
+		e := v & secRetData
+		if e > secMaxErrno {
+			e = secMaxErrno
+		}
+		return -int64(e), true
+	case secRetTrace & secRetActionFull, secRetUserNotif & secRetActionFull:
+		// No tracer or notifier is attached, so the syscall fails with ENOSYS.
+		return -int64(lxENOSYS), true
+	default:
+		// SECCOMP_RET_TRAP, or a kill: deliver SIGSYS and, as a trapped
+		// syscall does, do not run it. si_errno carries the filter's
+		// SECCOMP_RET_DATA (a nested stub's own trap backstop tags its traps
+		// there, and its SIGSYS handler checks it); si_code is SYS_SECCOMP, and
+		// a/b the call address, syscall number and arch a SIGSYS handler reads.
+		// The result keeps the syscall number, which the kernel leaves in the
+		// register a handler reads (not ENOSYS).
+		const sysSeccomp = 1
+		si := sigInfo{errno: int32(v & secRetData), code: sysSeccomp, a: ip, b: uint64(nr) | uint64(auditArch())<<32}
+		sr := g.sigs()
+		t, p := sr.thread(g.pid), sr.proc(g.tgid)
+		if t == nil || p == nil {
+			return int64(nr), true
+		}
+		if a := v & secRetActionFull; a == secRetKillProcess&secRetActionFull || a == secRetKillThread {
+			// A kill is neither caught nor blocked: SIGSYS takes its default
+			// action, which ends the process, as Linux's seccomp kill does.
+			sr.sq.Lock()
+			p.acts[31-1].handler = 0
+			sr.sq.Unlock()
+			o := tOff(t.slot)
+			sr.st(o+stMask, sr.ld(o+stMask)&^sigBit(31))
+		}
+		sr.queue(&t.q, 31, si)
+		return int64(nr), true
+	}
+}
+
+// seccompCheck answers a stub's msgSeccomp: the filters' verdict on the call
+// it is about to serve. A tracer sees a call the filters let through at its
+// usual stops, where it is served.
+func (g *dguest) seccompCheck() {
+	pg := g.ch.page
+	r, handled := g.applySeccomp(uint32(pg.nr), pg.args, pg.guestRip)
+	pg.args[0] = 0
+	if handled {
+		pg.args[0], pg.ret = 1, uint64(r)
+	}
+	g.ch.reply(repResult)
+}
+
 // readFilter reads a struct sock_fprog {u16 len; sock_filter *filter} and the
 // len instructions it points at (8 bytes each) into a flat program. A filter
 // over the kernel's instruction cap is rejected.

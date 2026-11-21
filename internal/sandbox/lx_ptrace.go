@@ -9,10 +9,12 @@ const stdioTraced = uint64(1) << 63
 // trace frame instead, so it is set only for an HVF tracee on PTRACE_SINGLESTEP.
 const stdioSinglestep = uint64(1) << 62
 
-// stdioSeccomp marks a slot whose process has a seccomp filter, so the stub
+// stdioSeccomp marks a slot whose process has a seccomp filter: the Linux stub
 // runs rt_sigreturn past the supervisor for the filter instead of completing it
-// locally. Mirrors stub/zig/stub.zig STDIO_SECCOMP.
-const stdioSeccomp = uint64(1) << 62
+// locally, and the darwin stubs post each call for the filters' verdict
+// (msgSeccomp) before serving it. Mirrors STDIO_SECCOMP in stub/zig/stub.zig,
+// stub/macos/stub.zig and stub/macos/vmm.zig.
+const stdioSeccomp = uint64(1) << 61
 
 // Methods run with dfs.mu held, except notifyExit. Only Linux installs tracing.
 type ptraceBackend interface {

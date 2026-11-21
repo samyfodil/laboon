@@ -210,7 +210,7 @@ pub const STDIO_TRACED: u64 = 1 << 63;
 // Set when the guest installed a seccomp filter: rt_sigreturn, which the stub
 // otherwise completes with no round trip, must then be run past the supervisor
 // so the filter is applied to it like any syscall (a guest may trap it).
-pub const STDIO_SECCOMP: u64 = 1 << 62;
+pub const STDIO_SECCOMP: u64 = 1 << 61;
 
 // Message kinds. Must match sandbox/chanabi.go.
 pub const MSG_READY = 1;

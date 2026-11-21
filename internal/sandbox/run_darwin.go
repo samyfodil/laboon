@@ -499,7 +499,7 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 	if err := ch.wait(); err != nil {
 		return 0, err
 	}
-	if ch.page.kind != msgSyscall && ch.page.kind != msgTraceLocal {
+	if !guestMsg(ch.page.kind) {
 		// The stub self-loads and enters the guest, so the first message is a
 		// syscall (or, traced, the report of one it served itself), not a
 		// READY handshake. Anything else is a protocol error.
@@ -537,7 +537,17 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 			if err := ch.wait(); err != nil {
 				return 0, err
 			}
-			if ch.page.kind != msgSyscall && ch.page.kind != msgTraceLocal {
+			if !guestMsg(ch.page.kind) {
+				return 0, fmt.Errorf("stub protocol: expected syscall, got %d", ch.page.kind)
+			}
+			continue
+		}
+		if ch.page.kind == msgSeccomp {
+			g.seccompCheck()
+			if err := ch.wait(); err != nil {
+				return 0, err
+			}
+			if !guestMsg(ch.page.kind) {
 				return 0, fmt.Errorf("stub protocol: expected syscall, got %d", ch.page.kind)
 			}
 			continue
@@ -556,7 +566,7 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 			if err := ch.wait(); err != nil {
 				return 0, err
 			}
-			if ch.page.kind != msgSyscall {
+			if !guestMsg(ch.page.kind) {
 				return 0, fmt.Errorf("stub protocol: expected syscall, got %d", ch.page.kind)
 			}
 			continue
@@ -762,10 +772,16 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 		if err := ch.wait(); err != nil {
 			return 0, err
 		}
-		if ch.page.kind != msgSyscall && ch.page.kind != msgTraceLocal {
+		if !guestMsg(ch.page.kind) {
 			return 0, fmt.Errorf("stub protocol: expected syscall, got %d", ch.page.kind)
 		}
 	}
+}
+
+// guestMsg reports whether kind is a message a guest thread posts for its
+// call: the call itself, the report of one served in-guest, or a filter check.
+func guestMsg(kind uint64) bool {
+	return kind == msgSyscall || kind == msgTraceLocal || kind == msgSeccomp
 }
 
 // writeSeatbeltPaths writes <chan>.paths, the two host trees the stubs'

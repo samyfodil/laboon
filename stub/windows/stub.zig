@@ -64,9 +64,13 @@ const WIN_SIZE: usize = 256 << 10;
 const MSG_READY: u64 = 1;
 const MSG_SYSCALL: u64 = 2;
 const MSG_TRACE_LOCAL: u64 = 5; // an in-guest-served syscall, posted only for its ptrace stops
+const MSG_SECCOMP: u64 = 7; // a call to run past the guest's seccomp filters before it is served
 // Set by the supervisor in the low-bit alive word (null_fds) when the thread is
 // ptrace-traced: gates MSG_TRACE_LOCAL so an untraced thread posts nothing extra.
 pub const WIN_TRACED: u32 = 1 << 31;
+// Set beside WIN_TRACED when the thread's process has a seccomp filter: each
+// call is posted for the filters' verdict (MSG_SECCOMP) before it is served.
+pub const WIN_SECCOMP: u32 = 1 << 30;
 const REP_RESULT: u64 = 1;
 const REP_START: u64 = 3;
 const REP_PEEK: u64 = 7; // copy guest memory into the slot window, reply MSG_HOSTRET
@@ -294,6 +298,20 @@ pub fn localTraced(nr: u64, args: [6]u64, resume_at: u64, r: u64) u64 {
     exchange(ch);
     if (ch.kind != REP_RESULT) die(0xE0000001);
     return ch.ret;
+}
+
+// seccompCheck posts call nr for the verdict of its process's seccomp filters
+// before it is served: the result when they decided it, null to serve it.
+pub fn seccompCheck(nr: u64, args: [6]u64, resume_at: u64) ?u64 {
+    const ch = slot();
+    if (@atomicLoad(u32, &ch.null_fds, .monotonic) & WIN_SECCOMP == 0) return null;
+    ch.kind = MSG_SECCOMP;
+    ch.nr = nr;
+    ch.args = args;
+    ch.guest_rip = resume_at;
+    exchange(ch);
+    if (ch.kind != REP_RESULT) die(0xE0000001);
+    return if (ch.args[0] != 0) ch.ret else null;
 }
 
 // nullStdio serves read, write and writev on a guest fd 0-2 that the

@@ -607,40 +607,6 @@ func epipeRaises(gnr uint64, a [6]uint64) bool {
 	return false
 }
 
-// applySeccomp runs the installed filters on a real guest syscall and reports
-// how to answer it: handled is true when the syscall must not run, with ret the
-// value the guest sees.
-func (g *dguest) applySeccomp(nr uint32, args [6]uint64, ip uint64) (ret int64, handled bool) {
-	v := g.seccompVerdict(nr, args, ip)
-	switch v & secRetActionFull {
-	case secRetAllow & secRetActionFull, secRetLog & secRetActionFull:
-		return 0, false
-	case secRetErrno & secRetActionFull:
-		e := v & secRetData
-		if e > secMaxErrno {
-			e = secMaxErrno
-		}
-		return -int64(e), true
-	case secRetTrace & secRetActionFull, secRetUserNotif & secRetActionFull:
-		// No tracer or notifier is attached, so the syscall fails with ENOSYS.
-		return -int64(lxENOSYS), true
-	default:
-		// SECCOMP_RET_TRAP, or a kill with no handler: deliver SIGSYS and, as a
-		// trapped syscall does, do not run it. si_errno carries the filter's
-		// SECCOMP_RET_DATA (a nested stub's own trap backstop tags its traps
-		// there, and its SIGSYS handler checks it); si_code is SYS_SECCOMP, and
-		// a/b the call address, syscall number and arch a SIGSYS handler reads.
-		// The result keeps the syscall number, which the kernel leaves in the
-		// register a handler reads (not ENOSYS).
-		const sysSeccomp = 1
-		si := sigInfo{errno: int32(v & secRetData), code: sysSeccomp, a: ip, b: uint64(nr) | uint64(auditArch())<<32}
-		if t := g.sigs().thread(g.pid); t != nil {
-			g.sigs().queue(&t.q, 31, si)
-		}
-		return int64(nr), true
-	}
-}
-
 // raiseSelf makes sig pending for g's thread, for the stub to take on the
 // way out of the current call.
 func (g *dguest) raiseSelf(sig int) {

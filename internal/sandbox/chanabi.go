@@ -32,6 +32,12 @@ const (
 	// Windows: a clone child's first message, its OS thread id in args[0],
 	// which the supervisor opens so a signal can reach it.
 	msgThreadId = 6
+	// Darwin and Windows: a guest syscall of a process with a seccomp filter,
+	// posted before the stub serves it in-guest or forwards it. nr, args and
+	// guestRip are the call; the supervisor runs the filters and replies
+	// repResult with args[0] = 1 and ret the result when they decided it, or
+	// args[0] = 0 to let it run.
+	msgSeccomp = 7
 
 	repResult = 1 // final syscall result in ret
 	repHost   = 2 // perform syscall nr(args) on the host, reply msgHostRet

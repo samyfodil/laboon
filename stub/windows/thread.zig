@@ -95,6 +95,7 @@ fn membarrier(cmd: u64, flags: u64) u64 {
 pub fn serve(t: *sig.Trap) u64 {
     const nr = t.nr;
     const a = arch.args(t.frame);
+    if (stub.seccompCheck(nr, a, t.resume_at)) |r| return r;
     switch (nr) {
         NR.gettid => return stub.localTraced(nr, a, t.resume_at, @as(u64, sig.myTid())),
         NR.set_tid_address => {

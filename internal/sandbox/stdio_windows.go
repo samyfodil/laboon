@@ -211,10 +211,17 @@ func stdioFile(f *os.File, n int) *dfile {
 // so an untraced thread posts nothing extra.
 const winTraced uint32 = 1 << 31
 
+// winSeccomp marks a slot whose process has a seccomp filter: the stub posts
+// each call for the filters' verdict (msgSeccomp) before serving it.
+const winSeccomp uint32 = 1 << 30
+
 func (g *dguest) storeStdio(m uint64) {
 	v := uint32(m)
 	if g.traced.Load() {
 		v |= winTraced
+	}
+	if g.ps != nil && g.ps.seccomp.Load() == secModeFilter {
+		v |= winSeccomp
 	}
 	atomic.StoreUint32(&g.ch.page.alive, v)
 }

@@ -447,6 +447,27 @@ pub const Vmm = struct {
             (if (traced) v.traceLocalStop(ch, sc, r, exchange) else r)
         else
             v.serveSyscall(ch, sc, exchange);
+        v.finish(ch, sc, ret, exchange);
+    }
+
+    // filtered posts sc for the verdict of its process's seccomp filters, when
+    // it has any, and completes the call with their result when they decided
+    // it; false to serve it.
+    pub fn filtered(v: *Vmm, ch: *chan.Chan, sc: Syscall, exchange: ExchangeFn) bool {
+        if (ch.stdio & STDIO_SECCOMP == 0) return false;
+        ch.kind = chan.MSG_SECCOMP;
+        ch.nr = sc.nr;
+        ch.guest_rip = sc.elr;
+        for (0..6) |i| ch.args[i] = sc.args[i];
+        v.served(ch, exchange);
+        if (ch.args[0] == 0) return false;
+        v.finish(ch, sc, ch.ret, exchange);
+        return true;
+    }
+
+    // finish resumes the guest past syscall sc with result ret.
+    fn finish(v: *Vmm, ch: *chan.Chan, sc: Syscall, ret: u64, exchange: ExchangeFn) void {
+        const traced = (ch.stdio & STDIO_TRACED) != 0;
         // One resume context: the syscall result and the resume pc/pstate, then
         // any tracer SETREGS edits (x1..x30/sp go straight to the vcpu), then any
         // pending signals (a delivered handler vectors the vcpu itself).
@@ -991,6 +1012,7 @@ pub const Vmm = struct {
             switch (ev) {
                 .signal => v.deliverAsync(ch, exchange),
                 .syscall => |sc| {
+                    if (v.filtered(ch, sc, exchange)) continue;
                     if (sc.nr == NR_EXIT) return v.threadExit(ch, ctid, sc.args[0]);
                     var s = sc;
                     if (s.nr == NR_SET_TID_ADDRESS) s.nr = NR_GETTID;
@@ -1360,6 +1382,7 @@ const CLONE_CHILD_SETTID: u64 = 0x1000000;
 // as [kind u64][dirty u64][34 regs: x0..x30, sp, pc, pstate].
 pub const STDIO_TRACED: u64 = 1 << 63;
 pub const STDIO_SINGLESTEP: u64 = 1 << 62; // the supervisor asked for one-instruction step
+pub const STDIO_SECCOMP: u64 = 1 << 61; // its process has a seccomp filter: each call is checked first
 const TRACE_AREA_OFF: usize = chan.SLOT_SIZE * chan.MAX_SLOTS; // = supervisor slotsLen
 const TRACE_SIG_STRIDE: usize = 0x4000; // = supervisor sigStride
 const TRACE_REGS_OFF: usize = 256;
