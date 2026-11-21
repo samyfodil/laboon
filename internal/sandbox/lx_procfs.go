@@ -199,13 +199,29 @@ func (fs *dfs) initProcfs(stubPid int, exe string, argv, env []string, stdio [3]
 	}
 	fs.pst.boot = &procInfo{exe: exe, argv: argv, env: env, start: time.Now()}
 	if fs.upperAbs != "" {
-		shm := hostfs.HostPath(fs.upperAbs, "/dev/shm")
-		if os.MkdirAll(shm, 0o755) == nil {
-			// os.FileMode encodes the sticky bit as ModeSticky (1<<20), not the
-			// Unix 0o1000, so os.Chmod(shm, 0o1777) would silently drop it.
-			os.Chmod(shm, 0o777|os.ModeSticky)
-		}
+		fs.provisionShm()
 	}
+}
+
+// provisionShm makes /dev/shm a sticky world-writable directory, as the
+// kernel's shm tmpfs is, creating it and /dev in the writable layer if absent.
+func (fs *dfs) provisionShm() {
+	cur, err := fs.ns.Resolve("/", true)
+	if err != nil {
+		return
+	}
+	for _, name := range []string{"dev", "shm"} {
+		child, err := cur.FS.Lookup(cur.Node, name)
+		if err != nil {
+			child, err = cur.FS.Create(cur.Node, name, core.CreateSpec{Kind: core.Dir, Mode: 0o755})
+		}
+		if err != nil || child.Kind() != core.Dir {
+			return
+		}
+		cur.Node = child
+	}
+	mode := uint32(0o1777)
+	cur.Node.SetAttr(core.AttrUpdate{Mode: &mode})
 }
 
 func (pi *procInfo) forked() *procInfo {
