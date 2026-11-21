@@ -199,16 +199,20 @@ func (g *dguest) readMem(addr uint64, n int) ([]byte, error) {
 	return out, nil
 }
 
-// forceWriteMem is writeMem for ptrace: the stub's poke, which forces no
-// write into text the guest may not write (see ptraceAccess).
-func (g *dguest) forceWriteMem(addr uint64, data []byte) error { return g.writeMem(addr, data) }
+// forceWriteMem writes data into guest memory at addr as ptrace does, into a
+// page the guest may not write too (FOLL_FORCE).
+func (g *dguest) forceWriteMem(addr uint64, data []byte) error {
+	return g.pokeMem(repForcePoke, addr, data)
+}
 
 // writeMem copies data into guest memory at addr via the stub's poke.
-func (g *dguest) writeMem(addr uint64, data []byte) error {
+func (g *dguest) writeMem(addr uint64, data []byte) error { return g.pokeMem(repPoke, addr, data) }
+
+func (g *dguest) pokeMem(kind, addr uint64, data []byte) error {
 	for off := 0; off < len(data); {
 		chunk := min(len(data)-off, winSize)
 		copy(g.window()[:chunk], data[off:off+chunk])
-		if err := g.ch.copyOp(repPoke, addr+uint64(off), uint64(chunk)); err != nil {
+		if err := g.ch.copyOp(kind, addr+uint64(off), uint64(chunk)); err != nil {
 			return err
 		}
 		off += chunk

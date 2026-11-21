@@ -502,7 +502,6 @@ pub fn serveTrap(mc: *std.c.mcontext_t, avx: bool) void {
 // The call has already run, so a tracer can observe it and rewrite its result,
 // but cannot edit the arguments or suppress it.
 fn localTraced(frame: [*]u64, r: u64) u64 {
-    if (!tstate.arm64) return r; // x86-64 ptrace deferred (not on the startup path)
     const ch = g_chan;
     if (ch.stdio & STDIO_TRACED == 0) return r;
     sig.publishFrame(frame, frame[33]);
@@ -681,9 +680,7 @@ fn serveSyscall(frame: [*]u64) u64 {
     const ch = g_chan;
     // A traced thread publishes its register frame before posting, so the
     // supervisor's syscall-entry stop and GETREGS see the guest state.
-    if (tstate.arm64) {
-        if (ch.stdio & STDIO_TRACED != 0) sig.publishFrame(frame, frame[33]);
-    }
+    if (ch.stdio & STDIO_TRACED != 0) sig.publishFrame(frame, frame[33]);
     ch.kind = chan.MSG_SYSCALL;
     ch.nr = frame[8]; // the raw guest number; the supervisor translates it
     if (gen == NR_SET_TID_ADDRESS) {
@@ -705,9 +702,7 @@ fn serveSyscall(frame: [*]u64) u64 {
     if (!tstate.arm64 and @as(i64, @bitCast(r)) >= 0 and cutsFile(frame)) mem.refence();
     // A tracer may have edited the registers during a stop; apply them before
     // the guest resumes, overriding the syscall result in x0.
-    if (tstate.arm64) {
-        if (ch.stdio & STDIO_TRACED != 0 and sig.traceState().dirty != 0) return sig.traceRestore(frame);
-    }
+    if (ch.stdio & STDIO_TRACED != 0 and sig.traceState().dirty != 0) return sig.traceRestore(frame);
     return r;
 }
 
@@ -763,6 +758,11 @@ pub fn serveRequest(ch: *chan.Chan) bool {
         },
         chan.REP_POKE => {
             ch.ret = @intFromBool(!sig.copyGuest(ch.args[0], @intFromPtr(window(ch)), ch.args[1]));
+            ch.kind = chan.MSG_HOSTRET;
+        },
+        chan.REP_FORCEPOKE => {
+            const src = @intFromPtr(window(ch));
+            ch.ret = @intFromBool(!sig.copyGuest(ch.args[0], src, ch.args[1]) and !mem.forceWrite(ch.args[0], src, ch.args[1]));
             ch.kind = chan.MSG_HOSTRET;
         },
         chan.REP_REWRITE => lcRewrite(ch), // rewrite a runtime-loaded lib's sites

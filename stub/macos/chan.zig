@@ -43,6 +43,8 @@ pub const REP_FORKCHILD: u64 = 21;
 // smaps.SmapEnt records, each with its counts; ret = count, args[1] = where to
 // resume (0: done).
 pub const REP_SMAPS: u64 = 22;
+// REP_POKE into pages the guest may not write too, as ptrace's writes.
+pub const REP_FORCEPOKE: u64 = 24;
 
 // Per-slot scratch buffer after the header, for the small ops that pass data.
 pub const SCRATCH_OFF: usize = 128;

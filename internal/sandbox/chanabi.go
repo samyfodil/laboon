@@ -83,6 +83,9 @@ const (
 	// macOS only: repMaps with each mapping's counts for /proc/<pid>/smaps
 	// (stub/macos/smaps.zig SmapEnt).
 	repSmaps = 22
+	// macOS only: repPoke into pages the guest may not write too, as
+	// ptrace's writes (FOLL_FORCE).
+	repForcePoke = 24
 	// Windows only: a stub started ahead on a spare slot moves to the slot
 	// at offset args[0], whose events it finds in that slot's stdio and
 	// pinfo fields, and reports msgReady there (stubpool_windows.go).

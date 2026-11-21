@@ -1664,6 +1664,30 @@ pub fn protAt(addr: u64) ?u32 {
     return @intCast(r.info.prot);
 }
 
+// forceWrite copies n bytes from src to the guest's addr as ptrace writes:
+// into a mapped page the guest may not write too, which takes write access
+// for the copy. arm64 code pages are left to the copy's own W^X handling.
+pub fn forceWrite(addr: u64, src: u64, n: u64) bool {
+    if (n == 0) return true;
+    var prots: [65]u8 = undefined; // a poke is at most the 256 KiB window, 65 pages straddling
+    const lo = addr & ~(PAGE - 1);
+    const np = (rdUp(addr + n) - lo) / PAGE;
+    if (np > prots.len) return false;
+    for (0..np) |i| {
+        const p = protAt(lo + i * PAGE) orelse return false;
+        if (p & PROT_WRITE == 0 and p & PROT_EXEC != 0 and !X86) return false;
+        prots[i] = @intCast(p);
+    }
+    for (0..np) |i| {
+        if (prots[i] & PROT_WRITE == 0) _ = sys(SYS_mprotect, lo + i * PAGE, PAGE, prots[i] | PROT_WRITE, 0, 0, 0);
+    }
+    const ok = sig.copyGuest(addr, src, n);
+    for (0..np) |i| {
+        if (prots[i] & PROT_WRITE == 0) _ = sys(SYS_mprotect, lo + i * PAGE, PAGE, prots[i], 0, 0, 0);
+    }
+    return ok;
+}
+
 // pastEnd reports whether addr is in a page of a shared file mapping that
 // lies wholly past the file's end, which has no page to give.
 pub fn pastEnd(addr: u64) bool {

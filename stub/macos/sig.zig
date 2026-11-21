@@ -96,7 +96,8 @@ pub const NR_RT_SIGPENDING: u64 = 136;
 pub const NR_RT_SIGTIMEDWAIT: u64 = 137;
 pub const NR_RT_SIGRETURN: u64 = 139;
 const NR_EXIT: u64 = 93; // arm64; trapEnter serves arm64 only
-const NR_RESTART_SYSCALL: u64 = 128;
+// The guest's own number for restart_syscall, which the frame holds.
+const NR_RESTART_SYSCALL: u64 = if (tstate.arm64) 128 else 219;
 // epipeRaises matches these against frame[8], which is the raw guest number
 // (asm-generic on arm64, x86-64 on x86-64), not the translated dispatch number.
 const NR_WRITE: u64 = if (tstate.arm64) 64 else 1;
@@ -150,6 +151,8 @@ const BUS_ADRALN: i32 = 1;
 const BUS_ADRERR: i32 = 2;
 const ILL_ILLOPC: i32 = 1;
 const TRAP_BRKPT: i32 = 1;
+const TRAP_TRACE: i32 = 2;
+const SI_KERNEL: i32 = 0x80;
 
 // Linux errnos (negated on return) and the restart codes a supervisor-served
 // or stub-local syscall returns when a signal interrupts it.
@@ -430,31 +433,114 @@ pub fn traceState() *TraceState {
 // x0..x30 from the trap frame, the guest sp (proc.guestSp), the resume pc,
 // and NZCV. The supervisor reads this for the syscall stop and GETREGS.
 pub fn publishFrame(frame: [*]u64, pc: u64) void {
-    if (!tstate.arm64) @compileError("publishFrame: x86-64 frame image pending the trampoline register frame (AMD64.md 1e/1f)");
     const s = traceState();
     s.kind = 1;
     s.dirty = 0;
-    for (0..31) |i| s.regs.x[i] = frame[i];
-    s.regs.sp = proc.guestSp(frame);
-    s.regs.pc = pc;
-    s.regs.pstate = frame[31] & 0xf0000000;
+    if (tstate.arm64) {
+        for (0..31) |i| s.regs.x[i] = frame[i];
+        s.regs.sp = proc.guestSp(frame);
+        s.regs.pc = pc;
+        s.regs.pstate = frame[31] & 0xf0000000;
+        return;
+    }
+    // As Linux leaves them at syscall entry: rcx the resume pc, r11 the flags,
+    // orig_rax the syscall number.
+    const fl = frame[proc.XR_RFLAGS];
+    s.regs = .{
+        .r15 = frame[proc.XR_R15], .r14 = frame[proc.XR_R14], .r13 = frame[proc.XR_R13], .r12 = frame[proc.XR_R12],
+        .rbp = frame[proc.XR_RBP], .rbx = frame[proc.XR_RBX], .r11 = fl, .r10 = frame[proc.XR_R10],
+        .r9 = frame[proc.XR_R9], .r8 = frame[proc.XR_R8], .rax = frame[8], .rcx = pc,
+        .rdx = frame[proc.XR_RDX], .rsi = frame[proc.XR_RSI], .rdi = frame[proc.XR_RDI], .orig_rax = frame[8],
+        .rip = pc, .cs = 0x33, .eflags = fl, .rsp = frame[proc.XR_RSP], .ss = 0x2b,
+        .fs_base = @import("root").g_guest_fsbase, .gs_base = 0, .ds = 0, .es = 0, .fs = 0, .gs = 0,
+    };
 }
 
-// traceRestore applies a tracer's register edits (SETREGS/POKEUSER) to the
-// trap frame before the guest resumes: x1..x30, the resume pc and NZCV go back
-// into the frame the trampoline epilogue restores, and the edited x0 is
-// returned (x0 is the handler's return value, not restored from the frame).
-// The guest sp cannot be moved here (the frame sits on it), matching the
-// supervisor's refusal to relocate it.
+// traceRestore applies a tracer's register edits (SETREGS/POKEUSER) before the
+// guest resumes and returns the edited result register. arm64: x1..x30, the
+// resume pc and NZCV go back into the frame the trampoline epilogue restores
+// (x0 is the handler's return value); the guest sp cannot be moved, the frame
+// sitting on it, matching the supervisor's refusal to relocate it. x86-64: the
+// registers go straight into the trap's context, the resume pc into the frame.
 pub fn traceRestore(frame: [*]u64) u64 {
-    if (!tstate.arm64) @compileError("traceRestore: x86-64 frame image pending the trampoline register frame (AMD64.md 1e/1f)");
     const s = traceState();
     s.dirty = 0;
-    for (1..31) |i| frame[i] = s.regs.x[i];
-    frame[33] = s.regs.pc;
-    frame[31] = (frame[31] & ~@as(u64, 0xf0000000)) | (s.regs.pstate & 0xf0000000);
-    return s.regs.x[0];
+    if (tstate.arm64) {
+        for (1..31) |i| frame[i] = s.regs.x[i];
+        frame[33] = s.regs.pc;
+        frame[31] = (frame[31] & ~@as(u64, 0xf0000000)) | (s.regs.pstate & 0xf0000000);
+        return s.regs.x[0];
+    }
+    const g = &s.regs;
+    const ss = &g_sigmc.ss;
+    ss.r15 = g.r15;
+    ss.r14 = g.r14;
+    ss.r13 = g.r13;
+    ss.r12 = g.r12;
+    ss.rbp = g.rbp;
+    ss.rbx = g.rbx;
+    ss.r11 = g.r11;
+    ss.r10 = g.r10;
+    ss.r9 = g.r9;
+    ss.r8 = g.r8;
+    ss.rcx = g.rcx;
+    ss.rdx = g.rdx;
+    ss.rsi = g.rsi;
+    ss.rdi = g.rdi;
+    ss.rsp = g.rsp;
+    ss.rflags = (ss.rflags & ~USER_FLAGS) | (g.eflags & USER_FLAGS);
+    frame[33] = g.rip;
+    return g.rax;
 }
+
+const STDIO_TRACED: u64 = 1 << 63;
+
+fn traced() bool {
+    return myChan().stdio & STDIO_TRACED != 0;
+}
+
+// publishCtx publishes an x86-64 guest's registers at a signal stop: rip the
+// interrupted pc, rcx and r11 the guest's own, and no syscall.
+fn publishCtx(c: *const Ctx) void {
+    const s = traceState();
+    s.kind = 2;
+    s.dirty = 0;
+    s.regs = .{
+        .r15 = c.r15, .r14 = c.r14, .r13 = c.r13, .r12 = c.r12, .rbp = c.rbp, .rbx = c.rbx,
+        .r11 = c.r11, .r10 = c.r10, .r9 = c.r9, .r8 = c.r8, .rax = c.rax, .rcx = c.rcx,
+        .rdx = c.rdx, .rsi = c.rsi, .rdi = c.rdi, .orig_rax = std.math.maxInt(u64),
+        .rip = c.rip, .cs = 0x33, .eflags = c.rflags, .rsp = c.rsp, .ss = 0x2b,
+        .fs_base = @import("root").g_guest_fsbase, .gs_base = 0, .ds = 0, .es = 0, .fs = 0, .gs = 0,
+    };
+}
+
+// restoreCtx applies a tracer's edits from a signal stop onto c.
+fn restoreCtx(c: *Ctx) void {
+    const s = traceState();
+    s.dirty = 0;
+    const g = &s.regs;
+    c.r15 = g.r15;
+    c.r14 = g.r14;
+    c.r13 = g.r13;
+    c.r12 = g.r12;
+    c.rbp = g.rbp;
+    c.rbx = g.rbx;
+    c.r11 = g.r11;
+    c.r10 = g.r10;
+    c.r9 = g.r9;
+    c.r8 = g.r8;
+    c.rax = g.rax;
+    c.rcx = g.rcx;
+    c.rdx = g.rdx;
+    c.rsi = g.rsi;
+    c.rdi = g.rdi;
+    c.rip = g.rip;
+    c.rsp = g.rsp;
+    c.rflags = (c.rflags & ~USER_FLAGS) | (g.eflags & USER_FLAGS);
+}
+
+// The flags a tracer may set: the arithmetic ones, TF and DF.
+const USER_FLAGS: u64 = 0xdd5;
 
 fn ld(p: *const u64) u64 {
     return @atomicLoad(u64, p, .acquire);
@@ -707,13 +793,8 @@ fn goCall(nr: u64, a0: u64, a1: u64) u64 {
     return goCallArgs(nr, .{ a0, a1, 0, 0, 0, 0 });
 }
 
-// codeCall makes a call for wx.zig from its fault handling, the thread busy
-// meanwhile: a supervisor read of memory gone since faults into the copy's
-// recovery rather than the stub.
+// codeCall makes a call for wx.zig from its fault handling.
 pub fn codeCall(nr: u64, args: [6]u64) u64 {
-    const was = tl.busy;
-    setBusy(&tl, true);
-    defer setBusy(&tl, was);
     return goCallArgs(nr, args);
 }
 
@@ -722,7 +803,13 @@ pub fn scratch() [*]u8 {
     return @ptrFromInt(@intFromPtr(myChan()) + chan.SCRATCH_OFF);
 }
 
+// goCallArgs makes a call to the supervisor, the thread busy meanwhile: a
+// peek or poke it serves through a ptrace stop, or a read of memory gone
+// since, faults into the copy's recovery rather than the stub.
 fn goCallArgs(nr: u64, args: [6]u64) u64 {
+    const was = tl.busy;
+    setBusy(&tl, true);
+    defer setBusy(&tl, was);
     const ch = myChan();
     ch.kind = chan.MSG_SYSCALL;
     ch.nr = nr;
@@ -1166,7 +1253,13 @@ fn dispatchAll(c: *Ctx) bool {
     while (true) {
         var info: Info = undefined;
         var act: Act = undefined;
+        const tr = !tstate.arm64 and traced();
+        if (tr) publishCtx(c);
         const s = take(~ld(&thr().mask), &info, &act);
+        if (tr and traceState().dirty != 0) {
+            restoreCtx(c);
+            changed = true;
+        }
         if (s == 0) return changed;
         switch (classify(s, act)) {
             .ignore => {},
@@ -1303,7 +1396,8 @@ pub fn afterSyscall(frame: [*]u64, r0: u64) ?u64 {
     return pendingAfter(frame, r0);
 }
 
-noinline fn pendingAfter(frame: [*]u64, r0: u64) ?u64 {
+noinline fn pendingAfter(frame: [*]u64, r_in: u64) ?u64 {
+    var r0 = r_in;
     clearKick(); // answered by the look for signals below; a restart issues the call again
     // A temporary mask stays in force for the handlers of the signals that
     // interrupted the call, whose frames restore the real one; otherwise the
@@ -1322,7 +1416,15 @@ noinline fn pendingAfter(frame: [*]u64, r0: u64) ?u64 {
     while (true) {
         var info: Info = undefined;
         var act: Act = undefined;
+        // An x86-64 tracer at the signal's stop sees the call returned, and
+        // its edits go to the context the guest resumes in.
+        const tr = !tstate.arm64 and traced();
+        if (tr) {
+            publishFrame(frame, frame[33]);
+            traceState().regs.rax = r0;
+        }
         const s = take(~ld(&thr().mask), &info, &act);
+        if (tr and traceState().dirty != 0) r0 = traceRestore(frame);
         if (s != 0) {
             switch (classify(s, act)) {
                 .ignore => continue,
@@ -1618,10 +1720,15 @@ fn faultSignal(dsig: c_int, mc: *const std.c.mcontext_t, info: *Info) u32 {
                 code = ILL_ILLOPC;
                 addr = pc;
             },
-            1, 3 => { // #DB debug/single-step, #BP int3
+            1 => { // #DB: a trap-flag single step
                 sig = SIGTRAP;
-                code = TRAP_BRKPT;
+                code = TRAP_TRACE;
                 addr = pc;
+            },
+            3 => { // #BP: int3, which Linux reports as the kernel's
+                sig = SIGTRAP;
+                code = SI_KERNEL;
+                addr = 0;
             },
             else => switch (dsig) {
                 DW_SIGILL => {
@@ -1802,10 +1909,25 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
     // A synchronous signal cannot be blocked or ignored: the supervisor
     // resets it to the default action, which kills.
     const t = thr();
-    _ = goCallArgs(LC_SIGFAULT, .{ sig, @intFromBool(ld(&t.mask) & bit(sig) != 0), info.a, @as(u32, @bitCast(info.code)), if (tstate.arm64) c.pc else c.rip, 0 });
+    const tr = !tstate.arm64 and traced();
+    if (tr) publishCtx(&c);
+    const got: u32 = @truncate(goCallArgs(LC_SIGFAULT, .{ sig, @intFromBool(ld(&t.mask) & bit(sig) != 0), info.a, @as(u32, @bitCast(info.code)), if (tstate.arm64) c.pc else c.rip, 0 }));
+    var fsig = sig;
+    if (tr) {
+        // The tracer may have edited the registers, and dropped the signal
+        // or put another in its place.
+        if (traceState().dirty != 0) restoreCtx(&c);
+        if (got == 0) {
+            _ = dispatchAll(&c);
+            toMc(mc, &c);
+            return;
+        }
+        fsig = got;
+        info.signo = @intCast(fsig);
+    }
     const act = replyOf(myChan()).act;
-    if (classify(sig, act) != .handler) die(sig);
-    deliverOnto(&c, sig, &info, act, ld(&t.mask), true);
+    if (classify(fsig, act) != .handler) die(fsig);
+    deliverOnto(&c, fsig, &info, act, ld(&t.mask), true);
     _ = dispatchAll(&c);
     toMc(mc, &c);
 }
