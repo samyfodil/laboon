@@ -294,17 +294,41 @@ static void register_child(void) {
         : "r13", "rcx", "r11", "memory");
     CHECK(saved == 0x87654321);
 #endif
+    CHECK(syscall(SYS_getppid) == getppid());
     _exit(0);
 }
 
 static void register_tracer(pid_t child) {
     CHECK(ptrace(PTRACE_SETOPTIONS, child, 0, PTRACE_O_TRACESYSGOOD) == 0);
     CHECK(ptrace(PTRACE_SYSCALL, child, 0, 0) == 0);
-    int st, changed = 0, returned = 0, delivered = 0;
+    int st, changed = 0, returned = 0, delivered = 0, stepped = 0;
     while (1) {
         CHECK(waitpid(child, &st, 0) == child);
         if (WIFEXITED(st)) { CHECK(WEXITSTATUS(st) == 0); break; }
         CHECK(WIFSTOPPED(st));
+        if (WSTOPSIG(st) == (SIGTRAP | 0x80)) {
+            // A single-step from a syscall-entry stop runs the call, then
+            // traps with its result in place.
+            struct ptrace_syscall_info info;
+            CHECK(ptrace(PTRACE_GET_SYSCALL_INFO, child, sizeof(info), &info) >= 24);
+            if (info.op == PTRACE_SYSCALL_INFO_ENTRY && info.entry.nr == SYS_getppid && !stepped) {
+                CHECK(ptrace(PTRACE_SINGLESTEP, child, 0, 0) == 0);
+                CHECK(waitpid(child, &st, 0) == child && WIFSTOPPED(st) && WSTOPSIG(st) == SIGTRAP);
+                siginfo_t si;
+                CHECK(ptrace(PTRACE_GETSIGINFO, child, 0, &si) == 0 && si.si_signo == SIGTRAP);
+                unsigned long rv[34];
+                struct iovec iov = {rv, sizeof(rv)};
+                CHECK(ptrace(PTRACE_GETREGSET, child, 1, &iov) == 0);
+#if defined(__x86_64__)
+                CHECK(si.si_code == TRAP_BRKPT && rv[offsetof(struct user_regs_struct, rax) / 8] == (unsigned long)getpid());
+#else
+                CHECK(si.si_code == SI_USER && rv[0] == (unsigned long)getpid());
+#endif
+                stepped++;
+                CHECK(ptrace(PTRACE_SYSCALL, child, 0, 0) == 0);
+                continue;
+            }
+        }
 #if defined(__x86_64__)
         struct user_regs_struct regs;
         CHECK(ptrace(PTRACE_GETREGS, child, 0, &regs) == 0);
@@ -340,6 +364,7 @@ static void register_tracer(pid_t child) {
 #endif
         CHECK(ptrace(PTRACE_SYSCALL, child, 0, 0) == 0);
     }
+    CHECK(stepped == 1);
 #if defined(__x86_64__)
     CHECK(changed == 1 && returned == 1 && delivered == 1);
 #endif

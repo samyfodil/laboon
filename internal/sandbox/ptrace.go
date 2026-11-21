@@ -94,6 +94,9 @@ type tracee struct {
 	dirty  bool
 	dr6    uint64
 	steps  []stepTrap // an arm64 software single-step's breakpoints (armStep)
+	// stepCall is a single-step from a syscall-entry stop: the call runs and
+	// the tracee traps after it, as Linux's user_single_step_report.
+	stepCall bool
 }
 
 type stepTrap struct {
@@ -202,7 +205,9 @@ func (g *dguest) ptrace(a [6]uint64) int64 {
 		}
 		t.options = a[3]
 	case ptraceCont, ptraceSyscall, ptraceDetach, ptraceKill, ptraceSinglestep:
-		if a[0] == ptraceSinglestep && !t.g.ps.hvf {
+		step := a[0] == ptraceSinglestep && t.op != ptraceInfoEntry
+		t.stepCall = a[0] == ptraceSinglestep && t.op == ptraceInfoEntry
+		if step && !t.g.ps.hvf {
 			if runtime.GOARCH == "arm64" {
 				if !t.armStep() {
 					return sErr(lxEIO)
@@ -220,7 +225,7 @@ func (g *dguest) ptrace(a [6]uint64) int64 {
 		}
 		if runtime.GOARCH == "amd64" {
 			flags := le64(t.regs[18*8:]) &^ uint64(0x100)
-			if a[0] == ptraceSinglestep {
+			if step {
 				flags |= 0x100
 			}
 			if flags != le64(t.regs[18*8:]) {
@@ -231,7 +236,7 @@ func (g *dguest) ptrace(a [6]uint64) int64 {
 		t.syscall = a[0] == ptraceSyscall
 		if t.g.ps.hvf { // an HVF tracee single-steps via the stdio word, not TF
 			m := t.g.stdioMask()
-			if a[0] == ptraceSinglestep {
+			if step {
 				m |= stdioSinglestep
 			}
 			t.g.storeStdio(m)
@@ -439,7 +444,7 @@ func resultOffset() int {
 func (t *tracee) registers() []byte { return t.regs }
 
 func (t *tracee) canStep() bool {
-	if runtime.GOARCH != "amd64" || t.op == ptraceInfoEntry || !ptraceStepOK {
+	if runtime.GOARCH != "amd64" || !ptraceStepOK {
 		return false
 	}
 	pc := le64(t.regs[16*8:])
@@ -465,9 +470,6 @@ func (t *tracee) canStep() bool {
 // pc can go next, taken out again at its next stop (unstep). A syscall site
 // goes through the supervisor and comes back past itself.
 func (t *tracee) armStep() bool {
-	if t.op == ptraceInfoEntry {
-		return false
-	}
 	pc := le64(t.regs[32*8:])
 	m := t.mem
 	internal := func(a uint64) bool { return a >= ptStubLo && a < ptStubHi || m.ptraceInternalPC(a) }
@@ -689,13 +691,18 @@ func (g *dguest) ptraceSyscallExit(ret int64) {
 	g.flushOuts() // traced since the call began: the stop shows its results
 	fs := g.dfs
 	fs.mu.Lock()
-	inject := 0
+	inject, step := 0, false
+	var si sigInfo
 	if pr := fs.ptraceRun(); pr != nil {
 		if t := pr.tasks[g.pid]; t != nil && t.attached {
 			t.call.ret = ret
 			frame := g.traceFrame()
 			put64(frame[16+resultOffset():], uint64(ret))
-			if t.syscall {
+			step, t.stepCall = t.stepCall, false
+			if step && runtime.GOARCH == "amd64" {
+				si = sigInfo{code: 1, a: t.call.ip} // TRAP_BRKPT
+			}
+			if t.syscall && !step {
 				sig := sigTRAP
 				if t.options&ptraceOTracesysgood != 0 {
 					sig |= 0x80
@@ -707,6 +714,12 @@ func (g *dguest) ptraceSyscallExit(ret int64) {
 	}
 	fs.mu.Unlock()
 	g.ptraceInject(inject)
+	if step {
+		sr := g.sigs()
+		if p, th := sr.proc(g.tgid), sr.thread(g.pid); p != nil && th != nil {
+			sr.send(p, th, sigTRAP, si, nil)
+		}
+	}
 }
 
 func (g *dguest) ptraceEvent(event int, msg uint64) {
