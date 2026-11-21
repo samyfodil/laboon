@@ -176,6 +176,7 @@ static void shared_offset(void) {
 static void append_procs(void) {
 	struct stat st;
 	int shared = open(p("apf"), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
+	CHECK(shared >= 0);
 	pid_t c = fork();
 	if (c == 0) {
 		int own = open(p("apf"), O_WRONLY | O_APPEND);
@@ -185,6 +186,7 @@ static void append_procs(void) {
 		_exit(0);
 	}
 	int own = open(p("apf"), O_WRONLY | O_APPEND);
+	CHECK(own >= 0);
 	for (int i = 0; i < 200; i++) {
 		CHECK(write(i & 1 ? own : shared, "p", 1) == 1);
 	}

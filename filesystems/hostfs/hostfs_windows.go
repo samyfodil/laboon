@@ -481,6 +481,17 @@ func (fs *WinFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
 	default:
 		disp = windows.OPEN_EXISTING
 	}
+	// An append-only handle cannot truncate, so O_TRUNC is done by a write
+	// handle of its own once the file is open.
+	truncAppend := access&windows.FILE_APPEND_DATA != 0 && flag&os.O_TRUNC != 0
+	if truncAppend {
+		switch disp {
+		case windows.CREATE_ALWAYS:
+			disp = windows.OPEN_ALWAYS
+		case windows.TRUNCATE_EXISTING:
+			disp = windows.OPEN_EXISTING
+		}
+	}
 	h, err := windows.CreateFile(extPath(p), access,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, disp, fileFlagsReparseBackup, 0)
 	if err == windows.ERROR_ACCESS_DENIED && access&windows.FILE_WRITE_ATTRIBUTES != 0 {
@@ -500,10 +511,35 @@ func (fs *WinFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
 		windows.CloseHandle(h)
 		return nil, &os.PathError{Op: "open", Path: p, Err: lxELOOP}
 	}
+	if truncAppend {
+		if err := truncateSame(p, &fi); err != nil {
+			windows.CloseHandle(h)
+			return nil, &os.PathError{Op: "open", Path: p, Err: err}
+		}
+	}
 	if disp == windows.CREATE_NEW {
 		metaSet(handleKey(&fi), lxSIFREG|uint32(perm.Perm()))
 	}
 	return os.NewFile(uintptr(h), p), nil
+}
+
+// truncateSame empties the file at p, which must still be the object fi
+// describes (an open handle's), through a write handle of its own.
+func truncateSame(p string, fi *windows.ByHandleFileInformation) error {
+	h, err := windows.CreateFile(extPath(p), windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, fileFlagsReparseBackup, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(h)
+	var hi windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &hi); err != nil {
+		return err
+	}
+	if handleKey(&hi) != handleKey(fi) {
+		return windows.ERROR_FILE_NOT_FOUND // the name was swapped under the open
+	}
+	return windows.Ftruncate(h, 0)
 }
 
 func (fs *WinFS) hLstat(p string) (os.FileInfo, error) {
