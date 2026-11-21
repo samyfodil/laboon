@@ -14,19 +14,6 @@ extern "c" fn sched_yield() c_int;
 
 const Timespec = extern struct { sec: i64, nsec: i64 };
 
-// cpuClock serves CLOCK_PROCESS_CPUTIME_ID and CLOCK_THREAD_CPUTIME_ID. Darwin
-// serves per-process/-thread CPU time through a Mach call (task_info/
-// thread_info), which the Seatbelt profile denies, and the denial kills the
-// process outright -- no signal, no crash report. That is exactly how ruby,
-// mariadb and bash died: all read a CPU-time clock at startup; node and python,
-// which read only the monotonic clock, did not. getrusage hits the same Mach
-// call. There is no plain syscall for CPU time here, so approximate it with the
-// monotonic clock (mach-free): exact for a busy thread, an over-estimate while
-// it sleeps, and enough for the timers and coarse profiling that read it.
-fn cpuClock(tsAddr: u64) u64 {
-    return putClock(DW_CLOCK_MONOTONIC, tsAddr);
-}
-
 // putClock stores clock clk's time at the guest timespec tsAddr, which may be
 // bad: the time is read here and copied out as copy_to_user would.
 fn putClock(clk: c_int, tsAddr: u64) u64 {
@@ -54,23 +41,21 @@ const EINVAL: i64 = 22;
 const DW_CLOCK_REALTIME: c_int = 0;
 const DW_CLOCK_MONOTONIC_RAW: c_int = 4;
 const DW_CLOCK_MONOTONIC: c_int = 6;
-const DW_CLOCK_PROCESS_CPUTIME_ID: c_int = 12;
-const DW_CLOCK_THREAD_CPUTIME_ID: c_int = 16;
 
 fn neg(e: i64) u64 {
     return @bitCast(-e);
 }
 
-// darwinClock maps a Linux clockid. MONOTONIC and BOOTTIME both map to
-// Darwin's MONOTONIC, which keeps counting across sleep; futex.zig uses the
-// same clock for FUTEX_WAIT_BITSET deadlines.
+// darwinClock maps a Linux clockid the stub reads itself. MONOTONIC and
+// BOOTTIME both map to Darwin's MONOTONIC, which keeps counting across sleep;
+// futex.zig uses the same clock for FUTEX_WAIT_BITSET deadlines. The CPU-time
+// clocks are the supervisor's: it reads them from the host thread or process
+// behind the guest's, any process's, which the Seatbelt keeps from the stub.
 fn darwinClock(id: u64) ?c_int {
     return switch (id) {
-        0, 5, 8 => DW_CLOCK_REALTIME, // REALTIME, _COARSE, _ALARM
+        0, 5, 8, 11 => DW_CLOCK_REALTIME, // REALTIME, _COARSE, _ALARM, TAI
         1, 6, 7, 9 => DW_CLOCK_MONOTONIC, // MONOTONIC, _COARSE, BOOTTIME, _ALARM
         4 => DW_CLOCK_MONOTONIC_RAW,
-        2 => DW_CLOCK_PROCESS_CPUTIME_ID,
-        3 => DW_CLOCK_THREAD_CPUTIME_ID,
         else => null,
     };
 }
@@ -85,12 +70,11 @@ fn nowNs(clk: c_int) i64 {
 pub fn handle(nr: u64, a: [*]const u64) ?u64 {
     return switch (nr) {
         NR_CLOCK_GETTIME => blk: {
-            if (a[0] == 2 or a[0] == 3) break :blk cpuClock(a[1]); // CPU-time clocks, see cpuClock
-            const clk = darwinClock(a[0]) orelse break :blk neg(EINVAL);
+            const clk = darwinClock(a[0]) orelse break :blk null;
             break :blk putClock(clk, a[1]);
         },
         NR_CLOCK_GETRES => blk: {
-            _ = darwinClock(a[0]) orelse break :blk neg(EINVAL);
+            _ = darwinClock(a[0]) orelse break :blk null;
             if (a[1] != 0 and !sig.putTimespec(a[1], .{ 0, 1 })) break :blk neg(EFAULT);
             break :blk 0;
         },

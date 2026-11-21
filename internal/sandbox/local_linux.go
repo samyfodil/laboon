@@ -17,8 +17,6 @@ const (
 	lxSetTidAddress  = 96
 	lxFutex          = 98
 	lxNanosleep      = 101
-	lxClockGettime   = 113
-	lxClockGetres    = 114
 	lxClockNanosleep = 115
 	lxSchedYield     = 124
 	lxGettimeofday   = 169
@@ -33,21 +31,6 @@ func init() {
 		return int64(g.pid)
 	}
 	syscalls[lxFutex] = func(g *dguest, a [6]uint64) int64 { return g.futex(a) }
-	syscalls[lxClockGettime] = func(g *dguest, a [6]uint64) int64 {
-		if a[0] < 12 {
-			return g.host(unix.SYS_CLOCK_GETTIME, a[0], a[1])
-		}
-		return g.putTimespec(a[1], clockNow(int64(int32(a[0]))))
-	}
-	syscalls[lxClockGetres] = func(g *dguest, a [6]uint64) int64 {
-		if a[0] < 12 {
-			return g.host(unix.SYS_CLOCK_GETRES, a[0], a[1])
-		}
-		if a[1] == 0 {
-			return 0
-		}
-		return g.putTimespec(a[1], time.Nanosecond)
-	}
 	syscalls[lxGettimeofday] = func(g *dguest, a [6]uint64) int64 {
 		if a[0] == 0 {
 			return 0
@@ -139,14 +122,21 @@ func (g *dguest) endRseq() {
 // getcpu runs on the guest's own thread, which is the host thread it names.
 func (g *dguest) getcpu(cpu, node uint64) int64 { return g.host(unix.SYS_GETCPU, cpu, node, 0) }
 
-func (g *dguest) putTimespec(addr uint64, d time.Duration) int64 {
-	var b [16]byte
-	put64(b[:], uint64(d/time.Second))
-	put64(b[8:], uint64(d%time.Second))
-	if g.writeMem(addr, b[:]) != nil {
-		return sErr(lxEFAULT)
+// hostClockGettime serves every clock but the CPU-time ones naming another
+// process or thread on the guest's own host thread, which is the host thread
+// and process CLOCK_THREAD_CPUTIME_ID and CLOCK_PROCESS_CPUTIME_ID measure.
+func (g *dguest) hostClockGettime(id int32, addr uint64) (int64, bool) {
+	if id < 0 {
+		return 0, false
 	}
-	return 0
+	return g.host(unix.SYS_CLOCK_GETTIME, uint64(id), addr), true
+}
+
+func (g *dguest) hostClockGetres(id int32, addr uint64) (int64, bool) {
+	if id < 0 {
+		return 0, false
+	}
+	return g.host(unix.SYS_CLOCK_GETRES, uint64(id), addr), true
 }
 
 // futex runs the guest's futex call natively in its stub thread. A wait a

@@ -57,6 +57,10 @@ pub const Thread = extern struct {
     // mask; saved_mask is the real one, put back on the way out.
     saved: u32,
     saved_mask: u64,
+    _win: [2]u32, // the Windows stub's busy and in-handler flags
+    // host_tid is the Darwin id of the thread on the slot, by which the
+    // supervisor reads its CPU time; 0 while none runs there.
+    host_tid: u64,
 };
 
 pub const Proc = extern struct {
@@ -76,6 +80,7 @@ comptime {
     std.debug.assert(@offsetOf(Thread, "tgid") == 56);
     std.debug.assert(@offsetOf(Thread, "saved") == 60);
     std.debug.assert(@offsetOf(Thread, "saved_mask") == 64);
+    std.debug.assert(@offsetOf(Thread, "host_tid") == 80);
     std.debug.assert(@offsetOf(Proc, "pending") == 8);
     std.debug.assert(@offsetOf(Proc, "mem") == 16);
     std.debug.assert(@sizeOf(Thread) <= PROC_OFF);
@@ -218,6 +223,7 @@ const SIG_SETMASK: c_int = 3;
 const KICK_MASK: u32 = (1 << (DW_SIGUSR1 - 1)) | (1 << (DW_SIGUSR2 - 1));
 extern "c" fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) ?*anyopaque;
 extern "c" fn pthread_self() usize;
+extern "c" fn pthread_threadid_np(thread: usize, id: *u64) c_int;
 extern "c" fn pthread_mach_thread_np(t: usize) c_uint;
 extern "c" fn _exit(code: c_int) noreturn;
 extern "c" fn sched_yield() c_int;
@@ -486,6 +492,9 @@ pub fn startThread(slot: usize) void {
     }
     setAltStack();
     @atomicStore(u32, &g_ports[slot], pthread_mach_thread_np(pthread_self()), .release);
+    var id: u64 = 0;
+    _ = pthread_threadid_np(0, &id);
+    @atomicStore(u64, &tl.rec.host_tid, id, .release);
     tl.ready = true;
 }
 
@@ -495,6 +504,7 @@ fn setAltStack() void {
 
 pub fn endThread() void {
     @atomicStore(u32, &g_ports[tl.slot], 0, .release);
+    @atomicStore(u64, &tl.rec.host_tid, 0, .release);
     tl.ready = false;
 }
 

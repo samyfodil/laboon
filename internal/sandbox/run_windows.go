@@ -816,8 +816,6 @@ func (g *wguest) syscall(dg *dguest, nr uint64, a [6]uint64) int64 {
 		return 0
 	case wSetTid:
 		return int64(dg.pid)
-	case wClockGettime:
-		return g.clockGettime(dg, int64(a[0]), a[1])
 	case wGtod:
 		if a[0] == 0 {
 			return 0
@@ -854,12 +852,4 @@ func (g *wguest) syscall(dg *dguest, nr uint64, a [6]uint64) int64 {
 		return sErr(lxENOSYS)
 	}
 	return fromGeneric(nr, a, h(dg, ga))
-}
-
-func (g *wguest) clockGettime(dg *dguest, clock int64, addr uint64) int64 {
-	d := clockNow(clock)
-	var b [16]byte
-	put64(b[:], uint64(d/time.Second))
-	put64(b[8:], uint64(d%time.Second))
-	return dg.putMem(addr, b[:])
 }

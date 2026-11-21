@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -342,4 +343,41 @@ func hostRusage(pid int) rusage {
 		maxrss: int64(buf[30] / 1024), // ri_lifetime_max_phys_footprint
 		majflt: int64(buf[6]),         // ri_pageins
 	}
+}
+
+// hostProcCPU is host process pid's CPU time, user and total.
+func hostProcCPU(pid int) (user, total time.Duration) {
+	t, ok := pidTaskInfo(pid)
+	if !ok {
+		return 0, 0
+	}
+	return t.utime, t.utime + t.stime
+}
+
+// stHostTid is the offset in a thread's signal record of its host thread id
+// (pthread_threadid_np), which stub/macos/sig.zig publishes; 0 while no
+// thread runs on the slot.
+const stHostTid = 80
+
+// threadCPU is the CPU time of g's host thread, user and total, by the id
+// its stub publishes in the thread's signal record.
+func (g *dguest) threadCPU() (user, total time.Duration, ok bool) {
+	sr := g.dfs.sigs()
+	if sr == nil || !loadMach() {
+		return 0, 0, false
+	}
+	tid := atomic.LoadUint64(sr.p64(tOff(g.slot) + stHostTid))
+	if tid == 0 {
+		return 0, 0, false
+	}
+	g.dfs.mu.Lock()
+	ospid := g.ps.ospid
+	g.dfs.mu.Unlock()
+	var b [112]byte // struct proc_threadinfo; its times are in ns
+	const procPidThreadID64Info = 15
+	if procPidinfo(int32(ospid), procPidThreadID64Info, tid, unsafe.Pointer(&b[0]), int32(len(b))) != int32(len(b)) {
+		return 0, 0, false
+	}
+	user = time.Duration(binary.LittleEndian.Uint64(b[0:]))
+	return user, user + time.Duration(binary.LittleEndian.Uint64(b[8:])), true
 }

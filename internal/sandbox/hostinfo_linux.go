@@ -224,3 +224,41 @@ func hostRusage(pid int) rusage {
 	}
 	return r
 }
+
+// hostProcCPU is host process pid's CPU time, user and total; the total is
+// its scheduler clock, to the nanosecond.
+func hostProcCPU(pid int) (user, total time.Duration) {
+	fl, ok := procStat(pid)
+	if !ok {
+		return 0, 0
+	}
+	user = ticksDur(procStatU(fl, 14))
+	var ts unix.Timespec
+	if unix.ClockGettime(int32(^pid<<3|cpuclockSched), &ts) != nil {
+		return user, user + ticksDur(procStatU(fl, 15))
+	}
+	return user, time.Duration(ts.Nano())
+}
+
+// threadCPU is the CPU time of g's host thread, user and total, the total from
+// its schedstat to the nanosecond.
+func (g *dguest) threadCPU() (user, total time.Duration, ok bool) {
+	tid, ok := g.hostTid(0)
+	if !ok {
+		return 0, 0, false
+	}
+	fl, ok := procStat(tid)
+	if !ok {
+		return 0, 0, false
+	}
+	user = ticksDur(procStatU(fl, 14))
+	total = user + ticksDur(procStatU(fl, 15))
+	if b, err := os.ReadFile("/proc/" + strconv.Itoa(tid) + "/schedstat"); err == nil {
+		if f := strings.Fields(string(b)); len(f) > 0 {
+			if ns, err := strconv.ParseInt(f[0], 10, 64); err == nil {
+				total = time.Duration(ns)
+			}
+		}
+	}
+	return user, total, true
+}

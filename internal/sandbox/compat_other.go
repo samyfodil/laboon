@@ -106,3 +106,8 @@ func (g *dguest) readFaulting(f *os.File, buf []byte, tail int, nonblock bool) (
 // rndBits is the kernel's default mmap_rnd_bits for the architecture, which
 // /proc/sys/vm reports.
 func rndBits() uint64 { return mmapRndBits }
+
+// The clocks a stub does not serve itself reach the supervisor: those that
+// are not the host's alike, and the CPU-time clocks.
+func (g *dguest) hostClockGettime(id int32, addr uint64) (int64, bool) { return 0, false }
+func (g *dguest) hostClockGetres(id int32, addr uint64) (int64, bool)  { return 0, false }

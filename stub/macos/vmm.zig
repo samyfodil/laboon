@@ -179,15 +179,13 @@ extern "c" fn nanosleep(req: *const Timespec, rem: ?*Timespec) c_int;
 extern "c" fn getentropy(buf: [*]u8, len: usize) c_int;
 extern "c" fn sched_yield() c_int;
 
-// darwinClock maps a Linux clockid; CPU-time clocks (2,3) approximate with the
-// monotonic clock (Darwin's per-thread CPU time goes through a Mach call the
-// Seatbelt profile would deny, as local.zig notes).
+// darwinClock maps a Linux clockid the VM reads itself; the CPU-time clocks
+// are the supervisor's, as in local.zig.
 fn darwinClock(id: u64) ?c_int {
     return switch (id) {
-        0, 5, 8 => DW_CLOCK_REALTIME, // REALTIME, _COARSE, _ALARM
+        0, 5, 8, 11 => DW_CLOCK_REALTIME, // REALTIME, _COARSE, _ALARM, TAI
         1, 6, 7, 9 => DW_CLOCK_MONOTONIC, // MONOTONIC, _COARSE, BOOTTIME, _ALARM
         4 => DW_CLOCK_MONOTONIC_RAW,
-        2, 3 => DW_CLOCK_MONOTONIC, // PROCESS/THREAD CPUTIME approximated
         else => null,
     };
 }
@@ -795,14 +793,14 @@ pub const Vmm = struct {
             },
             NR_FUTEX, NR_FUTEX_TIME64 => return futexOp(v, sc),
             NR_CLOCK_GETTIME => {
-                const clk = darwinClock(sc.args[0]) orelse return neg(EINVAL);
+                const clk = darwinClock(sc.args[0]) orelse return null;
                 var ts: Timespec = undefined;
                 if (clock_gettime(clk, &ts) != 0) return neg(EFAULT);
                 writeTs(v.ram, sc.args[1], ts);
                 return 0;
             },
             NR_CLOCK_GETRES => {
-                _ = darwinClock(sc.args[0]) orelse return neg(EINVAL);
+                _ = darwinClock(sc.args[0]) orelse return null;
                 if (sc.args[1] != 0) writeTs(v.ram, sc.args[1], .{ .sec = 0, .nsec = 1 });
                 return 0;
             },
@@ -1006,6 +1004,7 @@ pub const Vmm = struct {
     // ctid). Memory/futex stay local; SYS_exit ends the thread (clears the ctid
     // and wakes its joiner); exit_group and a fault end it too.
     pub fn threadRunLoop(v: *Vmm, ch: *chan.Chan, exchange: ExchangeFn, ctid: u64) void {
+        publishHostTid(ch);
         while (true) {
             if (ch.stdio & STDIO_SINGLESTEP != 0) v.enableStep(); // ptrace single-step
             const ev = v.run(ch) catch return;
@@ -1463,6 +1462,8 @@ const SigThread = extern struct {
     tgid: u32,
     saved: u32,
     saved_mask: u64,
+    _win: [2]u32,
+    host_tid: u64, // the supervisor reads the thread's CPU time by it
 };
 const SigProc = extern struct { _res: u64, pending: u64, mem: u64 };
 const SigReply = extern struct { info: Info, act: Act };
@@ -1499,6 +1500,16 @@ pub fn kickRunning() void {
 fn slotIndex(ch: *chan.Chan) usize {
     return (@intFromPtr(ch) - @intFromPtr(g_chan_base)) / chan.SLOT_SIZE;
 }
+extern "c" fn pthread_threadid_np(thread: usize, id: *u64) c_int;
+
+// publishHostTid records the calling vcpu thread's Darwin id in its signal
+// record, for the supervisor's CPU-time clocks.
+pub fn publishHostTid(ch: *chan.Chan) void {
+    var id: u64 = 0;
+    _ = pthread_threadid_np(0, &id);
+    @atomicStore(u64, &sigThreadRec(ch).host_tid, id, .release);
+}
+
 fn sigThreadRec(ch: *chan.Chan) *SigThread {
     return @ptrFromInt(@intFromPtr(g_chan_base) + TRACE_AREA_OFF + slotIndex(ch) * TRACE_SIG_STRIDE);
 }

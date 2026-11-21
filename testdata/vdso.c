@@ -1,12 +1,14 @@
 // vdso: the guest has the kernel's vDSO, as a Linux process does: AT_SYSINFO_EHDR
 // names an ELF image that /proc/self/maps lists as [vdso], the clocks read
 // through it agree with the system calls, the clocks it leaves to the kernel
-// (CPU time, another process's CPU clock) still work, sched_getcpu and getcpu
+// (CPU time, another process's or thread's CPU clock) still work and are
+// refused as Linux refuses them, sched_getcpu and getcpu
 // name a CPU the thread may run on, pinned to one CPU that one, which a fork
 // child keeps, a fork keeps the vDSO, and a program that unmapped it (the
 // range then free), mapped over it or moved it execs with a fresh one.
 #define _GNU_SOURCE
 #include <errno.h>
+#include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,6 +45,56 @@ static void clocks(void) {
 	CHECK(clock_gettime(CLOCK_REALTIME, &a) == 0 && a.tv_sec - time(0) <= 1 && time(0) - a.tv_sec <= 1, "time() and CLOCK_REALTIME");
 	CHECK(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &a) == 0 && ns(a) > 0, "CLOCK_PROCESS_CPUTIME_ID");
 	CHECK(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &a) == 0 && ns(a) > 0, "CLOCK_THREAD_CPUTIME_ID");
+}
+
+#define THREAD_CLOCK(tid, which) ((~(clockid_t)(tid) << 3) | (which) | 4)
+#define PROCESS_CLOCK(pid, which) ((~(clockid_t)(pid) << 3) | (which))
+
+static int spun, gate[2];
+
+static void *spinner(void *unused) {
+	char c;
+	for (volatile long i = 0; i < 30000000; i++)
+		;
+	__atomic_store_n(&spun, 1, __ATOMIC_SEQ_CST);
+	return (void *)(long)read(gate[0], &c, 1);
+}
+
+static void cpuclocks(void) {
+	struct timespec t, u;
+	CHECK(clock_gettime(10, &t) == -1 && errno == EINVAL, "clock 10 is not EINVAL");
+	CHECK(clock_gettime(12, &t) == -1 && errno == EINVAL, "clock 12 is not EINVAL");
+	CHECK(clock_getres(12, &t) == -1 && errno == EINVAL, "clock_getres 12 is not EINVAL");
+	CHECK(clock_getres(CLOCK_THREAD_CPUTIME_ID, &t) == 0 && ns(t) > 0, "clock_getres CLOCK_THREAD_CPUTIME_ID");
+	clockid_t c;
+	CHECK(clock_getcpuclockid(999999, &c) == ESRCH, "clock_getcpuclockid of no process is not ESRCH");
+	CHECK(clock_gettime(PROCESS_CLOCK(0, 1), &u) == 0 && clock_gettime(PROCESS_CLOCK(0, 2), &t) == 0 && ns(u) <= ns(t), "user time %lld above the process's total %lld", ns(u), ns(t));
+	CHECK(clock_gettime(PROCESS_CLOCK(getpid(), 2), &t) == 0 && ns(t) > 0, "this process's clock by pid");
+	CHECK(clock_gettime(PROCESS_CLOCK(0, 3), &t) == -1 && errno == EINVAL, "clock type 3 is not EINVAL");
+
+	pthread_t th;
+	CHECK(pipe(gate) == 0, "pipe");
+	CHECK(pthread_create(&th, 0, spinner, 0) == 0, "pthread_create");
+	while (!__atomic_load_n(&spun, __ATOMIC_SEQ_CST))
+		;
+	clockid_t tc;
+	CHECK(pthread_getcpuclockid(th, &tc) == 0 && clock_gettime(tc, &t) == 0 && ns(t) > 0, "another thread's CPU clock");
+	CHECK(clock_gettime(THREAD_CLOCK(gettid(), 2), &u) == 0 && ns(u) > 0, "this thread's clock by tid");
+	CHECK(clock_getres(tc, &u) == 0, "clock_getres of another thread's clock");
+	CHECK(write(gate[1], "x", 1) == 1, "the go-ahead");
+	pthread_join(th, 0);
+
+	pid_t k = fork();
+	if (k == 0) {
+		char ch;
+		_exit(read(gate[0], &ch, 1) != 1);
+	}
+	CHECK(clock_gettime(THREAD_CLOCK(k, 2), &t) == -1 && errno == EINVAL, "another process's thread clock is not EINVAL");
+	CHECK(clock_gettime(PROCESS_CLOCK(k, 2), &t) == 0, "another process's clock by pid");
+	CHECK(write(gate[1], "x", 1) == 1, "the go-ahead");
+	waitpid(k, 0, 0);
+	close(gate[0]);
+	close(gate[1]);
 }
 
 static void cpu(void) {
@@ -103,6 +155,7 @@ int main(int argc, char **argv) {
 	CHECK(v != 0 && memcmp((void *)v, "\177ELF", 4) == 0, "AT_SYSINFO_EHDR %#lx is not an ELF image", v);
 	CHECK(vdsoRange(&lo, &hi) && lo == v, "/proc/self/maps lists [vdso] at %#lx, AT_SYSINFO_EHDR is %#lx", lo, v);
 	clocks();
+	cpuclocks();
 	cpu();
 
 	pid_t c = fork();

@@ -395,6 +395,7 @@ pub fn main() void {
 // runLoop is the guest's main-thread syscall/fault loop, shared by a fresh spawn
 // and a forked child (which sets its VM up differently but runs the same loop).
 fn runLoop(vm: *vmm.Vmm, ch: *chan.Chan) noreturn {
+    vmm.publishHostTid(ch);
     while (true) {
         if (ch.stdio & vmm.STDIO_SINGLESTEP != 0) vm.enableStep(); // ptrace single-step
         const ev = vm.run(ch) catch _exit(1);

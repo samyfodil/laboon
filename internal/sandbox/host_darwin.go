@@ -14,7 +14,7 @@ import (
 func clockNow(clock int64) time.Duration {
 	var ts unix.Timespec
 	id := int32(unix.CLOCK_MONOTONIC)
-	if clock == 0 || clock == 8 {
+	if clock == 0 || clock == 5 || clock == 8 || clock == 11 {
 		id = unix.CLOCK_REALTIME
 	}
 	unix.ClockGettime(id, &ts)

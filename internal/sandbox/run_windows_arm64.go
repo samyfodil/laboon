@@ -18,19 +18,18 @@ import (
 const elfMachine = elf.EM_AARCH64
 
 const (
-	wCloneNr      = 220
-	wExit         = 93
-	wExitGroup    = 94
-	wGtod         = 169
-	wSetTid       = 96
-	wSigAct       = 134
-	wSigMask      = 135
-	wSigAlt       = 132
-	wGetrandom    = 278
-	wYield        = 124
-	wNanosleep    = 101
-	wClockGettime = 113
-	wTime         = ^uint64(0) // arm64 has no time(2)
+	wCloneNr   = 220
+	wExit      = 93
+	wExitGroup = 94
+	wGtod      = 169
+	wSetTid    = 96
+	wSigAct    = 134
+	wSigMask   = 135
+	wSigAlt    = 132
+	wGetrandom = 278
+	wYield     = 124
+	wNanosleep = 101
+	wTime      = ^uint64(0) // arm64 has no time(2)
 
 	// ctrEL0 is the CTR_EL0 the guest reads: IDC=DIC=0, 64-byte data-cache
 	// lines, and the largest instruction-cache line there is (IminLine 15:

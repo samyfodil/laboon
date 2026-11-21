@@ -80,7 +80,7 @@ func monoNow() time.Duration {
 // clockNow reads a guest clock: wall time for the realtime ones (0, 8), the
 // monotonic clock otherwise.
 func clockNow(clock int64) time.Duration {
-	if clock == 0 || clock == 8 {
+	if clock == 0 || clock == 5 || clock == 8 || clock == 11 {
 		return time.Duration(time.Now().UnixNano())
 	}
 	return monoNow()

@@ -16,19 +16,18 @@ import (
 const elfMachine = elf.EM_X86_64
 
 const (
-	wCloneNr      = 56
-	wExit         = 60
-	wExitGroup    = 231
-	wGtod         = 96
-	wSetTid       = 218
-	wSigAct       = 13
-	wSigMask      = 14
-	wSigAlt       = 131
-	wGetrandom    = 318
-	wYield        = 24
-	wNanosleep    = 35
-	wClockGettime = x64ClockGettime
-	wTime         = x64Time
+	wCloneNr   = 56
+	wExit      = 60
+	wExitGroup = 231
+	wGtod      = 96
+	wSetTid    = 218
+	wSigAct    = 13
+	wSigMask   = 14
+	wSigAlt    = 131
+	wGetrandom = 318
+	wYield     = 24
+	wNanosleep = 35
+	wTime      = x64Time
 )
 
 // codeTrampMax bounds the trampolines sized for a code mapping: they must

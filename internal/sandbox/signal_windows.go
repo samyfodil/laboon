@@ -43,7 +43,7 @@ func (g *dguest) hostInterruptibleWrite(f *os.File, buf []byte) (int, error) {
 // The CONTEXT layout and the redirect's registers are per architecture
 // (signal_windows_amd64.go, signal_windows_arm64.go).
 
-const threadAccess = 0x2 | 0x8 | 0x10 // SUSPEND_RESUME | GET_CONTEXT | SET_CONTEXT
+const threadAccess = 0x2 | 0x8 | 0x10 | 0x800 // SUSPEND_RESUME | GET_CONTEXT | SET_CONTEXT | QUERY_LIMITED_INFORMATION
 
 // stStubSp is the offset in a thread's signal record of its stub stack top
 // (stub/windows/sig.zig Thread.stub_sp).
