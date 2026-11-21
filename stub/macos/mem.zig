@@ -1263,22 +1263,27 @@ fn munmap(addr: u64, len: u64) u64 {
     // wx learns of the unmap before another thread's mapping can land there.
     wx.hold();
     defer wx.release();
-    // The non-host files this range maps shared, to tell the supervisor of the
-    // ones whose last mapping this unmap removes (so it releases their backings).
-    var ids: [8]u64 = undefined;
-    const nid = sharedIds(addr, addr + n, &ids);
     const r = sys(SYS_munmap, addr, n, 0, 0, 0, 0);
     if (r < 0) return lx(r);
+    dropped(addr, addr + n);
+    flushGone();
+    return 0;
+}
+
+// dropped forgets [lo, hi), unmapped or mapped over, and tells the supervisor
+// of the non-host files it mapped shared that no mapping holds any more (so it
+// releases their backings). wx is held.
+fn dropped(lo: u64, hi: u64) void {
+    var ids: [8]u64 = undefined;
+    const nid = sharedIds(lo, hi, &ids);
     lock.lock();
-    vmaPunch(addr, addr + n, null);
-    anonPunch(addr, addr + n);
+    vmaPunch(lo, hi, null);
+    anonPunch(lo, hi);
     lock.unlock();
-    wx.unmapped(addr, addr + n);
+    wx.unmapped(lo, hi);
     for (ids[0..nid]) |id| {
         if (!mapsId(id)) _ = root.hostCall(LC_UNMAPFILE, .{ id, 0, 0, 0, 0, 0 });
     }
-    flushGone();
-    return 0;
 }
 
 // ---- region queries --------------------------------------------------------------
@@ -1363,9 +1368,38 @@ const MREMAP_DONTUNMAP: u64 = 4;
 // mappings stay file-backed) and a grown tail is mapped fresh to match the
 // old range's last mapping. A MAP_JIT (RWX) range is copied instead.
 fn mremap(old: u64, old_len: u64, new_len: u64, flags: u64, new_addr: u64) u64 {
-    const r = remapCode(old, old_len, new_len, flags, new_addr);
+    const r = if (old & (PAGE - 1) == 0 and isVdso(old, rdUp(old_len)))
+        moveVdso(old, rdUp(old_len), rdUp(new_len), flags, new_addr)
+    else
+        remapCode(old, old_len, new_len, flags, new_addr);
     flushGone();
     return r;
+}
+
+fn isVdso(lo: u64, n: u64) bool {
+    lock.lock();
+    defer lock.unlock();
+    for (vmas.items) |e| {
+        if (e.kind == .vdso and e.lo == lo and e.hi == lo + n) return true;
+    }
+    return false;
+}
+
+// moveVdso moves the vDSO, as Linux lets CRIU, whole and to its own size: a
+// fresh copy at dst (remapVdso), so it still runs where it went.
+fn moveVdso(old: u64, n: u64, nn: u64, flags: u64, dst: u64) u64 {
+    if (flags & ~(MREMAP_MAYMOVE | MREMAP_FIXED) != 0 or nn != n) return neg(EINVAL);
+    if (flags & MREMAP_FIXED == 0) return old;
+    if (flags & MREMAP_MAYMOVE == 0 or dst & (PAGE - 1) != 0) return neg(EINVAL);
+    if (dst < old + n and old < dst + n) return neg(EINVAL);
+    wx.hold();
+    defer wx.release();
+    if (!root.remapVdso(dst, n)) return neg(ENOMEM);
+    dropped(dst, dst + n);
+    _ = sys(SYS_munmap, old, n, 0, 0, 0, 0);
+    dropped(old, old + n);
+    noteVdso(dst, dst + n);
+    return dst;
 }
 
 // remapCode moves what wx.zig knows of the range along with it, its pages

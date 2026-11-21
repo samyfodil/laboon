@@ -1886,6 +1886,14 @@ const ElfSrc = union(enum) {
 // by the Go recursive-descent rewriter, so a 0xd4000001 data word is never
 // patched; only words that really are svc #0 are rewritten (guarded below).
 fn mapElf(src: ElfSrc, sites: []const u32, hint: u64) Image {
+    var isl: Islands = undefined;
+    return loadElf(src, sites, hint, false, &isl) orelse _exit(5);
+}
+
+// loadElf maps the image src at hint, or exactly there when fixed, its sites
+// rewritten; isl is left holding its islands' arenas. Its islands go after
+// the image, or, when fixed, in arenas mapped near it.
+fn loadElf(src: ElfSrc, sites: []const u32, hint: u64, fixed: bool, isl: *Islands) ?Image {
     // Read the headers only; segments are read straight into place below.
     var eh: [64]u8 = undefined;
     if (src.read(&eh, 0) != eh.len) _exit(3);
@@ -1912,7 +1920,9 @@ fn mapElf(src: ElfSrc, sites: []const u32, hint: u64) Image {
     if (minbase == std.math.maxInt(u64)) _exit(4);
     const imageLen = maxend - minbase;
 
-    const rp = mmap(@ptrFromInt(hint), imageLen + ISLAND_CAP, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0) orelse _exit(5);
+    const tail: u64 = if (fixed) 0 else ISLAND_CAP;
+    const rp = mmap(@ptrFromInt(hint), imageLen + tail, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (if (fixed) MAP_FIXED else 0), -1, 0);
+    if (rp == null or rp == MAP_FAILED) return null;
     const rb: u64 = @intFromPtr(rp);
     const region: [*]u8 = @ptrCast(rp);
     const bias = rb - minbase;
@@ -1959,9 +1969,9 @@ fn mapElf(src: ElfSrc, sites: []const u32, hint: u64) Image {
     // actual instruction word so a stray offset (or data) is never patched.
     // The islands go after the image, and for an image wider than a b reaches,
     // in arenas near its far sites too (Islands).
-    var isl = Islands{ .size = ISLAND_CAP };
-    isl.add(rb + imageLen, ISLAND_CAP, 0);
-    for (sites) |s| rewriteSite(&isl, rb + s);
+    isl.* = Islands{ .size = ISLAND_CAP };
+    if (!fixed) isl.add(rb + imageLen, ISLAND_CAP, 0);
+    for (sites) |s| rewriteSite(isl, rb + s);
     isl.seal();
 
     // Per-page W^X. Each 16 KiB Darwin page gets the union of the flags of every
@@ -2003,7 +2013,7 @@ fn mapElf(src: ElfSrc, sites: []const u32, hint: u64) Image {
         if (mprotect(@ptrFromInt(rb + pg * PAGE), (run - pg) * PAGE, @intCast(protmap[pg])) != 0) _exit(6);
         pg = run;
     }
-    if (mprotect(@ptrFromInt(rb + imageLen), ISLAND_CAP, PROT_READ | PROT_EXEC) != 0) _exit(6);
+    if (!fixed and mprotect(@ptrFromInt(rb + imageLen), ISLAND_CAP, PROT_READ | PROT_EXEC) != 0) _exit(6);
 
     // AT_PHDR: prefer an explicit PT_PHDR, else the first PT_LOAD spanning e_phoff.
     var phdrAddr: u64 = 0;
@@ -2067,7 +2077,7 @@ fn loadAndEnter(path: [*:0]const u8, interpPath: ?[*:0]const u8, mainSites: [*:0
 
     var vdso: u64 = 0;
     if (vdsoImage()) |v| {
-        const img = mapElf(.{ .mem = v.img }, v.sites, mem.hint_mmap);
+        const img = loadElf(.{ .mem = v.img }, v.sites, mem.hint_mmap, false, &vdso_isl) orelse _exit(5);
         mem.noteVdso(img.lo, img.hi);
         vdso = img.lo;
     }
@@ -2098,6 +2108,25 @@ const LC_EXEC_STOP: u64 = 0x4c430018; // sandbox/lx_signal.go lxExecStop
 // count, up to VDSO_SITES sites, then the image.
 const VDSO_REC: usize = 0xf00;
 const VDSO_SITES: usize = 16;
+
+// vdso_isl holds the arenas of the vDSO's islands.
+var vdso_isl: Islands = .{ .size = ISLAND_CAP };
+
+// remapVdso maps the vDSO afresh at [dst, dst+n), over what is there, for an
+// mremap that moves it: its sites branch to islands near where it was, which
+// go with the old copy.
+pub fn remapVdso(dst: u64, n: u64) bool {
+    const v = vdsoImage() orelse return false;
+    var isl: Islands = undefined;
+    const img = loadElf(.{ .mem = v.img }, v.sites, dst, true, &isl) orelse return false;
+    if (img.lo != dst or img.hi != dst + n) {
+        _ = munmap(@ptrFromInt(img.lo), img.hi - img.lo);
+        return false;
+    }
+    for (vdso_isl.arenas[0..vdso_isl.n]) |a| _ = munmap(@ptrFromInt(a.base), a.len);
+    vdso_isl = isl;
+    return true;
+}
 
 fn vdsoImage() ?struct { img: []const u8, sites: []const u32 } {
     const r: [*]const u8 = sig.runRegion() + 0x100 + (if (tstate.arm64) 0 else VDSO_REC);

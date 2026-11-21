@@ -5,8 +5,10 @@
 // refused as Linux refuses them, sched_getcpu and getcpu
 // name a CPU the thread may run on, pinned to one CPU that one, which a fork
 // child keeps, a fork keeps the vDSO, and a program that unmapped it (the
-// range then free), mapped over it or moved it execs with a fresh one.
+// range then free), mapped over it or moved it execs with a fresh one. A vDSO
+// with no [vvar] to leave behind still runs where it was moved.
 #define _GNU_SOURCE
+#include <elf.h>
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -31,6 +33,53 @@ static int vdsoRange(unsigned long *lo, unsigned long *hi) {
 	int found = 0;
 	while (f && fgets(line, sizeof line, f))
 		if (strstr(line, "[vdso]") && sscanf(line, "%lx-%lx", lo, hi) == 2)
+			found = 1;
+	if (f)
+		fclose(f);
+	return found;
+}
+
+// vdsoSym finds name in the vDSO mapped at base through its dynamic symbols,
+// which run up to its string table.
+static void *vdsoSym(unsigned long base, const char *name) {
+	Elf64_Ehdr *eh = (void *)base;
+	Elf64_Phdr *ph = (void *)(base + eh->e_phoff);
+	unsigned long bias = 0, dynv = 0;
+	for (int i = eh->e_phnum - 1; i >= 0; i--) {
+		if (ph[i].p_type == PT_LOAD)
+			bias = base + ph[i].p_offset - ph[i].p_vaddr;
+		if (ph[i].p_type == PT_DYNAMIC)
+			dynv = ph[i].p_vaddr;
+	}
+	if (!dynv)
+		return 0;
+	Elf64_Sym *sym = 0;
+	const char *str = 0;
+	for (Elf64_Dyn *d = (void *)(bias + dynv); d->d_tag != DT_NULL; d++) {
+		if (d->d_tag == DT_SYMTAB)
+			sym = (void *)(bias + d->d_un.d_ptr);
+		if (d->d_tag == DT_STRTAB)
+			str = (void *)(bias + d->d_un.d_ptr);
+	}
+	for (Elf64_Sym *p = sym; p && (void *)p < (void *)str; p++)
+		if (p->st_name && p->st_shndx != SHN_UNDEF && strcmp(str + p->st_name, name) == 0)
+			return (void *)(bias + p->st_value);
+	return 0;
+}
+
+#if defined(__aarch64__)
+#define VDSO_CLOCK_GETTIME "__kernel_clock_gettime"
+#else
+#define VDSO_CLOCK_GETTIME "__vdso_clock_gettime"
+#endif
+
+// hasVvar reports whether /proc/self/maps lists a [vvar].
+static int hasVvar(void) {
+	FILE *f = fopen("/proc/self/maps", "r");
+	char line[512];
+	int found = 0;
+	while (f && fgets(line, sizeof line, f))
+		if (strstr(line, "[vvar]"))
 			found = 1;
 	if (f)
 		fclose(f);
@@ -194,6 +243,16 @@ int main(int argc, char **argv) {
 					_exit(95);
 				if (!vdsoRange(&nlo, &nhi) || nlo != (unsigned long)to)
 					_exit(94);
+				if (!hasVvar()) {
+					int (*gettime)(clockid_t, struct timespec *) = vdsoSym(nlo, VDSO_CLOCK_GETTIME);
+					struct timespec a, m, b;
+					syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &a);
+					if (!gettime || gettime(CLOCK_MONOTONIC, &m) != 0)
+						_exit(93);
+					syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &b);
+					if (ns(m) < ns(a) || ns(m) > ns(b))
+						_exit(92);
+				}
 			}
 			execl("/proc/self/exe", "vdso", "novdso", (char *)0);
 			_exit(99);
