@@ -350,6 +350,13 @@ pub const Vmm = struct {
         ch.nr = LC_STEP_STOP;
         ch.args = .{ pc, 0, 0, 0, 0, 0 };
         v.served(ch, exchange);
+        var rx0 = x0;
+        var rpc = pc;
+        var rps = cpsr;
+        v.applyTraceEdits(ch, &rx0, &rpc, &rps);
+        _ = hv_vcpu_set_reg(v.vcpu, REG_X0, rx0);
+        _ = hv_vcpu_set_reg(v.vcpu, REG_PC, rpc);
+        _ = hv_vcpu_set_reg(v.vcpu, REG_CPSR, rps);
     }
 
     // run executes the guest until the next event: a syscall (from the hvc
@@ -1092,12 +1099,18 @@ pub const Vmm = struct {
         const sig: u32 = @truncate(ch.ret);
         if (sig == 0) {
             // A tracer discarded it: the instruction runs again, from the
-            // vector's hvc back to where the guest took the fault.
+            // vector's hvc back to where the guest took the fault, with the
+            // registers the tracer set.
             var pc: u64 = 0;
             _ = hv_vcpu_get_reg(v.vcpu, REG_PC, &pc);
             if (pc == VBAR + 0x204) {
-                _ = hv_vcpu_set_reg(v.vcpu, REG_PC, fl.pc);
-                _ = hv_vcpu_set_reg(v.vcpu, REG_CPSR, pstate);
+                var rx0 = x0;
+                var rpc = fl.pc;
+                var rps = pstate;
+                if (ch.stdio & STDIO_TRACED != 0) v.applyTraceEdits(ch, &rx0, &rpc, &rps);
+                _ = hv_vcpu_set_reg(v.vcpu, REG_X0, rx0);
+                _ = hv_vcpu_set_reg(v.vcpu, REG_PC, rpc);
+                _ = hv_vcpu_set_reg(v.vcpu, REG_CPSR, rps);
             }
             return true;
         }

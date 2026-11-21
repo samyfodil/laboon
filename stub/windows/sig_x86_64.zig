@@ -131,7 +131,7 @@ pub fn publishFrameCtx(c: *const Ctx) void {
     g.rdx = c.rdx;
     g.rsi = c.rsi;
     g.rdi = c.rdi;
-    g.orig_rax = c.rax;
+    g.orig_rax = ~@as(u64, 0); // no syscall, as Linux reports it
     g.rip = c.rip;
     g.cs = 0x33;
     g.eflags = c.eflags;

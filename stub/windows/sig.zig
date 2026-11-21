@@ -710,6 +710,14 @@ pub fn takeSleep() ?struct { deadline: i64, rem: u64 } {
     return .{ .deadline = d, .rem = s.sleep_rem };
 }
 
+// trapCtx is the guest state at trap t, with the registers a tracer set at a
+// stop since.
+fn trapCtx(t: *const Trap) Ctx {
+    var c = ctxFromTrap(t);
+    if (A.traceState().dirty != 0) A.traceRestoreCtx(&c);
+    return c;
+}
+
 fn pendingAfter(t: *const Trap, r: u64) noreturn {
     const th = thr();
     var real: ?u64 = null;
@@ -734,7 +742,7 @@ fn pendingAfter(t: *const Trap, r: u64) noreturn {
                 },
                 .term => die(s),
                 .handler => {
-                    var c = ctxFromTrap(t);
+                    var c = trapCtx(t);
                     const rv: i64 = @bitCast(r);
                     const restart = rv == -ERESTARTNOINTR or (rv == -ERESTARTSYS and act.flags & SA_RESTART != 0);
                     if (restart) {
@@ -749,7 +757,7 @@ fn pendingAfter(t: *const Trap, r: u64) noreturn {
             }
         }
         if (isRestart(r)) {
-            var c = ctxFromTrap(t);
+            var c = trapCtx(t);
             setRestart(&c, t, r);
             if (real) |m| @atomicStore(u64, &th.mask, m, .release);
             continueWith(&c);
@@ -759,6 +767,7 @@ fn pendingAfter(t: *const Trap, r: u64) noreturn {
         if (pendingAllowed(~ld(&thr().mask)) == 0) {
             var c = ctxFromTrap(t);
             A.setResult(&c, r);
+            if (A.traceState().dirty != 0) A.traceRestoreCtx(&c);
             continueWith(&c);
         }
         setBusy(1);

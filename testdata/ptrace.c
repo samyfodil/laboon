@@ -230,9 +230,13 @@ static void debugger(pid_t child, int use_mem, int different_ns) {
     regs[0] = 4;
     regs[19] = 0x5678;
     CHECK(ptrace(PTRACE_SETREGSET, child, 1, &iov) == 0);
-    CHECK(ptrace(PTRACE_SINGLESTEP, child, 0, 0) == -1 && errno == EIO);
     if (use_mem) CHECK(pwrite(fd, &orig, sizeof(orig), (uintptr_t)pc) == sizeof(orig));
     else CHECK(ptrace(PTRACE_POKETEXT, child, pc, orig) == 0);
+    CHECK(ptrace(PTRACE_SINGLESTEP, child, 0, 0) == 0);
+    CHECK(waitpid(child, &st, 0) == child && WIFSTOPPED(st) && WSTOPSIG(st) == SIGTRAP);
+    CHECK(ptrace(PTRACE_GETREGSET, child, 1, &iov) == 0 && regs[32] == (uintptr_t)pc + 4);
+    siginfo_t si;
+    CHECK(ptrace(PTRACE_GETSIGINFO, child, 0, &si) == 0 && si.si_code == TRAP_TRACE);
 #endif
     close(fd);
     CHECK(ptrace(PTRACE_CONT, child, 0, 0) == 0);
@@ -309,14 +313,13 @@ static void register_tracer(pid_t child) {
             CHECK(ptrace(PTRACE_GET_SYSCALL_INFO, child, sizeof(info), &info) >= 24);
             if (info.op == PTRACE_SYSCALL_INFO_ENTRY && info.entry.nr == SYS_close && info.entry.args[0] == -1UL) {
                 CHECK(!changed && regs.r12 == 0x12345678 && regs.rsp != 0 && regs.rax == -ENOSYS);
-                errno = 0;
-                CHECK(ptrace(PTRACE_SINGLESTEP, child, 0, 0) == -1 && errno == EIO);
                 struct iovec bad = {&regs, 9};
+                errno = 0;
                 CHECK(ptrace(PTRACE_SETREGSET, child, 1, &bad) == -1 && errno == EINVAL);
-                unsigned long pc = regs.rip;
-                regs.rip = 0x6f0000000000UL;
+                unsigned long fs = regs.fs_base;
+                regs.fs_base = 1UL << 47;
                 CHECK(ptrace(PTRACE_SETREGS, child, 0, &regs) == -1 && errno == EIO);
-                regs.rip = pc;
+                regs.fs_base = fs;
                 regs.orig_rax = SYS_getpid;
                 regs.r12 = 0x87654321;
                 CHECK(ptrace(PTRACE_SETREGS, child, 0, &regs) == 0);

@@ -792,6 +792,9 @@ fn faultHandle(ep: *win.EXCEPTION_POINTERS) i32 {
             for (e.holds) |h| stub.mem.letGo(h);
             return -1;
         }
+        // The guest's own brk, which Windows may report as an illegal
+        // instruction: Linux's SIGTRAP, TRAP_BRKPT.
+        if (@as(*const u32, @ptrFromInt(c.Pc)).* & 0xffe0001f == 0xd4200000) rec.ExceptionCode = STATUS_BREAKPOINT;
     }
     if (rec.ExceptionCode == STATUS_ACCESS_VIOLATION and rec.NumberParameters >= 2) {
         const page = addr & ~@as(u64, 0xfff);

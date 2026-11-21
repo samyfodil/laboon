@@ -624,7 +624,12 @@ fn faultHandle(ep: *win.EXCEPTION_POINTERS) i32 {
             return faultOut(ep, stub.SIGSEGV, faultAddr(ep, c.Rip));
         },
         STATUS_INTEGER_DIVIDE_BY_ZERO, STATUS_INTEGER_OVERFLOW, STATUS_FLOAT_DIVIDE_BY_ZERO => return faultOut(ep, stub.SIGFPE, c.Rip),
-        STATUS_BREAKPOINT, STATUS_SINGLE_STEP => return faultOut(ep, stub.SIGTRAP, c.Rip),
+        STATUS_BREAKPOINT => {
+            // Windows leaves rip at the int3; Linux reports it past.
+            if (@as(*const u8, @ptrFromInt(c.Rip)).* == 0xcc) c.Rip += 1;
+            return faultOut(ep, stub.SIGTRAP, c.Rip);
+        },
+        STATUS_SINGLE_STEP => return faultOut(ep, stub.SIGTRAP, c.Rip),
         STATUS_ILLEGAL_INSTRUCTION => {},
         else => return 0,
     }

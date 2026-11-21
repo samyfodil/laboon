@@ -451,7 +451,6 @@ func serveGuest(dg *dguest) (int, error) {
 			if dg.cfg.Trace != nil && a[2] != 0 {
 				fmt.Fprintf(dg.cfg.Trace, "[%d] stub fault: signal %d at %#x, pc %#x\n", dg.pid, sig, a[1], a[2])
 			}
-			dg.ptraceEvent(ptraceEventExit, uint64(sig))
 			dg.sigDie(sig)
 			if dg.sharedStub() {
 				dg.endShared(128 + sig)

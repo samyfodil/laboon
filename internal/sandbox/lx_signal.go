@@ -675,6 +675,7 @@ func (sr *sigRun) killedBy(tgid int) int {
 
 // sigDie handles the stub's report that sig's default action ends the process.
 func (g *dguest) sigDie(sig int) int {
+	g.ptraceEvent(ptraceEventExit, uint64(sig))
 	sr := g.sigs()
 	sr.mu.Lock()
 	if p := sr.procs[g.tgid]; p != nil && p.killedBy == 0 {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"runtime"
+	"slices"
 )
 
 const (
@@ -92,6 +93,12 @@ type tracee struct {
 	regs   []byte
 	dirty  bool
 	dr6    uint64
+	steps  []stepTrap // an arm64 software single-step's breakpoints (armStep)
+}
+
+type stepTrap struct {
+	at   uint64
+	orig [4]byte
 }
 
 type ptraceRun struct {
@@ -195,8 +202,14 @@ func (g *dguest) ptrace(a [6]uint64) int64 {
 		}
 		t.options = a[3]
 	case ptraceCont, ptraceSyscall, ptraceDetach, ptraceKill, ptraceSinglestep:
-		if a[0] == ptraceSinglestep && !t.canStep() && !t.g.ps.hvf {
-			return sErr(lxEIO)
+		if a[0] == ptraceSinglestep && !t.g.ps.hvf {
+			if runtime.GOARCH == "arm64" {
+				if !t.armStep() {
+					return sErr(lxEIO)
+				}
+			} else if !t.canStep() {
+				return sErr(lxEIO)
+			}
 		}
 		if a[0] != ptraceKill && a[3] > 64 {
 			return sErr(lxEIO)
@@ -447,6 +460,56 @@ func (t *tracee) canStep() bool {
 	return true
 }
 
+// armStep single-steps an arm64 tracee in software, as a debugger does where
+// it cannot have the processor step: a brk at each place the instruction at
+// pc can go next, taken out again at its next stop (unstep). A syscall site
+// goes through the supervisor and comes back past itself.
+func (t *tracee) armStep() bool {
+	if t.op == ptraceInfoEntry {
+		return false
+	}
+	pc := le64(t.regs[32*8:])
+	m := t.mem
+	internal := func(a uint64) bool { return a >= ptStubLo && a < ptStubHi || m.ptraceInternalPC(a) }
+	var w [4]byte
+	if internal(pc) || t.memory(pc, w[:], false) != nil {
+		return false
+	}
+	next := a64Next(le32(w[:]), pc, func(r int) uint64 {
+		if r == 31 {
+			return 0
+		}
+		return le64(t.regs[r*8:])
+	})
+	brk := [4]byte{0x00, 0x00, 0x20, 0xd4}
+	for _, n := range next {
+		if internal(n) {
+			n = pc + 4
+		}
+		if slices.ContainsFunc(t.steps, func(s stepTrap) bool { return s.at == n }) {
+			continue
+		}
+		s := stepTrap{at: n}
+		if t.memory(n, s.orig[:], false) != nil || t.memory(n, brk[:], true) != nil {
+			continue
+		}
+		t.steps = append(t.steps, s)
+	}
+	return len(t.steps) > 0
+}
+
+// unstep takes out a software single-step's breakpoints, reporting whether
+// the tracee stopped on one, at pc.
+func (t *tracee) unstep(pc uint64) bool {
+	hit := false
+	for _, s := range t.steps {
+		hit = hit || s.at == pc
+		t.memory(s.at, s.orig[:], true)
+	}
+	t.steps = nil
+	return hit
+}
+
 func (t *tracee) setRegisters(b []byte) bool {
 	limit := uint64(1) << 48
 	if runtime.GOARCH == "amd64" {
@@ -506,10 +569,13 @@ func (pr *ptraceRun) stop(g *dguest, t *tracee, sig, event int, msg uint64, op u
 	if !t.attached || t.final || g.ch.dead() {
 		return 0
 	}
+	frame := g.traceFrame()
+	if len(t.steps) > 0 && t.unstep(le64(frame[16+32*8:])) && sig == sigTRAP && event == 0 && op == ptraceInfoNone {
+		si = sigInfo{code: 2} // TRAP_TRACE
+	}
 	t.stopped, t.pending, t.inject = true, true, 0
 	t.status, t.event, t.op = (sig|event<<8)<<8|0x7f, msg, op
 	t.sig, t.si, t.mem = sig, si, g.mp
-	frame := g.traceFrame()
 	t.regs = append(t.regs[:0], frame[16:16+registerSize()]...)
 	t.dirty = false
 	if op == ptraceInfoNone {

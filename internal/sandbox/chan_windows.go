@@ -182,6 +182,8 @@ func (c *hostChan) copyOp(kind, addr, n, off uint64) (bool, error) {
 // 2, with the page of memory and its freezes served) is first cooled there
 // through cool (codereg.go), and the stub asked again, to thaw it.
 func (c *hostChan) writable(addr, n uint64, cool func(x objPage)) bool {
+	kind, nr, args, ret := c.page.kind, c.page.nr, c.page.args, c.page.ret
+	defer func() { c.page.kind, c.page.nr, c.page.args, c.page.ret = kind, nr, args, ret }()
 	var cooled [3]uint64
 	for {
 		c.page.args = [6]uint64{addr, n, 0, cooled[0], cooled[1], cooled[2]}

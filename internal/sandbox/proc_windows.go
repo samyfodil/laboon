@@ -775,8 +775,14 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	}
 	w.tracef("[lc] [%d] exec %s\n", dg.pid, t.gp)
 	// A kill that came while the process had no stub found nothing to kill.
-	if fs.sigs().killedBy(dg.ps.tgid) != 0 {
-		windows.TerminateProcess(w.sp.proc, 128+9)
+	// A traced process ends itself on the SIGKILL queued for it, so its
+	// tracer sees the exit event first.
+	if sr := fs.sigs(); sr.killedBy(dg.ps.tgid) != 0 {
+		if p := sr.proc(dg.ps.tgid); p != nil && fs.processTraced(dg.ps.tgid) {
+			sr.kick(p)
+		} else {
+			windows.TerminateProcess(w.sp.proc, 128+9)
+		}
 	}
 	return true, nil
 }
