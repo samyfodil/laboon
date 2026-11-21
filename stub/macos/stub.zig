@@ -1346,8 +1346,43 @@ fn lcExec(ch: *chan.Chan) u64 {
     mem.reset();
     g_auxids = .{ ch.args[4] & 0xffffffff, ch.args[4] >> 32, ch.args[5] & 0xffffffff, ch.args[5] >> 32 };
     const interp: ?[*:0]const u8 = if (interpRaw[0] == 0) null else interpRaw;
-    loadAndEnter(mainPath, interp, mainSites, interpSites, argv[0..nv], envp[0..nenv]);
+    if (tstate.arm64) loadAndEnter(mainPath, interp, mainSites, interpSites, argv[0..nv], envp[0..nenv]);
+    // An x86-64 syscall is served inside the SIGILL handler of its trap, which
+    // the new image never returns to: it goes on from the thread's own stack
+    // (dead below where the guest took over), out of the handler's state.
+    g_exec = .{ .path = mainPath, .interp = interp, .main_sites = mainSites, .interp_sites = interpSites, .argv = argv[0..nv], .envp = envp[0..nenv] };
+    offHandler(@intFromPtr(pthread_getspecific(g_stk_key)));
 }
+
+var g_exec: struct { path: [*:0]const u8, interp: ?[*:0]const u8, main_sites: [*:0]const u8, interp_sites: [*:0]const u8, argv: []const [*:0]const u8, envp: []const [*:0]const u8 } = undefined;
+
+fn offHandler(sp: u64) noreturn {
+    if (!tstate.arm64) asm volatile (
+        \\ movq %[sp], %%rsp
+        \\ xorl %%ebp, %%ebp
+        \\ callq *%[f]
+        :
+        : [sp] "r" (sp),
+          [f] "r" (&execOffHandler),
+        : "memory"
+    );
+    unreachable;
+}
+
+// execOffHandler loads g_exec once the handler's state is undone as its
+// sigreturn would: the alternate signal stack is free again and the stub's
+// signals are unblocked (as for a clone, cloneBootstrap), or the new image's
+// first trap could never be delivered.
+fn execOffHandler() callconv(.C) noreturn {
+    _ = fdlink.sys(SYS_sigreturn, 0, UC_RESET_ALT_STACK, 0, 0, 0, 0);
+    var unb: u32 = stubSignals;
+    _ = pthread_sigmask(SIG_UNBLOCK, &unb, null);
+    const e = g_exec;
+    loadAndEnter(e.path, e.interp, e.main_sites, e.interp_sites, e.argv, e.envp);
+}
+
+const SYS_sigreturn: u64 = 184;
+const UC_RESET_ALT_STACK: u64 = 0x80000000;
 
 const E2BIG: i64 = 7;
 const MAX_ARG_STRLEN: usize = 32 * 4096; // Linux's per-string limit

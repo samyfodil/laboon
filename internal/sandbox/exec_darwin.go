@@ -130,6 +130,17 @@ func guestIsX64(path string) (bool, error) {
 	return f.Machine == elf.EM_X86_64, nil
 }
 
+// elfMach is the ELF machine execve's checkELF requires: the guest's own, so an
+// x86-64 guest (under Rosetta) execs x86-64 and an arm64 guest execs arm64.
+// Cross-arch exec (x86-64 execing an arm64 binary, say) stays unsupported -- a
+// different machine is rejected as ENOEXEC.
+func elfMach(g *dguest) elf.Machine {
+	if g.run != nil && g.run.x64 {
+		return elf.EM_X86_64
+	}
+	return elfMachine
+}
+
 // execSrc is the host path of the ELF an execve runs.
 type execSrc = string
 

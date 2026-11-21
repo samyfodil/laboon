@@ -74,14 +74,14 @@ func (g *dguest) hasArgv0(argvAddr uint64) bool {
 
 // checkELF accepts a 64-bit little-endian executable or PIE for the guest's
 // machine.
-func checkELF(h []byte) lxErrno {
+func checkELF(h []byte, want elf.Machine) lxErrno {
 	if len(h) < 64 || !bytes.HasPrefix(h, []byte(elf.ELFMAG)) ||
 		elf.Class(h[elf.EI_CLASS]) != elf.ELFCLASS64 || elf.Data(h[elf.EI_DATA]) != elf.ELFDATA2LSB {
 		return lxENOEXEC
 	}
 	typ := elf.Type(uint16(h[16]) | uint16(h[17])<<8)
 	mach := elf.Machine(uint16(h[18]) | uint16(h[19])<<8)
-	if mach != elfMachine || typ != elf.ET_EXEC && typ != elf.ET_DYN {
+	if mach != want || typ != elf.ET_EXEC && typ != elf.ET_DYN {
 		return lxENOEXEC
 	}
 	return 0
@@ -387,7 +387,7 @@ func (g *dguest) execTarget(dirfd int64, pathAddr, argvAddr uint64, flags int64)
 			return fail(e)
 		}
 		if !bytes.HasPrefix(head, []byte("#!")) {
-			if e := checkELF(head); e != 0 {
+			if e := checkELF(head, elfMach(g)); e != 0 {
 				return fail(e)
 			}
 			t.src, t.elf = s, cur
