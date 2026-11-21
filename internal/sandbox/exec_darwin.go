@@ -13,8 +13,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/samyfodil/laboon/core"
-	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"golang.org/x/sys/unix"
 )
 
@@ -406,30 +404,6 @@ func (g *dguest) execRespawn(host, interpHost, mainSites, interpSites string, pr
 // darwinArgMax is kern.argmax: what a host exec can carry.
 const darwinArgMax = 1 << 20
 
-// rootedProgram resolves the run's program path inside root the way execve
-// does, following symlinks in the guest's namespace (an absolute link target
-// such as busybox's applet links restarts at the root, not the host's /).
-func rootedProgram(root, prog string) (string, bool) {
-	abs, err := filepath.Abs(root)
-	if err != nil {
-		return "", false
-	}
-	if abs, err = filepath.EvalSymlinks(abs); err != nil {
-		return "", false
-	}
-	// Resolve through the root's overlay Namespace (no upper, no pseudo mounts):
-	// it follows symlinks the way execve does, restarting an absolute target at
-	// the root. The resolved guest path maps straight back to its host path.
-	fs := &dfs{rootAbs: abs, hostFS: hostfs.NewHostFS(abs, "", "")}
-	fs.ov.store = core.NewMetaStore()
-	fs.buildNS()
-	loc, err := fs.ns.Resolve(path.Clean("/"+prog), true)
-	if err != nil {
-		return "", false
-	}
-	return hostfs.HostPath(abs, loc.Path), true
-}
-
 // fexecHost gives an open file a private host path the program loader can map:
 // execveat(fd, "", AT_EMPTY_PATH) runs the open file, which may since have been
 // unlinked or replaced at its path. One copy (an APFS clone when it can be)
@@ -451,24 +425,9 @@ func (g *dguest) fexecHost(f *os.File) (string, lxErrno) {
 	if ok {
 		return p, 0
 	}
-	tmp, err := os.CreateTemp(g.dfs.tmpDir, "lc-fexec-*")
+	p, err = privateCopy(g.dfs.tmpDir, int(f.Fd()), f, fi.Size(), fi.Mode().Perm())
 	if err != nil {
-		return "", osErrno(err)
-	}
-	p = tmp.Name()
-	tmp.Close()
-	os.Remove(p)
-	if unix.Fclonefileat(int(f.Fd()), unix.AT_FDCWD, p, 0) != nil {
-		out, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, fi.Mode().Perm())
-		if err != nil {
-			return "", osErrno(err)
-		}
-		_, err = io.Copy(out, io.NewSectionReader(f, 0, fi.Size()))
-		out.Close()
-		if err != nil {
-			os.Remove(p)
-			return "", lxEIO
-		}
+		return "", lxEIO
 	}
 	// The clone of a spilled source (a non-host file) inherits the spill's bare
 	// 0600; it is an exec source, verified executable by dacCheck against the

@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 
@@ -169,11 +168,8 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	}
 	defer os.RemoveAll(rtmp)
 
-	// Resolve the guest program to a host path the stub can map. A host-directory
-	// root maps its real files (symlinks resolved first, as the Seatbelt profile
-	// admits only resolved paths); a non-host root (in-memory, custom, network) is
-	// read through its FileSystem and spilled into rtmp, so any backend is
-	// executable without the stub touching a guest path.
+	// The guest program, its #! interpreters and its dynamic linker resolve
+	// through the root's Namespace like any guest path (progResolver).
 	rootPath, isHost := HostRootPath(cfg.RootFS)
 	if isHost && rootPath != "" {
 		abs, err := filepath.Abs(rootPath)
@@ -184,10 +180,17 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 			return 0, fmt.Errorf("laboon: root: %w", err)
 		}
 	}
-	res := &progResolver{root: rootPath, tmp: rtmp}
-	if !isHost && cfg.RootFS != nil {
-		res.ns = namespace.NewNamespace(cfg.RootFS) // a non-host root: resolve + spill through the FS
+	// A host root resolves from its canonical path, as the run's own Namespace
+	// does: the confined backend refuses a symlink in the root's own components
+	// (macOS's /var). Without a root the guest's / is the host's, unconfined.
+	progRoot := cfg.RootFS
+	switch {
+	case isHost && rootPath != "":
+		progRoot = HostRoot(rootPath)
+	case progRoot == nil:
+		progRoot = hostfs.NewHostDirFS("/", hostfs.NewRawHostFS(""))
 	}
+	res := &progResolver{tmp: rtmp, ns: namespace.NewNamespace(progRoot)}
 	gp := path
 	guestPath, err := res.host(gp)
 	if err != nil {
@@ -941,24 +944,6 @@ func legacyX18(bin []byte) []byte {
 	return b
 }
 
-// guestToHost maps a guest path to its host path inside root (rooted
-// clean+join, with the /bin/sh -> busybox style rooted-program redirect), or
-// returns it unchanged when there is no root.
-func guestToHost(root, p string) string {
-	hp := p
-	if root != "" {
-		rel := strings.TrimPrefix(filepath.Clean("/"+p), "/")
-		hp = filepath.Join(root, rel)
-		if r, ok := rootedProgram(root, p); ok {
-			hp = r
-		}
-	}
-	if abs, err := filepath.Abs(hp); err == nil {
-		hp = abs
-	}
-	return hp
-}
-
 // headBytes reads up to n leading bytes of the host file at p, for the #! check.
 func headBytes(p string, n int) ([]byte, error) {
 	f, err := os.Open(p)
@@ -974,26 +959,16 @@ func headBytes(p string, n int) ([]byte, error) {
 	return b[:m], nil
 }
 
-// progResolver maps a guest program or interpreter path to a host path the stub
-// can map. A host-directory root (ns nil) maps its real files under root; a
-// non-host root (ns set) resolves the path through its FileSystem and, when the
-// file is not already host-backed, spills its content — read through the core.File,
-// never the host — into a private temp dir (tmp) the stub maps and the Seatbelt
-// profile already grants. The guest never supplies a host path either way.
+// progResolver gives the stub a guest program or interpreter to map: resolved
+// and opened through the root's Namespace, then a private copy of that open
+// file in the run's temp dir (tmp), which the Seatbelt profile grants. The stub
+// never maps a path inside the root, and the guest never supplies a host path.
 type progResolver struct {
-	root string
-	tmp  string
-	ns   *namespace.Namespace
+	tmp string
+	ns  *namespace.Namespace
 }
 
 func (r *progResolver) host(gp string) (string, error) {
-	if r.ns == nil {
-		hp := guestToHost(r.root, gp)
-		if _, err := os.Stat(hp); err != nil {
-			return "", err
-		}
-		return hp, nil
-	}
 	loc, err := r.ns.Resolve(gp, true)
 	if err != nil {
 		return "", err
@@ -1003,30 +978,47 @@ func (r *progResolver) host(gp string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	if fd, ok := hostFdOf(f); ok {
-		if p, err := fdPath(fd); err == nil {
-			return p, nil // a host-backed file: map it directly, no spill
-		}
-	}
-	tf, err := os.CreateTemp(r.tmp, "lc-prog-")
+	info, err := f.Stat()
 	if err != nil {
 		return "", err
 	}
-	defer tf.Close()
-	if _, err := io.Copy(tf, io.NewSectionReader(f, 0, 1<<62)); err != nil {
-		os.Remove(tf.Name())
-		return "", err
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s: not a regular file", gp)
 	}
-	return tf.Name(), nil
+	fd, ok := hostFdOf(f)
+	if !ok {
+		fd = -1
+	}
+	return privateCopy(r.tmp, fd, f, info.Size(), info.Mode().Perm())
 }
 
-// fdPath is the host path of the open file fd (F_GETPATH).
-func fdPath(fd int) (string, error) {
-	var buf [unix.PathMax / 8]uint64 // F_GETPATH fills MAXPATHLEN bytes
-	if err := unix.FcntlFstore(uintptr(fd), unix.F_GETPATH, (*unix.Fstore_t)(unsafe.Pointer(&buf[0]))); err != nil {
+// privateCopy writes a copy of an exec source into dir and returns its path:
+// an APFS clone of host descriptor fd when it can be (fd < 0: none), else the
+// size bytes read through r.
+func privateCopy(dir string, fd int, r io.ReaderAt, size int64, perm os.FileMode) (string, error) {
+	tmp, err := os.CreateTemp(dir, "lc-exec-*")
+	if err != nil {
 		return "", err
 	}
-	return unix.ByteSliceToString(unsafe.Slice((*byte)(unsafe.Pointer(&buf[0])), unix.PathMax)), nil
+	p := tmp.Name()
+	tmp.Close()
+	os.Remove(p)
+	if fd >= 0 && unix.Fclonefileat(fd, unix.AT_FDCWD, p, 0) == nil {
+		return p, nil
+	}
+	out, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm|0o600)
+	if err != nil {
+		return "", err
+	}
+	_, err = io.Copy(out, io.NewSectionReader(r, 0, size))
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(p)
+		return "", err
+	}
+	return p, nil
 }
 
 // resolveInterp reads the guest ELF's PT_INTERP and maps the interpreter's guest
