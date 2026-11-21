@@ -412,12 +412,16 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 
 	var waitErr error
 	ch := newChannel(mem, 0, 0, done, nil)
+	stop := make(chan struct{})
+	ch.stop = stop
 	var doneOnce sync.Once
 	fs.run.mainGone = func(err error) {
 		doneOnce.Do(func() {
 			waitErr = err
 			ch.end()         // end serve if it is parked on the dead stub's slot
-			fs.wakeWaiters() // or in a wait4
+			closeStop(stop)  // the channel reads dead from here, so a woken host wait ends
+			fs.wakeWaiters() // a wait4
+			fs.killAll()     // a host wait; the rest die with pid 1, as Linux kills a namespace whose init exits
 			close(done)      // last: once done is closed, Run unmaps the channel memory
 		})
 	}
@@ -428,8 +432,6 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 			fs.run.mainGone(err)
 		}
 	}()
-	stop := make(chan struct{})
-	ch.stop = stop
 
 	code, runErr := serve(ch, fs, mp, cfg)
 
