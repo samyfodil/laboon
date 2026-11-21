@@ -63,6 +63,7 @@ type sockSeg struct {
 	b      []byte
 	from   []byte   // the sender's guest sockaddr, for datagrams
 	rights []*dfile // SCM_RIGHTS: one reference each while queued
+	cred   ucred    // the AF_UNIX sender's, with a global pid
 }
 
 // sockQ is a receive queue. eof is set once nothing more will arrive; err is
@@ -89,8 +90,6 @@ func (q *sockQ) drop() []*dfile {
 	q.segs, q.n = nil, 0
 	return rel
 }
-
-type ucred struct{ pid, uid, gid uint32 }
 
 // dsock is the socket of an open-file description (dfile.sk). Every field
 // past n is guarded by n.mu.

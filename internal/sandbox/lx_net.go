@@ -433,7 +433,7 @@ func (g *dguest) recvOne(d *dfile, addr uint64, m msghdr, flags uint32) int64 {
 	if m.control == 0 {
 		room = 0
 	}
-	ctl, cf := g.recvCreds(d, room)
+	ctl, cf := g.recvCreds(d, &r, room)
 	if len(r.oob) > 0 {
 		rest := max(room-len(ctl), 0)
 		dctl, df := g.guestControl(r.oob, rest, flags&lxMsgCmsgCloexec != 0, flags&lxMsgPeek != 0)

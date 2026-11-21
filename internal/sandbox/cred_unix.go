@@ -14,17 +14,6 @@ import "sync"
 // socketpair end, and the parent recovers the child's real pid from the
 // SCM_CREDENTIALS of that message.
 
-// ucred is a Linux struct ucred: pid, uid, gid, each 32-bit.
-type ucred struct{ pid, uid, gid uint32 }
-
-func (c ucred) bytes() []byte {
-	var b [12]byte
-	put32(b[:], c.pid)
-	put32(b[4:], c.uid)
-	put32(b[8:], c.gid)
-	return b[:]
-}
-
 // credLink carries credentials across a connected AF_UNIX pair. q[side] holds
 // the creds the endpoint on side has yet to receive; its peer appends on each
 // send. owner[side] is the process that holds that end, the fallback reported
@@ -82,17 +71,6 @@ func (l *credLink) peer(side int) ucred {
 	return l.owner[1-side]
 }
 
-// curCred is the calling process's credentials for a sent message. The
-// automatic SCM_CREDENTIALS (no explicit cmsg) carry the real uid/gid, as
-// Linux fills them.
-func (g *dguest) curCred() ucred {
-	c := ucred{pid: uint32(g.tgid)}
-	if g.ps != nil {
-		c.uid, c.gid = g.ps.cred.ruid, g.ps.cred.rgid
-	}
-	return c
-}
-
 // passcred reports whether SO_PASSCRED is set, so received messages carry the
 // sender's SCM_CREDENTIALS.
 func (s *dsock) passcred() bool {
@@ -108,49 +86,14 @@ func (g *dguest) sendCreds(d *dfile, ctl []byte) {
 	if d.sk == nil || d.sk.cl == nil {
 		return
 	}
-	c := g.curCred()
-	if ec, ok := parseGuestCred(ctl); ok {
-		// The guest names the pid in its own namespace; the link holds the
-		// global one. An unresolvable (forged) pid is not honoured.
-		if ec.pid != 0 {
-			if gp, ok := g.nsToGlobal(int(ec.pid)); ok {
-				c.pid = uint32(gp)
-			}
-		}
-		c.uid, c.gid = ec.uid, ec.gid
-	}
-	d.sk.cl.sent(d.sk.side, c)
+	d.sk.cl.sent(d.sk.side, g.sentCred(ctl))
 }
 
 // recvCreds returns the SCM_CREDENTIALS control message to deliver with a
 // received message when SO_PASSCRED is set, laid out within room bytes.
-func (g *dguest) recvCreds(d *dfile, room int) ([]byte, uint32) {
+func (g *dguest) recvCreds(d *dfile, r *recvResult, room int) ([]byte, uint32) {
 	if d.sk == nil || d.sk.cl == nil || !d.sk.passcred() {
 		return nil, 0
 	}
-	c := d.sk.cl.recv(d.sk.side)
-	// The link holds the sender's global pid; the receiver sees it in its own
-	// namespace (0 when the sender is in a namespace it cannot see).
-	if c.pid != 0 {
-		c.pid = uint32(g.nsPid(int(c.pid)))
-	}
-	return putCmsg(nil, room, lxSolSocket, lxScmCredentials, c.bytes())
-}
-
-// parseGuestCred returns an explicit SCM_CREDENTIALS a guest attached to a sent
-// message, if any (Linux cmsg layout: 64-bit len, then level and type).
-func parseGuestCred(ctl []byte) (ucred, bool) {
-	for off := 0; off+16 <= len(ctl); {
-		clen := int(le64(ctl[off:]))
-		if clen < 16 || off+clen > len(ctl) {
-			break
-		}
-		level, typ := int32(le32(ctl[off+8:])), int32(le32(ctl[off+12:]))
-		if level == lxSolSocket && typ == lxScmCredentials && off+16+12 <= off+clen {
-			d := ctl[off+16:]
-			return ucred{pid: le32(d), uid: le32(d[4:]), gid: le32(d[8:])}, true
-		}
-		off += (clen + 7) &^ 7
-	}
-	return ucred{}, false
+	return g.credCmsg(d.sk.cl.recv(d.sk.side), room)
 }

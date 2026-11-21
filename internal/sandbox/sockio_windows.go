@@ -24,6 +24,7 @@ type recvResult struct {
 	full  int    // the datagram's real length (== len(data) for a stream)
 	from  []byte // guest sockaddr of the sender, nil if none
 	oob   []*dfile
+	cred  ucred // the AF_UNIX sender's
 	flags uint32
 }
 
@@ -329,7 +330,7 @@ func (g *dguest) sendIov(d *dfile, iovs [][2]uint64, dest, ctl []byte, flags uin
 			return sErr(e)
 		}
 	}
-	r := g.unixSend(s, iovs, total, dest, rights, nb)
+	r := g.unixSend(s, iovs, total, dest, rights, g.sentCred(ctl), nb)
 	if r < 0 {
 		for _, f := range rights {
 			f.unref()
@@ -375,7 +376,7 @@ func (g *dguest) sendRights(ctl []byte) ([]*dfile, lxErrno) {
 
 // unixSend queues data on the peer: a connected stream's or seqpacket's pair,
 // or a datagram socket's destination.
-func (g *dguest) unixSend(s *dsock, iovs [][2]uint64, total int, dest []byte, rights []*dfile, nb bool) int64 {
+func (g *dguest) unixSend(s *dsock, iovs [][2]uint64, total int, dest []byte, rights []*dfile, cred ucred, nb bool) int64 {
 	n := s.n
 	var to *dsock
 	if dest != nil {
@@ -445,7 +446,7 @@ func (g *dguest) unixSend(s *dsock, iovs [][2]uint64, total int, dest []byte, ri
 				if stream {
 					take = min(room, len(buf))
 				}
-				seg := sockSeg{b: append([]byte(nil), buf[:take]...), rights: rights}
+				seg := sockSeg{b: append([]byte(nil), buf[:take]...), rights: rights, cred: cred}
 				if s.typ == lxSockDgram {
 					seg.from = s.name
 				}
@@ -633,6 +634,9 @@ func (g *dguest) recv(d *dfile, want, oobCap int, flags uint32) (recvResult, lxE
 	}()
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	pc := s.opts[[2]int{lxSolSocket, lxSoPasscred}]
+	passcred := s.family == lxAFUnix && len(pc) >= 4 && le32(pc) != 0
+	credSet := false
 	end := deadlineOf(s.rcvTimeo)
 	// consumed wakes what waits for room: the reader pump, a unix peer.
 	consumed := func() {
@@ -655,6 +659,7 @@ func (g *dguest) recv(d *dfile, want, oobCap int, flags uint32) (recvResult, lxE
 				}
 				r.from = seg.from
 				r.oob = seg.rights
+				r.cred = seg.cred
 				if peek {
 					for _, f := range r.oob {
 						f.refs.Add(1)
@@ -669,6 +674,14 @@ func (g *dguest) recv(d *dfile, want, oobCap int, flags uint32) (recvResult, lxE
 			stop := false
 			for i := 0; i < len(s.rx.segs) && len(r.data) < want && !stop; i++ {
 				seg := &s.rx.segs[i]
+				if passcred {
+					// Never glue messages from different writers.
+					if credSet && seg.cred != r.cred {
+						stop = true
+						break
+					}
+					r.cred, credSet = seg.cred, true
+				}
 				k := min(want-len(r.data), len(seg.b))
 				r.data = append(r.data, seg.b[:k]...)
 				if len(seg.rights) > 0 {
