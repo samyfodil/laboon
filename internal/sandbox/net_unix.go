@@ -1137,6 +1137,12 @@ func (g *dguest) sockIoctl(d *dfile, req, arg uint64) (int64, bool) {
 	)
 	var dw uint
 	switch {
+	case req == lxFionread && d.pipe != nil && d.pipe.io != nil:
+		n, _ := ringQueued(d)
+		if err := g.writeMem(arg, i32bytes(n)); err != nil {
+			return sErr(lxEFAULT), true
+		}
+		return 0, true
 	case req == lxFionread && d.f != nil && d.ev == nil && d.ep == nil && d.pty == nil && !d.isDir:
 		dw = hostFIONREAD
 	case req == lxSiocatmark && d.sk != nil:

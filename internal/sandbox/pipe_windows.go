@@ -86,27 +86,6 @@ func (p *bufferPipe) resize(size int32) lxErrno {
 	return 0
 }
 
-func pipeWaitError(e lxErrno) error {
-	if e == errRestart || e == lxEINTR {
-		return errSigIntr
-	}
-	return lxErr(e)
-}
-
-// holdPipe pins an open description for an in-flight syscall. A concurrent
-// close must not announce EOF/EPIPE until its last active I/O also finishes.
-func holdPipe(d *dfile) bool {
-	for {
-		r := d.refs.Load()
-		if r <= 0 {
-			return false
-		}
-		if d.refs.CompareAndSwap(r, r+1) {
-			return true
-		}
-	}
-}
-
 func (p *bufferPipe) read(g *dguest, d *dfile, b []byte, nb, whole bool) (int, error) {
 	if !holdPipe(d) {
 		return 0, lxErr(lxEBADF)

@@ -373,6 +373,10 @@ func (ep *epoll) collect(kev []unix.Kevent_t, max int) []pendEv {
 				if ev = uint32(r.d.pty.pollState().mask) & (r.events | lxEpollErr | lxEpollHup); ev == 0 {
 					continue
 				}
+			} else if st, ok := ringPollState(r.d); ok { // so do a supervisor pipe's
+				if ev = uint32(st.mask) & (r.events | lxEpollErr | lxEpollHup); ev == 0 {
+					continue
+				}
 			}
 			if _, seen := ready[gfd]; !seen {
 				order = append(order, gfd)

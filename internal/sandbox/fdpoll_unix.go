@@ -45,7 +45,7 @@ func pollReqOf(d *dfile) (pollReq, bool) {
 	}
 	rfd, wfd := kqFds(d)
 	r := pollReq{rfd: rfd, wfd: wfd, xfd: vloFd(d)}
-	if d.ep == nil && d.ev == nil && d.tfd == nil && d.pty == nil {
+	if _, ring := ringOf(d); d.ep == nil && d.ev == nil && d.tfd == nil && d.pty == nil && !ring {
 		var st unix.Stat_t
 		if unix.Fstat(rfd, &st) == nil {
 			switch st.Mode & unix.S_IFMT {
@@ -213,6 +213,7 @@ func (g *dguest) selectFor(nfds int64, rAddr, wAddr, xAddr uint64, timeout time.
 	var reqs []pollReq
 	var always []bool
 	var fds []int
+	var ds []*dfile
 	var synth []uint16
 	for fd := 0; fd < int(nfds); fd++ {
 		in, out := isSet(sets[0], fd), isSet(sets[1], fd)
@@ -232,6 +233,7 @@ func (g *dguest) selectFor(nfds int64, rAddr, wAddr, xAddr uint64, timeout time.
 		reqs = append(reqs, r)
 		always = append(always, !watch)
 		fds = append(fds, fd)
+		ds = append(ds, d)
 		synth = append(synth, st)
 		if st != 0 {
 			timeout = 0
@@ -257,6 +259,10 @@ func (g *dguest) selectFor(nfds int64, rAddr, wAddr, xAddr uint64, timeout time.
 	for i, fd := range fds {
 		if synth[i] != 0 {
 			res[i] = pollRes{in: true, out: synth[i]&lxPollOut != 0}
+		}
+		if st, ok := ringPollState(ds[i]); ok {
+			m := st.mask
+			res[i] = pollRes{in: m&lxPollIn != 0, out: m&lxPollOut != 0, hup: m&lxPollHup != 0, err: m&lxPollErr != 0}
 		}
 		// select counts an error (a pipe's write end without readers) as
 		// readable and writable, as Linux does.
@@ -287,6 +293,9 @@ func kqFds(d *dfile) (rfd, wfd int) {
 	}
 	if d.pty != nil {
 		return hostFd(d.f), d.pty.readyOut()
+	}
+	if r, w, ok := ringFds(d); ok {
+		return r, w
 	}
 	fd := hostFd(d.f)
 	return fd, fd

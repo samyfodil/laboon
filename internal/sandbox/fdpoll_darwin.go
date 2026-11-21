@@ -211,6 +211,9 @@ func pollRevents(r pollRes, ev uint16, d *dfile) uint16 {
 	if d != nil && d.pty != nil {
 		return d.pty.pollState().mask & (ev | lxPollHup | lxPollErr)
 	}
+	if st, ok := ringPollState(d); ok {
+		return st.mask & (ev | lxPollHup | lxPollErr)
+	}
 	var rev uint16
 	if r.in {
 		rev |= ev & (lxPollIn | lxPollRdnorm)

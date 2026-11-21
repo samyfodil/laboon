@@ -632,7 +632,7 @@ func (g *dguest) reopen(d *dfile, flags int64) (*dfile, lxErrno) {
 	}
 	if p := d.pipe; p != nil {
 		if p.io != nil {
-			f, e := dupFile(d.f)
+			f, e := pipeIOFile(p.io, d, acc)
 			if e != 0 {
 				return nil, e
 			}

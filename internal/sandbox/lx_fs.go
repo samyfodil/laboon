@@ -1881,6 +1881,7 @@ const (
 	lxFGetSeals     = 1034
 
 	lxPipeDefSize = 65536
+	lxPipeBuf     = 4096
 	lxPipeMaxSize = 1048576
 	lxNrOpen      = 1048576
 )

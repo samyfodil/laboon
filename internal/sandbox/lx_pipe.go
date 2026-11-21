@@ -2,6 +2,8 @@
 
 package sandbox
 
+import "os"
+
 // pipeVector makes a vector one operation, rather than waiting separately on
 // its elements. In particular a <= PIPE_BUF writev is indivisible.
 func (g *dguest) pipeVector(d *dfile, v [][2]uint64, write bool) int64 {
@@ -42,4 +44,36 @@ func (g *dguest) pipeVector(d *dfile, v [][2]uint64, write bool) int64 {
 		}
 	}
 	return int64(n)
+}
+
+func pipeWaitError(e lxErrno) error {
+	if e == errRestart || e == lxEINTR {
+		return errSigIntr
+	}
+	return lxErr(e)
+}
+
+// pipeIOFile is the host file behind a new description of a supervisor pipe,
+// opened acc through d (a reopen of /proc/<pid>/fd/<n>).
+func pipeIOFile(io pipeIO, d *dfile, acc int64) (*os.File, lxErrno) {
+	if f, ok := io.(interface {
+		file(int64) (*os.File, lxErrno)
+	}); ok {
+		return f.file(acc)
+	}
+	return dupFile(d.f)
+}
+
+// holdPipe pins an open description for an in-flight syscall. A concurrent
+// close must not announce EOF/EPIPE until its last active I/O also finishes.
+func holdPipe(d *dfile) bool {
+	for {
+		r := d.refs.Load()
+		if r <= 0 {
+			return false
+		}
+		if d.refs.CompareAndSwap(r, r+1) {
+			return true
+		}
+	}
 }
