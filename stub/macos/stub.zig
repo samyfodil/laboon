@@ -430,7 +430,7 @@ export fn tramp_handler(frame: [*]u64) callconv(.C) u64 {
 // the registers into the arm64-shaped `frame` the dispatch reads -- args at
 // 0..5, the number at 8, the resume pc at 33 -- serves the syscall, then writes
 // the result into rax and advances past the 2-byte ud2.
-pub fn serveTrap(mc: *std.c.mcontext_t) void {
+pub fn serveTrap(mc: *std.c.mcontext_t, avx: bool) void {
     var frame = std.mem.zeroes([proc.FRAME_BYTES / 8]u64);
     frame[0] = mc.ss.rdi;
     frame[1] = mc.ss.rsi;
@@ -461,6 +461,15 @@ pub fn serveTrap(mc: *std.c.mcontext_t) void {
     frame[proc.XR_R15] = mc.ss.r15;
     frame[proc.XR_RIP] = mc.ss.rip + 2;
     frame[proc.XR_RFLAGS] = mc.ss.rflags;
+    // FP/SSE state from fcw on is laid out as FXSAVE's; an AVX context then
+    // carries 64 reserved bytes and the ymm upper halves after it.
+    const fs: [*]const u8 = @ptrCast(&mc.fs);
+    @memcpy(@as([*]u8, @ptrCast(&frame[proc.XR_FX]))[0..512], fs[8..520]);
+    if (avx) {
+        const ymmh = @sizeOf(@TypeOf(mc.fs)) + 64;
+        @memcpy(@as([*]u8, @ptrCast(&frame[proc.XR_YMMH]))[0..256], fs[ymmh .. ymmh + 256]);
+        frame[proc.XR_AVX] = 1;
+    }
     // The signal path delivers handlers and applies sigreturn straight onto this
     // mcontext (there is no arm64 brk-trap context switch); g_sig_delivered then
     // means the mcontext already holds the handler or restored context.

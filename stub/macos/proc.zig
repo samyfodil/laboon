@@ -30,6 +30,11 @@ pub const XR_R14 = 64;
 pub const XR_R15 = 65;
 pub const XR_RIP = 66;
 pub const XR_RFLAGS = 67;
+// XR_FX holds the FP/SSE state as FXSAVE lays it out (512 bytes), XR_YMMH the
+// upper halves of ymm0..15 and XR_AVX whether they were captured.
+pub const XR_FX = 102;
+pub const XR_YMMH = 166;
+pub const XR_AVX = 198;
 
 comptime {
     if (!tstate.arm64) {
@@ -37,7 +42,8 @@ comptime {
             XR_RDI * 8 != 440 or XR_RBP * 8 != 448 or XR_RSP * 8 != 456 or
             XR_R8 * 8 != 464 or XR_R9 * 8 != 472 or XR_R10 * 8 != 480 or
             XR_R12 * 8 != 496 or XR_R13 * 8 != 504 or XR_R14 * 8 != 512 or
-            XR_R15 * 8 != 520 or XR_RIP * 8 != 528)
+            XR_R15 * 8 != 520 or XR_RIP * 8 != 528 or XR_YMMH * 8 != 1328 or XR_AVX * 8 != 1584 or
+            XR_FX + 64 != XR_YMMH or FRAME_BYTES <= XR_AVX * 8)
             @compileError("XR_* slot offsets diverged from the resume asm literals");
     }
 }
@@ -67,6 +73,7 @@ pub fn resumeFrame(frame: [*]const u64, sp: u64) callconv(.C) noreturn {
         // to the child stack, zero rax (the clone return the child sees) and
         // jump past the trapped syscall. The child stack is not touched (the
         // jump is indirect through memory), so glibc's fn/arg at its top survive.
+        restoreFp(frame);
         asm volatile (
             \\ movq %%rcx, %%rsp
             \\ movq 408(%%r11), %%rbx
@@ -141,7 +148,40 @@ pub fn resumeFrame(frame: [*]const u64, sp: u64) callconv(.C) noreturn {
     unreachable;
 }
 
-pub const FRAME_BYTES: usize = 800;
+pub const FRAME_BYTES: usize = if (tstate.arm64) 800 else 1600;
+
+// restoreFp loads the guest's FP/SSE (and AVX) state from an x86-64 frame;
+// the register restore that follows touches no vector register.
+inline fn restoreFp(frame: [*]const u64) void {
+    var fx: [512]u8 align(16) = undefined;
+    @memcpy(&fx, @as([*]const u8, @ptrCast(&frame[XR_FX]))[0..512]);
+    asm volatile ("fxrstor64 (%[fx])"
+        :
+        : [fx] "r" (&fx),
+        : "memory"
+    );
+    if (frame[XR_AVX] != 0) asm volatile (
+        \\ vinsertf128 $1, 0(%[h]), %%ymm0, %%ymm0
+        \\ vinsertf128 $1, 16(%[h]), %%ymm1, %%ymm1
+        \\ vinsertf128 $1, 32(%[h]), %%ymm2, %%ymm2
+        \\ vinsertf128 $1, 48(%[h]), %%ymm3, %%ymm3
+        \\ vinsertf128 $1, 64(%[h]), %%ymm4, %%ymm4
+        \\ vinsertf128 $1, 80(%[h]), %%ymm5, %%ymm5
+        \\ vinsertf128 $1, 96(%[h]), %%ymm6, %%ymm6
+        \\ vinsertf128 $1, 112(%[h]), %%ymm7, %%ymm7
+        \\ vinsertf128 $1, 128(%[h]), %%ymm8, %%ymm8
+        \\ vinsertf128 $1, 144(%[h]), %%ymm9, %%ymm9
+        \\ vinsertf128 $1, 160(%[h]), %%ymm10, %%ymm10
+        \\ vinsertf128 $1, 176(%[h]), %%ymm11, %%ymm11
+        \\ vinsertf128 $1, 192(%[h]), %%ymm12, %%ymm12
+        \\ vinsertf128 $1, 208(%[h]), %%ymm13, %%ymm13
+        \\ vinsertf128 $1, 224(%[h]), %%ymm14, %%ymm14
+        \\ vinsertf128 $1, 240(%[h]), %%ymm15, %%ymm15
+        :
+        : [h] "r" (&frame[XR_YMMH]),
+        : "memory"
+    );
+}
 
 // ISLAND_PUSH is what an island takes below the guest's sp: the 128 bytes it
 // skips, which Linux leaves alone across svc (Go's runtime.clone keeps values
@@ -166,6 +206,7 @@ pub fn resumeIsland(frame: [*]u64) callconv(.C) noreturn {
         // x86-64 fork child (a fresh stub): restore the captured image and
         // resume on the guest's own rsp at the fork (the child shares the
         // parent's address space layout), with rax = 0.
+        restoreFp(frame);
         asm volatile (
             \\ movq 456(%%r11), %%rsp
             \\ movq 408(%%r11), %%rbx

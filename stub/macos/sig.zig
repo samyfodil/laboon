@@ -196,6 +196,7 @@ const DW_SA_SIGINFO: c_int = 0x40;
 const DW_SIG_DFL: usize = 0;
 const DW_SIG_IGN: usize = 1;
 const ALT_SIZE: usize = 0x10000;
+const MCONTEXT_AVX64: u64 = 1028;
 const PAGEZERO_END: u64 = 0x100000000;
 
 const DwHandler = *const fn (c_int, *std.c.siginfo_t, ?*anyopaque) callconv(.C) void;
@@ -1693,7 +1694,9 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
             // A rewritten guest syscall site is a 2-byte ud2 (0f 0b). Service it
             // straight from the mcontext and resume past it (AMD64.md 1e/1f).
             if (@as(*align(1) const u16, @ptrFromInt(tstate.pc(mc))).* == 0x0b0f) {
-                @import("root").serveTrap(mc);
+                // Darwin hands an AVX context (es, ss, then the AVX float
+                // state: 1028 bytes) to a thread that uses AVX.
+                @import("root").serveTrap(mc, uc.mcsize >= MCONTEXT_AVX64);
                 return;
             }
         }

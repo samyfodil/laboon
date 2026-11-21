@@ -645,12 +645,13 @@ func TestLeaderExitsFirst(t *testing.T) {
 
 // TestForkKeepsFP: a fork child has its parent's FP/SIMD registers and FP
 // control word, also when the fork came in through a signal handler (a stray
-// syscall the trap serves; Windows kills a stray instead, as
-// TestWindowsNoRewriteKilled checks, so there only the rewritten site).
+// syscall Linux's seccomp trap serves; macOS and Windows kill a stray instead,
+// the host backstop for a site the rewriter missed, so there only the
+// rewritten site).
 func TestForkKeepsFP(t *testing.T) {
 	root, out := guestRoot(t, "forkfp")
 	args := []string{"forkfp"}
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS != "linux" {
 		args = append(args, "sites")
 	}
 	var o bytes.Buffer
