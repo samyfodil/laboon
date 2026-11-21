@@ -56,7 +56,7 @@ func TestOverlayFSConformance(t *testing.T) {
 	lo := hostfs.NewHostDirFS(lower, hostfs.NewHostFS(lower, "", ""))
 	up := hostfs.NewHostDirFS(upper, hostfs.NewHostFS(upper, "", ""))
 	ofs := overlayfs.OverlayFS(lo, up)
-	up.LoadMeta(upper) // the upper leaf owns its metadata now
+	up.LoadSidecar() // the upper leaf owns its metadata now
 	ns := namespace.NewNamespace(ofs)
 
 	stat := func(p string) core.Attr {

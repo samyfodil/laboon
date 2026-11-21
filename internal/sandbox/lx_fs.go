@@ -210,22 +210,6 @@ func (fs *dfs) mountHostImage(root, upper string) error {
 	}
 	fs.top = top
 	fs.buildNS()
-	// A lower carries a sidecar of the non-root owners and special mode bits its
-	// host files cannot hold; hydrate the inode table so the guest sees them. A
-	// plain rootfs has no sidecar, so this is a no-op for an ordinary run.
-	for p, o := range hostfs.LoadOverrides(fs.rootAbs) {
-		if fi, err := os.Lstat(filepath.Join(fs.rootAbs, filepath.FromSlash(p))); err == nil {
-			ov := o
-			fs.ov.update(inodeKey(fi), func(m *imeta) {
-				if ov.HasOwner {
-					m.uid, m.gid, m.hasOwner = ov.Uid, ov.Gid, true
-				}
-				if ov.HasMode {
-					m.mode, m.hasMode = ov.Mode, true
-				}
-			})
-		}
-	}
 	return nil
 }
 
@@ -270,6 +254,7 @@ func (fs *dfs) buildNS() {
 	default:
 		lower := hostfs.NewHostDirFS(fs.rootAbs, fs.hostFS)
 		lower.SetMeta(fs.ov.store)
+		lower.LoadSidecar()
 		layers := []core.FileSystem{lower}
 		if fs.upperAbs != "" {
 			up := hostfs.NewHostDirFS(fs.upperAbs, fs.hostFS)
@@ -368,7 +353,7 @@ func (fs *dfs) close() {
 		// The guest's writers have stopped; project the inode-keyed metadata (the
 		// live cache) onto the top layer's path map and persist it to the sidecar,
 		// the durable record. Whiteouts are already on disk (written live).
-		fs.checkpointMeta()
+		fs.top.Persist(fs.ov.store)
 		fs.top.SaveMeta()
 	}
 	for _, d := range []string{fs.upperAbs, fs.workAbs} {

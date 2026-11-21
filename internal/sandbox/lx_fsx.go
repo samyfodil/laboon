@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -16,56 +15,6 @@ import (
 	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
-
-// checkpointMeta projects the inode-keyed side table (the live authority for the
-// guest owner, mode and special-node kind a host file cannot itself carry) onto
-// the top layer's path-keyed override, once, after the guest's writers have
-// stopped. It walks the kept upper and derives each real path's metadata from
-// its inode's entry, so it captures everything the run recorded there — notably
-// a mode preserved by a copy-up, which the per-syscall path never mirrored. A
-// guest-made fifo is real on the host during the run; here it becomes the
-// placeholder-plus-kind a serialized layer needs. Replaces the per-syscall
-// mirror into the path map, which duplicated this authority and could drift.
-func (fs *dfs) checkpointMeta() error {
-	if fs.top == nil || fs.upperAbs == "" {
-		return nil
-	}
-	top := fs.top
-	return filepath.WalkDir(fs.upperAbs, func(hp string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(fs.upperAbs, hp)
-		if err != nil || rel == "." {
-			return err
-		}
-		if core.Internal(filepath.Base(hp)) { // whiteout/opaque markers, the sidecar
-			return nil
-		}
-		fi, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return nil // a symlink carries no owner/mode override
-		}
-		gp := "/" + filepath.ToSlash(rel)
-		m, ok := fs.ov.get(inodeKey(fi))
-		if fi.Mode()&os.ModeNamedPipe != 0 {
-			perm := uint32(fi.Mode().Perm())
-			if ok && m.hasMode {
-				perm = m.mode
-			}
-			top.Special(gp, core.Fifo, 0, perm)
-		} else if ok && m.hasMode {
-			top.SetMode(gp, m.mode)
-		}
-		if ok && m.hasOwner {
-			top.SetOwner(gp, m.uid, m.gid)
-		}
-		return nil
-	})
-}
 
 // Namespace-changing and attribute syscalls over the overlay: rename, link,
 // symlink, mknod, chmod/chown (ownership in the side table), utimens,

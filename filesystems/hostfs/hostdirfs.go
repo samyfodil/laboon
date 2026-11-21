@@ -506,7 +506,65 @@ func HostKind(fi os.FileInfo) core.Kind {
 func (f *HostDirFS) SetMeta(store *core.MetaStore) { f.meta = store }
 func (f *HostDirFS) SetConfine(b bool)             { f.confine = b }
 
-// LoadMeta reads the override sidecar in dir into the backend's metadata store,
-// so a layer directory's persisted guest owner/mode/special-node metadata is
-// served from this leaf.
-func (f *HostDirFS) LoadMeta(dir string) { LoadMetaInto(dir, f.meta) }
+// LoadSidecar reads the metadata sidecar at the root of f's tree (the owners,
+// modes and special kinds an image's host files cannot hold) into f's store,
+// keyed by each file's identity as f's own nodes report it.
+func (f *HostDirFS) LoadSidecar() {
+	h, err := f.h.hOpen(f.hp(core.MetaFileName), os.O_RDONLY, 0)
+	if err != nil {
+		return
+	}
+	b, err := io.ReadAll(h)
+	h.Close()
+	if err != nil {
+		return
+	}
+	core.DecodeMeta(b, func(p string, o core.Override) {
+		n, err := f.node(p)
+		if err != nil {
+			return
+		}
+		f.meta.Update(n.ID(), func(d *core.Override) { *d = o })
+	})
+}
+
+// Persist records in the layer's sidecar what store holds for each file of its
+// tree, keyed by the file's identity, so a kept layer carries the guest owners,
+// modes and fifos past the run.
+func (l *Layer) Persist(store *core.MetaStore) error {
+	return filepath.WalkDir(l.dir, func(hp string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(l.dir, hp)
+		if err != nil || rel == "." {
+			return err
+		}
+		if core.Internal(filepath.Base(hp)) {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		gp := "/" + filepath.ToSlash(rel)
+		dev, ino := HostDevIno(fi)
+		o, ok := store.Get(core.NodeID{Dev: dev, Ino: ino})
+		if fi.Mode()&os.ModeNamedPipe != 0 {
+			perm := uint32(fi.Mode().Perm())
+			if ok && o.HasMode {
+				perm = o.Mode
+			}
+			l.Special(gp, core.Fifo, 0, perm)
+		} else if ok && o.HasMode {
+			l.SetMode(gp, o.Mode)
+		}
+		if ok && o.HasOwner {
+			l.SetOwner(gp, o.Uid, o.Gid)
+		}
+		return nil
+	})
+}

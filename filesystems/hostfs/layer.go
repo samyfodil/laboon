@@ -52,23 +52,8 @@ func (l *Layer) SaveMeta() error {
 	return os.WriteFile(filepath.Join(l.dir, core.MetaFileName), b, 0o600)
 }
 
-// LoadOverrides reads the guest metadata a layer directory's sidecar records
-// (non-root owners and the special mode bits a host file cannot hold), keyed by
-// layer-relative slash path. A consumer that materializes the directory as a
-// plain tree (a build root, a sandbox lower) uses it to restore what the host
-// files cannot carry. Absent or unreadable sidecar yields an empty map.
-func LoadOverrides(dir string) map[string]core.Override {
-	b, err := os.ReadFile(filepath.Join(dir, core.MetaFileName))
-	if err != nil {
-		return nil
-	}
-	out := map[string]core.Override{}
-	core.DecodeMeta(b, func(p string, o core.Override) { out[p] = o })
-	return out
-}
-
 // SaveOverrides writes the metadata sidecar in dir from m (slash paths relative
-// to dir, no leading slash, as LoadOverrides reads them). The OCI unpacker uses
+// to dir, no leading slash, as LoadSidecar reads them). The OCI unpacker uses
 // it to carry owners and special mode bits a non-root host cannot set on the
 // unpacked files. Nothing is written when m records no override.
 func SaveOverrides(dir string, m map[string]*core.Override) error {
@@ -77,27 +62,6 @@ func SaveOverrides(dir string, m map[string]*core.Override) error {
 		return nil
 	}
 	return os.WriteFile(filepath.Join(dir, core.MetaFileName), b, 0o600)
-}
-
-// LoadMetaInto reads a layer directory's path-keyed override sidecar and keys it
-// into store by each path's current host inode, so a reconstructed overlay (a
-// reloaded build step, a kept upper reopened) recovers the guest metadata the
-// host files cannot hold. A dir with no sidecar loads nothing.
-func LoadMetaInto(dir string, store *core.MetaStore) {
-	b, err := os.ReadFile(filepath.Join(dir, core.MetaFileName))
-	if err != nil {
-		return
-	}
-	core.DecodeMeta(b, func(p string, o core.Override) {
-		fi, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(p)))
-		if err != nil {
-			return
-		}
-		if id, ok := core.StatID(fi); ok {
-			oo := o
-			store.Update(id, func(d *core.Override) { *d = oo })
-		}
-	})
 }
 
 // loadMeta reads the sidecar override map if present.
