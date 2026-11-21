@@ -299,7 +299,7 @@ func (h *tarFile) ReadAt(p []byte, at int64) (int, error) {
 
 func (*tarFile) WriteAt([]byte, int64) (int, error) { return 0, syscall.EROFS }
 func (*tarFile) Truncate(int64) error               { return syscall.EROFS }
-func (*tarFile) SetAttr(AttrUpdate) error            { return syscall.EROFS }
+func (*tarFile) SetAttr(AttrUpdate) error           { return syscall.EROFS }
 func (*tarFile) Close() error                       { return nil }
 
 func (*tarFS) ReadOnlyMount() {}

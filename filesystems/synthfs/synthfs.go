@@ -135,5 +135,5 @@ func (b *bytesFile) ReadAt(p []byte, off int64) (int, error) {
 }
 func (b *bytesFile) WriteAt([]byte, int64) (int, error) { return 0, errROFS("write") }
 func (b *bytesFile) Truncate(int64) error               { return errROFS("truncate") }
-func (b *bytesFile) SetAttr(AttrUpdate) error            { return errROFS("setattr") }
+func (b *bytesFile) SetAttr(AttrUpdate) error           { return errROFS("setattr") }
 func (b *bytesFile) Close() error                       { return nil }
