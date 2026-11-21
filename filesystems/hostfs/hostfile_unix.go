@@ -2,7 +2,11 @@
 
 package hostfs
 
-import "os"
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
 
 // FstatOf is the HostStat of the open file f.
 func FstatOf(f *os.File) (HostStat, error) {
@@ -12,6 +16,24 @@ func FstatOf(f *os.File) (HostStat, error) {
 	}
 	st, _ := StatOf(fi)
 	return st, nil
+}
+
+// fdOf is f's descriptor, without os.File.Fd's switch to blocking mode.
+func fdOf(f *os.File) uintptr {
+	fd := ^uintptr(0)
+	if rc, err := f.SyscallConn(); err == nil {
+		rc.Control(func(d uintptr) { fd = d })
+	}
+	return fd
+}
+
+// dupOf is an owned duplicate of f's descriptor.
+func dupOf(f *os.File) (*os.File, error) {
+	fd, err := unix.FcntlInt(fdOf(f), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), f.Name()), nil
 }
 
 // FileStat is the os.FileInfo of the open file f, which StatOf understands.

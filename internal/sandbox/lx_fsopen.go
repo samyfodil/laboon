@@ -450,11 +450,7 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		if err != nil {
 			return sErr(osErrno(err))
 		}
-		of, ok := hostOf(nf)
-		if !ok {
-			return g.installVFile(gp, loc.Node, nf, flags)
-		}
-		return g.install(loc.Node, nf, of, gp, flags)
+		return g.install(loc.Node, nf, gp, flags)
 	}
 	if wr || flags&lxOTrunc != 0 {
 		if g.upperAbs == "" && g.rootAbs != "" {
@@ -470,14 +466,10 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		if err != nil {
 			return sErr(osErrno(err))
 		}
-		of, ok := hostOf(nf)
-		if !ok {
-			return g.installVFile(gp, loc.Node, nf, flags)
-		}
 		if flags&lxOTrunc != 0 {
-			g.fileModified(of)
+			g.fileModified(nf)
 		}
-		fd := g.install(loc.Node, nf, of, gp, flags)
+		fd := g.install(loc.Node, nf, gp, flags)
 		if fd >= 0 && flags&lxOTrunc != 0 {
 			g.notify(gp, inModify, 0)
 		}
@@ -494,10 +486,7 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	if of, ok := hostOf(nf); ok {
-		return g.install(loc.Node, nf, of, gp, flags)
-	}
-	return g.installVFile(gp, loc.Node, nf, flags)
+	return g.install(loc.Node, nf, gp, flags)
 }
 
 // openVirtualDev opens a mknod'd char device by mapping its device number to
@@ -575,15 +564,7 @@ func (g *dguest) createFile(gp string, flags, mode int64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	of, ok := hostOf(nf)
-	if !ok {
-		fd := g.installVFile(gp, c, nf, flags)
-		if fd >= 0 {
-			g.notify(gp, inCreate, 0)
-		}
-		return fd
-	}
-	fd := g.install(c, nf, of, gp, flags)
+	fd := g.install(c, nf, gp, flags)
 	if fd >= 0 {
 		g.notify(gp, inCreate, 0)
 	}
@@ -612,29 +593,34 @@ func (g *dguest) openTmpfile(dir string, flags, mode int64) int64 {
 	return g.installD(d, flags)
 }
 
-// installVFile tracks a non-host regular file (in-memory, user-defined): the
-// description is backed by the filesystem's core.File handle vf over node, not a
-// host fd. laboon owns the offset and serves read/write/lseek/fstat/ftruncate by
-// driving vf's ReadAt/WriteAt/Truncate and the node's Stat (regfile.go); mmap
-// copies the content in, or maps it directly if vf is an *os.File (mmap_linux.go).
-func (g *dguest) installVFile(gp string, node core.Node, vf core.File, flags int64) int64 {
-	return g.installD(&dfile{gp: gp, stub: -1, vf: vf, vn: node, fs: g.dfs}, flags)
-}
-
-// install tracks a freshly opened host file as a new description with the open
-// flags' status bits, honoring O_CLOEXEC and O_NONBLOCK. hf is the backend's vfs
-// handle (fstat goes through it); f is the borrowed descriptor. A regular file's
-// bytes go through hf at laboon's offset, as any other backing's do; f serves
-// only what needs the host object itself (mmap, locks, poll).
-func (g *dguest) install(node core.Node, hf core.File, f *os.File, gp string, flags int64) int64 {
-	fi, err := f.Stat()
+// install tracks a file freshly opened through the Namespace as a new
+// description with the open flags' status bits, honoring O_CLOEXEC and
+// O_NONBLOCK. A regular file is its File alone: its bytes go through it at
+// laboon's offset, whatever backs it, and a host-backed one lends its
+// descriptor only for what needs the host object (mmap, poll, the stub). A host
+// special (a device or socket node) keeps the File as its vfs handle (fstat)
+// and streams through an owned duplicate of its descriptor, as a pipe does.
+func (g *dguest) install(node core.Node, nf core.File, gp string, flags int64) int64 {
+	_, host := hostFdOf(nf)
+	info, err := nf.Stat()
 	if err != nil {
-		f.Close()
+		nf.Close()
 		return sErr(osErrno(err))
 	}
-	d := &dfile{f: f, hf: hf, gp: gp, isDir: fi.IsDir(), stub: -1}
-	if fi.Mode().IsRegular() {
-		d.vf, d.vn, d.fs = hf, node, g.dfs
+	d := &dfile{gp: gp, isDir: info.IsDir(), stub: -1}
+	switch {
+	case info.Mode().IsRegular() || !host:
+		d.vf, d.vn, d.fs = nf, node, g.dfs
+		if host {
+			d.hf = nf
+		}
+	default:
+		f, ok := hostDupOf(nf, gp)
+		if !ok {
+			nf.Close()
+			return sErr(lxEBADF)
+		}
+		d.f, d.hf = f, nf
 	}
 	return g.installD(d, flags)
 }

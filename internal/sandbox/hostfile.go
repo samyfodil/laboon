@@ -9,17 +9,48 @@ import (
 	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
-// hostOf is the host *os.File behind a File opened from a host-backed node, or
-// nil if the File has no host descriptor (an in-memory or synthetic backend). The
-// descriptor is taken through the File's own HostFile hook — the one deliberate
-// escape hatch a host-backed File exposes for the supervisor's fast path (mmap,
-// poll, fcntl) — never by asserting the concrete type past the File interface.
-func hostOf(f core.File) (*os.File, bool) {
-	if h, ok := f.(interface{ HostFile() *os.File }); ok {
-		return h.HostFile(), true
+// hostFdOf is the host descriptor behind a File opened from a host-backed node,
+// borrowed (the File keeps owning it), or ok false for a File with none (an
+// in-memory or synthetic backend). It comes through the File's HostFd hook —
+// the one escape hatch a host-backed File exposes, for what only the host
+// object can do (map, poll, lend to the stub) — never by asserting the concrete
+// type past the File interface.
+func hostFdOf(f core.File) (int, bool) {
+	if h, ok := f.(interface{ HostFd() uintptr }); ok {
+		return int(h.HostFd()), true
 	}
-	return nil, false
+	return -1, false
 }
+
+// hostDupOf is an owned duplicate of the descriptor behind f, named name: the
+// stream plane of a filesystem object whose bytes the supervisor moves itself,
+// as it does a pipe's (a directory, FIFO, device or O_PATH pin), or a real host
+// file for a caller that must hand one on (the loader). The caller closes it;
+// f stays open until its own Close.
+func hostDupOf(f core.File, name string) (*os.File, bool) {
+	fd, ok := hostFdOf(f)
+	if !ok {
+		return nil, false
+	}
+	nf, e := dupFd(fd, name)
+	return nf, e == 0
+}
+
+// hostFd is d's host descriptor: its own for a supervisor-owned object, its
+// backing's (borrowed) for a host-backed regular file.
+func (d *dfile) hostFd() (int, bool) {
+	if d.f != nil {
+		return hostFd(d.f), true
+	}
+	if d.vf != nil {
+		return hostFdOf(d.vf)
+	}
+	return -1, false
+}
+
+// held reports whether the supervisor holds d's object (a descriptor or a
+// regular file's backing), which stub-served stdio is not.
+func (d *dfile) held() bool { return d.f != nil || d.vf != nil }
 
 // fsFile is d's filesystem handle: a host-backed object's, or a non-host
 // regular file's backing; nil for a supervisor-owned object.

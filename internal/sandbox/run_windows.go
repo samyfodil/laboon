@@ -405,22 +405,26 @@ type wguest struct {
 type imageSrc struct {
 	data  []byte
 	f     *os.File
+	r     io.ReaderAt // a regular file's File, read in place of f
 	id    rewrite.FileID
 	hasID bool
 }
 
 func (s imageSrc) reader() io.ReaderAt {
-	if s.f != nil {
+	switch {
+	case s.f != nil:
 		return s.f
+	case s.r != nil:
+		return s.r
 	}
 	return bytes.NewReader(s.data)
 }
 
 func (s imageSrc) bytes() ([]byte, error) {
-	if s.f == nil {
+	if s.f == nil && s.r == nil {
 		return s.data, nil
 	}
-	return io.ReadAll(io.NewSectionReader(s.f, 0, 1<<62))
+	return io.ReadAll(io.NewSectionReader(s.reader(), 0, 1<<62))
 }
 
 func (s imageSrc) identity() (rewrite.FileID, bool) {

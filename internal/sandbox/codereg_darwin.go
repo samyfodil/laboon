@@ -7,6 +7,9 @@ import (
 	"os"
 	"runtime"
 	"unsafe"
+
+	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // Shared code across stubs on Darwin (codereg.go): a page of memory is its
@@ -170,14 +173,24 @@ func (g *dguest) codeFile(fi os.FileInfo) {
 // map the file shared and executable cool their hot pages of it.
 func (g *dguest) modified(d *dfile) {
 	g.notifyFd(d, inModify)
-	if d.f != nil {
-		g.fileModified(d.f)
+	if h := d.fsFile(); h != nil {
+		g.fileModified(h)
+	} else if d.f != nil {
+		if fi, err := hostfs.FileStat(d.f); err == nil {
+			g.infoModified(fi)
+		}
 	}
 }
 
 // fileModified cools the hot pages of f's file in the stubs that map it
 // shared and executable.
-func (g *dguest) fileModified(f *os.File) {
+func (g *dguest) fileModified(f core.File) {
+	if info, err := f.Stat(); err == nil {
+		g.infoModified(info)
+	}
+}
+
+func (g *dguest) infoModified(fi os.FileInfo) {
 	if g.dfs.run == nil {
 		return
 	}
@@ -185,7 +198,7 @@ func (g *dguest) fileModified(f *os.File) {
 	if !r.marked() {
 		return
 	}
-	if fi, err := f.Stat(); err == nil && fi.Mode().IsRegular() {
+	if fi.Mode().IsRegular() {
 		dev, ino := HostDevIno(fi)
 		var body [8]byte
 		binary.LittleEndian.PutUint64(body[:], ino)

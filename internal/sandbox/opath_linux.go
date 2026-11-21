@@ -31,9 +31,9 @@ func pinPathFD(n core.Node) *os.File {
 	if err != nil {
 		return nil
 	}
-	of, ok := hostOf(f)
+	of, ok := hostDupOf(f, "")
+	f.Close()
 	if !ok {
-		f.Close()
 		return nil
 	}
 	return of

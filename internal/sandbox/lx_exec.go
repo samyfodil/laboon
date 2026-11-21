@@ -216,6 +216,12 @@ func (g *dguest) descExec(d *dfile) (rf *os.File, own bool, e lxErrno) {
 		rf, own = f, true
 	case d.f != nil:
 		rf = d.f
+	case d.vf != nil: // a host regular file: the loader gets a descriptor of its own
+		f, ok := hostDupOf(d.vf, d.gp)
+		if !ok {
+			return nil, false, lxEACCES
+		}
+		rf, own = f, true
 	default:
 		return nil, false, lxEACCES
 	}

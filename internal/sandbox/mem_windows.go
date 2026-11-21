@@ -45,7 +45,7 @@ func (g *wguest) mapFile(dg *dguest, fd uint64) (*dfile, lxErrno) {
 	if d.nonHost() { // a non-host regular file (in-memory, user-defined, network)
 		return d, 0
 	}
-	if d.f == nil {
+	if !d.held() {
 		return nil, lxEBADF
 	}
 	if d.isDir || d.pipe != nil || !d.isRegular() {
@@ -142,12 +142,14 @@ func (g *wguest) mapSection(dg *dguest, fd, off, n, prot uint64) int64 {
 			// one spanning the whole of a large sparse file is beyond the kernel
 			// (.NET maps slices of a 2 TiB memfd), and one longer than the file
 			// would grow it.
+			hfd, _ := d.hostFd()
+			h := windows.Handle(hfd)
 			var fi windows.ByHandleFileInformation
-			if err = windows.GetFileInformationByHandle(windows.Handle(d.f.Fd()), &fi); err != nil {
+			if err = windows.GetFileInformationByHandle(h, &fi); err != nil {
 				return sErr(osErrno(err))
 			}
 			end := min(off+n, uint64(fi.FileSizeHigh)<<32|uint64(fi.FileSizeLow))
-			sec, err = windows.CreateFileMapping(windows.Handle(d.f.Fd()), nil, page, uint32(end>>32), uint32(end), nil)
+			sec, err = windows.CreateFileMapping(h, nil, page, uint32(end>>32), uint32(end), nil)
 			if err == windows.ERROR_FILE_INVALID { // an empty file
 				dg.ch.page.args[0], dg.ch.page.args[1] = 0, 0
 				return 0
@@ -162,7 +164,7 @@ func (g *wguest) mapSection(dg *dguest, fd, off, n, prot uint64) int64 {
 					windows.CloseHandle(sec)
 				}
 			}
-			key = futexFileKey(windows.Handle(d.f.Fd()))
+			key = futexFileKey(h)
 			if prot&lxProtExec != 0 {
 				dg.codeKey(key) // its writes reach the stubs' shadows of its pages
 			}
@@ -349,6 +351,14 @@ func (g *wguest) fillSection(sec windows.Handle, d *dfile, off, n uint64) error 
 func (g *wguest) codeImage(d *dfile) (imageSrc, error) {
 	if d.f != nil {
 		return imageSrc{f: d.f}, nil
+	}
+	if !d.nonHost() {
+		info, err := d.vf.Stat()
+		if err != nil {
+			return imageSrc{}, err
+		}
+		id, ok := infoIdentity(info)
+		return imageSrc{r: d.vf, id: id, hasID: ok}, nil
 	}
 	b, err := io.ReadAll(io.NewSectionReader(d.vf, 0, 1<<62))
 	if err != nil {

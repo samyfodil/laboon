@@ -363,10 +363,16 @@ func (g *dguest) mmapFile(a [6]uint64) int64 {
 	if d.nonHost() {
 		return g.mmapVF(d, a) // a non-host regular file (in-memory, user-defined, network)
 	}
-	if d.ev != nil || d.ep != nil || d.sk != nil || d.f == nil {
+	if d.ev != nil || d.ep != nil || d.sk != nil {
 		return sErr(lxENODEV)
 	}
-	return g.mmapHostFd(d.f, a) // a device or other host fd that is not a regular file
+	if d.f != nil {
+		return g.mmapHostFd(hostFd(d.f), d.f, a) // a supervisor-owned file or device
+	}
+	if fd, ok := d.hostFd(); ok {
+		return g.mmapHostFd(fd, d.vf, a) // a host-backed regular file: the file itself
+	}
+	return sErr(lxENODEV)
 }
 
 // mmapVF maps a non-host regular file (in-memory, user-defined, network-backed)
@@ -485,7 +491,7 @@ func (g *dguest) mmapVFExec(d *dfile, a [6]uint64) int64 {
 	if r < 0 {
 		return r
 	}
-	if res := g.installCode(uint64(r), data, prot, &codeSource{r: src, off: uint64(off)}, false); res < 0 {
+	if res := g.installCode(uint64(r), data, prot, &codeSource{r: src, fd: -1, off: uint64(off)}, false); res < 0 {
 		return res
 	}
 	return r
@@ -515,20 +521,20 @@ func (g *dguest) fillMemfd(mfd int, r io.ReaderAt, off, length int64) lxErrno {
 // (its descriptor passed to the stub), a fixed executable re-map reuses the code
 // already there, and a private mapping is the file mapped directly (mmapPrivate)
 // or read into an anonymous region and rewritten if executable.
-func (g *dguest) mmapHostFd(f *os.File, a [6]uint64) int64 {
+func (g *dguest) mmapHostFd(fd int, f io.ReaderAt, a [6]uint64) int64 {
 	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], int64(a[5])
 	if flags&unix.MAP_SHARED != 0 {
-		return g.mmapShared(hostFd(f), a)
+		return g.mmapShared(fd, a)
 	}
 	if flags&unix.MAP_FIXED != 0 && prot&unix.PROT_EXEC != 0 && prot&unix.PROT_WRITE == 0 &&
-		uint64(off) == uint64(off)&^(pageSize-1) && g.sameFileCode(addr, length, f, uint64(off)) {
+		uint64(off) == uint64(off)&^(pageSize-1) && g.sameFileCode(addr, length, fd, uint64(off)) {
 		if r := g.host(unix.SYS_MPROTECT, addr, alignUp(length), prot); r < 0 {
 			return r
 		}
 		return int64(addr)
 	}
 	g.dropFileCode(addr, length)
-	if r, ok := g.mmapPrivate(f, a); ok {
+	if r, ok := g.mmapPrivate(fd, f, a); ok {
 		return r
 	}
 	data := make([]byte, length)
@@ -542,7 +548,7 @@ func (g *dguest) mmapHostFd(f *os.File, a [6]uint64) int64 {
 		return r
 	}
 	if prot&unix.PROT_EXEC != 0 {
-		if res := g.installCode(uint64(r), data, prot, &codeSource{r: f, f: f, off: uint64(off)}, false); res < 0 {
+		if res := g.installCode(uint64(r), data, prot, &codeSource{r: f, fd: fd, off: uint64(off)}, false); res < 0 {
 			return res
 		}
 		return r
@@ -614,10 +620,11 @@ func (g *dguest) passFd(fd int) (int, lxErrno) {
 
 // stubFd gives the stub a descriptor of d's file; the caller has it closed.
 func (m *memProc) stubFd(g *dguest, d *dfile) (int, lxErrno) {
-	if d.f == nil {
+	fd, ok := d.hostFd()
+	if !ok {
 		return 0, lxENODEV
 	}
-	return g.passFd(hostFd(d.f))
+	return g.passFd(fd)
 }
 
 func (g *dguest) mmapShared(fd int, a [6]uint64) int64 {
@@ -644,16 +651,16 @@ const directMapMin = 64 << 10
 // as zero, as the copy made them. ok is false when the region is not suited
 // (small, unaligned, or all past the end of the file), for the caller to copy
 // it instead.
-func (g *dguest) mmapPrivate(f *os.File, a [6]uint64) (r int64, ok bool) {
+func (g *dguest) mmapPrivate(fd int, f io.ReaderAt, a [6]uint64) (r int64, ok bool) {
 	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], a[5]
 	var st unix.Stat_t
-	if length < directMapMin || off%pageSize != 0 || unix.Fstat(hostFd(f), &st) != nil ||
+	if length < directMapMin || off%pageSize != 0 || unix.Fstat(fd, &st) != nil ||
 		st.Mode&unix.S_IFMT != unix.S_IFREG || off >= alignUp(uint64(st.Size)) {
 		return 0, false
 	}
 	inFile := min(length, alignUp(uint64(st.Size))-off)
 	exec := prot&unix.PROT_EXEC != 0
-	sfd, e := g.passFd(hostFd(f))
+	sfd, e := g.passFd(fd)
 	if e != 0 {
 		return 0, false
 	}
@@ -675,7 +682,7 @@ func (g *dguest) mmapPrivate(f *os.File, a [6]uint64) (r int64, ok bool) {
 		}
 	}
 	if exec {
-		if res := g.installFileCode(uint64(r), f, off, length, inFile, prot); res < 0 {
+		if res := g.installFileCode(uint64(r), fd, f, off, length, inFile, prot); res < 0 {
 			return res, true
 		}
 	}
@@ -685,8 +692,8 @@ func (g *dguest) mmapPrivate(f *os.File, a [6]uint64) (r int64, ok bool) {
 // installFileCode rewrites code the stub mapped from n bytes of f at off, of
 // which the first inFile are in the file. The supervisor maps the same region
 // copy-on-write to rewrite it, so only the pages with sites are read.
-func (g *dguest) installFileCode(addr uint64, f *os.File, off, n, inFile uint64, prot uint64) (res int64) {
-	view, err := unix.Mmap(hostFd(f), int64(off), int(inFile), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE)
+func (g *dguest) installFileCode(addr uint64, fd int, f io.ReaderAt, off, n, inFile uint64, prot uint64) (res int64) {
+	view, err := unix.Mmap(fd, int64(off), int(inFile), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE)
 	if err != nil {
 		return sErr(lxEIO)
 	}
@@ -704,7 +711,7 @@ func (g *dguest) installFileCode(addr uint64, f *os.File, off, n, inFile uint64,
 			res = sErr(lxEIO)
 		}
 	}()
-	return g.installCode(addr, code, prot, &codeSource{r: f, f: f, off: off}, true)
+	return g.installCode(addr, code, prot, &codeSource{r: f, fd: fd, off: off}, true)
 }
 
 // The macOS stub's SysV attach requests: the Linux stub makes none, so the

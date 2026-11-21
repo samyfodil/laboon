@@ -440,3 +440,6 @@ func (h *memFile) Truncate(size int64) error {
 func (h *memFile) SetAttr(u AttrUpdate) error { return h.n.SetAttr(u) }
 
 func (h *memFile) Close() error { return nil }
+
+// Dup is a second handle on the file.
+func (h *memFile) Dup() (File, error) { return &memFile{n: h.n}, nil }

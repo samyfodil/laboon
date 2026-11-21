@@ -374,6 +374,19 @@ func StatOf(fi os.FileInfo) (HostStat, bool) {
 	return HostStat{}, false
 }
 
+// fdOf is f's handle.
+func fdOf(f *os.File) uintptr { return f.Fd() }
+
+// dupOf is an owned duplicate of f's handle.
+func dupOf(f *os.File) (*os.File, error) {
+	p := windows.CurrentProcess()
+	var h windows.Handle
+	if err := windows.DuplicateHandle(p, windows.Handle(f.Fd()), p, &h, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(h), f.Name()), nil
+}
+
 // FileStat is the os.FileInfo of the open file f.
 func FileStat(f *os.File) (os.FileInfo, error) {
 	h := windows.Handle(f.Fd())

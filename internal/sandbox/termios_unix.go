@@ -62,6 +62,17 @@ func (fs *dfs) cttyOf(fd int) *ttyCtl {
 // which is what isatty relies on.
 func (g *dguest) ttyIoctl(d *dfile, req, arg uint64) int64 {
 	req = uint64(uint32(req)) // the kernel takes an unsigned int; musl's sign-extends
+	if d.vf != nil {          // a regular file: FIONREAD is what is left to read
+		if req != lxFIONREAD {
+			return sErr(lxENOTTY)
+		}
+		size, err := d.size0()
+		if err != nil {
+			return sErr(osErrno(err))
+		}
+		off, _ := d.tell()
+		return g.ttyPutU32(arg, uint32(max(size-off, 0)))
+	}
 	if d.f == nil || d.ev != nil || d.ep != nil || d.tfd != nil {
 		return sErr(lxENOTTY)
 	}

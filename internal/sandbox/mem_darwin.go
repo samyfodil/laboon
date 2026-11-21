@@ -88,8 +88,8 @@ func init() {
 		return 0
 	}
 	syscalls[lcRewrite] = func(g *dguest, a [6]uint64) int64 {
-		d, e := g.file(int64(int32(a[3])))
-		if e != 0 {
+		d, ok := g.ft.get(int(int32(a[3])))
+		if !ok || !d.held() && d.mapf == nil {
 			return 0
 		}
 		if a[4] != 0 {
@@ -165,20 +165,24 @@ func (g *dguest) mmapFd(fd int64, wshared, code bool) int64 {
 		}
 		return int64(sfd)
 	}
-	if d.f == nil || d.ev != nil || d.ep != nil {
+	if !d.held() || d.ev != nil || d.ep != nil {
 		return sErr(lxENODEV)
 	}
-	fi, err := hostfs.FileStat(d.f)
+	var fi os.FileInfo
+	var err error
+	if d.f != nil {
+		fi, err = hostfs.FileStat(d.f)
+	} else {
+		fi, err = d.vf.Stat()
+	}
 	if err != nil {
 		return sErr(osErrno(err))
 	}
 	if !fi.Mode().IsRegular() {
 		return sErr(lxENODEV)
 	}
-	if wshared {
-		if fl, err := unix.FcntlInt(uintptr(hostFd(d.f)), unix.F_GETFL, 0); err == nil && fl&unix.O_APPEND != 0 {
-			return sErr(lxEACCES)
-		}
+	if wshared && d.fx.oflags&lxOAppend != 0 {
+		return sErr(lxEACCES)
 	}
 	if code {
 		g.codeFile(fi) // its writes reach the stub's shadows of its pages
@@ -377,11 +381,11 @@ func (m *memProc) release(g *dguest) {
 	}
 }
 
-func (m *memProc) send(op, id uint64, f *os.File) error {
+func (m *memProc) send(op, id uint64, fd int) error {
 	var b [16]byte
 	binary.LittleEndian.PutUint64(b[:], op)
 	binary.LittleEndian.PutUint64(b[8:], id)
-	return unix.Sendmsg(m.sock, b[:], unix.UnixRights(hostFd(f)), nil, 0)
+	return unix.Sendmsg(m.sock, b[:], unix.UnixRights(fd), nil, 0)
 }
 
 // sync runs repFdSync on g's slot: pending drops, nrecv datagrams, and the
@@ -420,18 +424,35 @@ func (m *memProc) stubFd(g *dguest, d *dfile) (int, lxErrno) {
 	}
 	nrecv := 0
 	if _, ok := m.sent[id]; !ok {
-		f := d.f
-		if d.shbf != nil {
-			f = d.shbf // a non-host file's shared mmap backing (mmapFd, writable MAP_SHARED)
-		} else if f == nil {
-			f = d.mapf // a non-host file's materialized private mmap backing (mmapFd)
+		// What the stub maps: a non-host file's shared backing (mmapFd, writable
+		// MAP_SHARED) or materialized private copy, else the file's own
+		// descriptor, borrowed from its File for a host-backed regular file.
+		var fd int
+		var fi os.FileInfo
+		var err error
+		switch {
+		case d.shbf != nil:
+			fd = hostFd(d.shbf)
+			fi, err = hostfs.FileStat(d.shbf)
+		case d.f != nil:
+			fd = hostFd(d.f)
+			fi, err = hostfs.FileStat(d.f)
+		case d.mapf != nil && d.nonHost():
+			fd = hostFd(d.mapf)
+			fi, err = hostfs.FileStat(d.mapf)
+		default:
+			var ok bool
+			if fd, ok = d.hostFd(); !ok {
+				return 0, lxENODEV
+			}
+			fi, err = d.vf.Stat()
 		}
-		if err := m.send(fdOpInstall, id, f); err != nil {
+		if err := m.send(fdOpInstall, id, fd); err != nil {
 			return 0, osErrno(err)
 		}
 		nrecv = 1
 		fn := fileName{path: d.name()}
-		if fi, err := f.Stat(); err == nil {
+		if err == nil {
 			fn.dev, fn.ino = HostDevIno(fi)
 		}
 		m.names[id] = fn
@@ -566,7 +587,7 @@ const lcMapName = 0x4c430031
 func init() {
 	regSys(lcMapName, func(g *dguest, a [6]uint64) int64 {
 		d, ok := g.ft.get(int(a[0]))
-		if !ok || d.f == nil {
+		if !ok || !d.held() {
 			return sErr(lxEBADF)
 		}
 		m := g.mp

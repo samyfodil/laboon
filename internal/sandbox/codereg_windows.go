@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"os"
 
+	"github.com/samyfodil/laboon/core"
 	"golang.org/x/sys/windows"
 )
 
@@ -198,19 +199,25 @@ func (g *dguest) codeFile(fi os.FileInfo) {}
 // map the file shared and executable cool their hot pages of it.
 func (g *dguest) modified(d *dfile) {
 	g.notifyFd(d, inModify)
-	if d.f != nil {
-		g.fileModified(d.f)
+	if fd, ok := d.hostFd(); ok {
+		g.handleModified(fd)
 	}
 }
 
 // fileModified cools the hot pages of f's file in the stubs that map it
 // shared and executable.
-func (g *dguest) fileModified(f *os.File) {
+func (g *dguest) fileModified(f core.File) {
+	if fd, ok := hostFdOf(f); ok {
+		g.handleModified(fd)
+	}
+}
+
+func (g *dguest) handleModified(fd int) {
 	w := g.mp.w
 	if w == nil || !w.run.code.marked() {
 		return
 	}
-	key := futexFileKey(windows.Handle(f.Fd()))
+	key := futexFileKey(windows.Handle(fd))
 	var body [8]byte
 	binary.LittleEndian.PutUint64(body[:], key)
 	w.run.code.fileWritten([2]uint64{key, 0}, body[:])

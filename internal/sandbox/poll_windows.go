@@ -506,6 +506,9 @@ func (g *dguest) epollCtl(epfd, op, fd int64, evAddr uint64) int64 {
 	if ed.ep == nil || epfd == fd {
 		return sErr(lxEINVAL)
 	}
+	if d.vf != nil {
+		return sErr(lxEPERM) // a regular file is always ready
+	}
 	if d.ep == nil && d.sk == nil && d.ev == nil && d.f != nil && !d.isPipe() && d.tfd == nil && d.sf == nil && d.fx.in == nil {
 		if mode, _, err := d.hostStat(); err == nil && (mode.IsRegular() || mode.IsDir()) {
 			return sErr(lxEPERM)

@@ -252,15 +252,14 @@ func (g *dguest) wouldExceed(n uint64) bool {
 	return g.cfg.MaxBytes > 0 && uint64(g.memUsed.Load())+n > g.cfg.MaxBytes
 }
 
-// codeSource is the file region runtime code was mapped from: a host file (f),
-// or a non-host backing (in-memory, user-defined, network) read through its
-// ReaderAt (r set, f nil). A host file's identity keys the persistent rewrite
-// cache; a non-host file has none, so its code is analyzed by content instead
-// (still memoized by the content's hash). r is the ELF the rewriter reads: f
-// for a host file, the vfs file otherwise.
+// codeSource is the file region runtime code was mapped from, read through r
+// (the ELF the rewriter reads). A host file also has its descriptor fd, whose
+// identity keys the persistent rewrite cache; a non-host backing (in-memory,
+// user-defined, network) has fd -1 and is analyzed by content instead (still
+// memoized by the content's hash).
 type codeSource struct {
 	r   io.ReaderAt
-	f   *os.File
+	fd  int
 	off uint64
 }
 
@@ -270,9 +269,9 @@ type fileCode struct {
 	dev, ino    uint64
 }
 
-func fileID(f *os.File) (dev, ino uint64, ok bool) {
+func fileID(fd int) (dev, ino uint64, ok bool) {
 	var st unix.Stat_t
-	if unix.Fstat(hostFd(f), &st) != nil {
+	if fd < 0 || unix.Fstat(fd, &st) != nil {
 		return 0, 0, false
 	}
 	return st.Dev, st.Ino, true
@@ -315,8 +314,8 @@ func (g *dguest) installCode(addr uint64, code []byte, prot uint64, src *codeSou
 		}
 	}
 	g.dropFileCode(addr, uint64(len(code)))
-	if src != nil && src.f != nil {
-		if dev, ino, ok := fileID(src.f); ok {
+	if src != nil {
+		if dev, ino, ok := fileID(src.fd); ok {
 			g.mp.fileCode = append(g.mp.fileCode, fileCode{lo: addr, hi: addr + uint64(len(code)), off: src.off, dev: dev, ino: ino})
 		}
 	}
@@ -357,8 +356,8 @@ func (g *dguest) execNotWritable(addr, n uint64) bool {
 // install code that is already there: the range was filled from that very
 // file region and has been executable and not writable since. glibc on
 // arm64 maps every library segment a second time this way to add PROT_BTI.
-func (g *dguest) sameFileCode(addr, n uint64, f *os.File, off uint64) bool {
-	dev, ino, ok := fileID(f)
+func (g *dguest) sameFileCode(addr, n uint64, fd int, off uint64) bool {
+	dev, ino, ok := fileID(fd)
 	if !ok {
 		return false
 	}

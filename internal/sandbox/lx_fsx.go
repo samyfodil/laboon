@@ -573,13 +573,8 @@ func (g *dguest) linkUnnamed(od *dfile, np string) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	of, ok := hostOf(w)
-	if !ok {
-		w.Close()
-		return sErr(lxEINVAL)
-	}
-	_, cerr := io.Copy(of, io.NewSectionReader(od.f, 0, size))
-	of.Close()
+	_, cerr := io.Copy(io.NewOffsetWriter(w, 0), io.NewSectionReader(od.f, 0, size))
+	w.Close()
 	if cerr != nil {
 		return sErr(osErrno(cerr))
 	}
@@ -758,7 +753,7 @@ type attrTarget struct {
 // pathname, and a host device or other special (d.hf nil but named), whose mode
 // and owner live on the overlay placeholder, never on the shared host device.
 func (g *dguest) fdInPlace(d *dfile) bool {
-	if d == nil || d.f == nil {
+	if d == nil || !d.held() {
 		return false
 	}
 	if d.fx.unnamed {
@@ -772,6 +767,13 @@ func (g *dguest) fdInPlace(d *dfile) bool {
 
 // inPlaceTarget is the in-place target for an open file (see fdInPlace).
 func (g *dguest) inPlaceTarget(d *dfile) (attrTarget, lxErrno) {
+	if d.hf != nil {
+		info, err := d.hf.Stat()
+		if err != nil {
+			return attrTarget{}, osErrno(err)
+		}
+		return attrTarget{fi: info}, 0
+	}
 	fi, err := hostfs.FileStat(d.f)
 	if err != nil {
 		return attrTarget{}, osErrno(err)
@@ -836,7 +838,7 @@ func (g *dguest) fchmodat(dirfd int64, pathAddr uint64, mode uint32, flags int64
 	if e != 0 {
 		return sErr(e)
 	}
-	if d != nil && d.f == nil && !d.fx.opath {
+	if d != nil && !d.held() && !d.fx.opath {
 		return sErr(lxEBADF)
 	}
 	if !g.fdInPlace(d) {
@@ -879,10 +881,10 @@ func (g *dguest) fchmod(fd int64, mode uint32) int64 {
 	if !ok || d.fx.opath {
 		return sErr(lxEBADF)
 	}
-	if d.f == nil {
+	if !d.held() {
 		return 0 // stub-served stdio: a tty the guest does not own
 	}
-	if !strings.HasPrefix(d.name(), "/") {
+	if d.f != nil && !strings.HasPrefix(d.name(), "/") {
 		// A socket, pipe or anon-inode descriptor has no filesystem path (its
 		// name is "socket:", "pipe:[n]", "anon_inode:..."); fchmod sets the mode
 		// on the descriptor's own inode. A container runtime (conmon) chmods its
@@ -931,7 +933,7 @@ func (g *dguest) fchownat(dirfd int64, pathAddr uint64, uid, gid uint32, flags i
 	if e != 0 {
 		return sErr(e)
 	}
-	if d != nil && d.f == nil && !d.fx.opath {
+	if d != nil && !d.held() && !d.fx.opath {
 		return 0 // stub-served stdio
 	}
 	if pathAddr == 0 && d != nil && d.fx.opath {
@@ -1048,7 +1050,7 @@ func (g *dguest) utimensat(dirfd int64, pathAddr, timesAddr uint64, flags int64)
 	if e != 0 {
 		return sErr(e)
 	}
-	if d != nil && d.f == nil && !d.fx.opath {
+	if d != nil && !d.held() && !d.fx.opath {
 		return 0 // stub-served stdio
 	}
 	if omit[0] && omit[1] {
@@ -1130,9 +1132,7 @@ func (g *dguest) truncate(pathAddr uint64, length int64) int64 {
 	}
 	err = f.Truncate(length)
 	if err == nil {
-		if of, ok := hostOf(f); ok {
-			g.fileModified(of) // cool any shared, executable mappings of this file
-		}
+		g.fileModified(f) // cool any shared, executable mappings of this file
 	}
 	f.Close()
 	if err != nil {
@@ -1208,7 +1208,7 @@ func (g *dguest) statfs(dirfd int64, pathAddr, bufAddr uint64) int64 {
 		case d.f != nil:
 			s, err = hostfs.FstatfsOf(d.f)
 			fsp = d.name()
-		case d.fx.opath:
+		case d.vf != nil, d.fx.opath:
 			fsp = d.name()
 			s, err = g.statfsPath(fsp)
 		default:
@@ -1318,7 +1318,7 @@ func (g *dguest) faccessat2(dirfd int64, pathAddr uint64, mode, flags int64) int
 	if e != 0 {
 		return sErr(e)
 	}
-	if d != nil && d.f == nil && !d.fx.opath {
+	if d != nil && !d.held() && !d.fx.opath {
 		return 0
 	}
 	return sErr(g.dacAccess(gp, mode, flags))

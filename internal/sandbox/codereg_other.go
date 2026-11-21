@@ -2,7 +2,11 @@
 
 package sandbox
 
-import "os"
+import (
+	"os"
+
+	"github.com/samyfodil/laboon/core"
+)
 
 // Code in shared memory needs no supervisor here: Linux runs shared memory
 // as it is, its syscalls trapped (codereg.go).
@@ -15,4 +19,4 @@ func (g *dguest) codeFile(fi os.FileInfo) {}
 
 func (g *dguest) modified(d *dfile) { g.notifyFd(d, inModify) }
 
-func (g *dguest) fileModified(f *os.File) {}
+func (g *dguest) fileModified(core.File) {}

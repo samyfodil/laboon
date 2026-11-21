@@ -377,9 +377,9 @@ func (n *HostNode) Open(flags int) (core.File, error) {
 // hostFile is a host file opened through a Node, as a core.File. The descriptor
 // is kept unexported so a caller reaches it only through the File interface
 // (Stat is fstat on the handle) and never by asserting the concrete type past
-// the interface. The supervisor's data plane, which needs the descriptor itself
-// (mmap, poll, fcntl), takes it through HostFile — the one deliberate escape
-// hatch. meta is the backend's guest-metadata authority, for Stat's overrides.
+// the interface. What needs the host object itself (mmap, poll, the stub) takes
+// the bare descriptor through HostFd — the one deliberate escape hatch. meta is
+// the backend's guest-metadata authority, for Stat's overrides.
 type hostFile struct {
 	*os.File
 	meta *core.MetaStore
@@ -471,9 +471,21 @@ func (h hostFile) Append(p []byte) (int, int64, error) {
 	return n, end, err
 }
 
-// HostFile is the descriptor behind h, for a host-backed fast path that needs it
-// directly; ordinary callers use the File interface.
-func (h hostFile) HostFile() *os.File { return h.File }
+// Dup is a second handle on the same open file, for another description of it
+// (a reopen through /proc/<pid>/fd of a file whose name is gone). Offsets are
+// the caller's, so the two share no position.
+func (h hostFile) Dup() (core.File, error) {
+	f, err := dupOf(h.File)
+	if err != nil {
+		return nil, err
+	}
+	return hostFile{File: f, meta: h.meta, name: h.name}, nil
+}
+
+// HostFd is the host descriptor behind h, borrowed: h keeps owning it and closes
+// it on Close. It is for what only the host object can do (map it, poll it,
+// lend it to the stub); bytes and metadata go through the File interface.
+func (h hostFile) HostFd() uintptr { return fdOf(h.File) }
 
 func HostKind(fi os.FileInfo) core.Kind {
 	switch m := fi.Mode(); {

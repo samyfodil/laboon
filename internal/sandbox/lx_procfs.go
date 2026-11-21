@@ -237,7 +237,7 @@ func (g *dguest) noteMmap(ret int64, length, prot, flags uint64, d *dfile) {
 	v := vma{lo: lo, hi: lo + (length+darwinPage-1)&^(darwinPage-1), prot: prot, shared: flags&0x3 == 1}
 	if d != nil {
 		v.path = d.gp
-		if d.f != nil {
+		if d.held() {
 			_, v.ino = d.hostDevIno()
 		}
 	}
@@ -569,6 +569,26 @@ func (g *dguest) reopen(d *dfile, flags int64) (*dfile, lxErrno) {
 			return nil, e
 		}
 		return &dfile{f: rf, gp: d.gp, stub: -1}, 0
+	}
+	if d.vf != nil {
+		// A regular file: a new description of the same open file, with an offset
+		// of its own, through a second handle on it.
+		if own := d.fx.oflags & lxOAccmod; d.fx.hasFlags && own != lxORdwr && own != acc {
+			return nil, lxEACCES
+		}
+		du, ok := d.vf.(interface{ Dup() (core.File, error) })
+		if !ok {
+			return d, 0 // a backing with no second handle: the description itself
+		}
+		nf, err := du.Dup()
+		if err != nil {
+			return nil, osErrno(err)
+		}
+		nd := &dfile{gp: d.gp, stub: -1, vf: nf, vn: d.vn, fs: d.fs}
+		if d.hf != nil {
+			nd.hf = nf
+		}
+		return nd, 0
 	}
 	if d.f == nil || d.ev != nil || d.ep != nil {
 		return d, 0
@@ -1060,7 +1080,7 @@ func (t *dguest) fdNode(d *dfile) *pnode {
 	if d.fx.unnamed && strings.HasPrefix(name, "/") {
 		return &pnode{kind: pFdObj, perm: 0o777, fd: d, target: name}
 	}
-	if (d.f != nil || d.mem != nil || d.fx.opath) && strings.HasPrefix(name, "/") {
+	if (d.held() || d.mem != nil || d.fx.opath) && strings.HasPrefix(name, "/") {
 		if isPseudoPath(name) {
 			return plink(name)
 		}
@@ -1079,7 +1099,7 @@ func (t *dguest) fdNode(d *dfile) *pnode {
 			}
 			return &pnode{kind: pFdObj, perm: 0o777, fd: d, target: name + del}
 		}
-		if d.f == nil {
+		if !d.held() {
 			return plink(name) // a memfd named by a path: no host object to reopen
 		}
 		if _, e := t.lstatGuest(name); e != lxENOENT {

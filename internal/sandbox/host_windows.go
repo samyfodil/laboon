@@ -46,23 +46,13 @@ func hostAccMode(f *os.File) (acc int64, appendMode bool, err error) {
 	return lxORdwr, false, nil
 }
 
-func setHostAppend(f *os.File, on bool) {}
+func setHostAppend(int, bool) {}
 
-// seekDataHole treats the file as one data extent, as Linux does on a
-// filesystem without holes.
-func seekDataHole(f *os.File, off int64, hole bool) (int64, lxErrno) {
-	size, err := f.Seek(0, io.SeekEnd)
-	if err != nil {
-		return 0, osErrno(err)
-	}
-	if off < 0 || off >= size {
-		return 0, lxENXIO
-	}
-	if hole {
-		return size, 0
-	}
-	return off, 0
-}
+// hostHoles reports whether the host reports a file's holes: Windows does not
+// here, so a file is one data extent, as on Linux without holes.
+const hostHoles = false
+
+func seekDataHole(int, int64, bool) (int64, lxErrno) { return 0, lxEINVAL }
 
 var (
 	procQPC = modKernel32.NewProc("QueryPerformanceCounter")
@@ -93,6 +83,16 @@ func clockNow(clock int64) time.Duration {
 }
 
 // dupFile duplicates f's host handle into a new *os.File.
+// dupFd is an owned duplicate of the host handle, named name.
+func dupFd(fd int, name string) (*os.File, lxErrno) {
+	p := windows.CurrentProcess()
+	var h windows.Handle
+	if err := windows.DuplicateHandle(p, windows.Handle(fd), p, &h, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		return nil, osErrno(err)
+	}
+	return os.NewFile(uintptr(h), name), 0
+}
+
 func dupFile(f *os.File) (*os.File, lxErrno) {
 	p := windows.CurrentProcess()
 	var h windows.Handle

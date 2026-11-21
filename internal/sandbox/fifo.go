@@ -129,9 +129,9 @@ func (g *dguest) openFifoHost(gp string, flags int64) (*os.File, lxErrno) {
 	if err != nil {
 		return nil, osErrno(err)
 	}
-	of, ok := hostOf(nf)
+	of, ok := hostDupOf(nf, gp)
+	nf.Close()
 	if !ok {
-		nf.Close()
 		return nil, lxEINVAL
 	}
 	return of, 0
@@ -153,9 +153,9 @@ func (g *dguest) openFifoDirect(gp string, flags int64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	of, ok := hostOf(nf)
+	of, ok := hostDupOf(nf, gp)
+	nf.Close()
 	if !ok {
-		nf.Close()
 		return sErr(lxEINVAL)
 	}
 	return g.installD(&dfile{f: of, gp: gp, stub: -1}, flags)

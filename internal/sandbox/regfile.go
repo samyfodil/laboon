@@ -30,7 +30,13 @@ func noEOF(n int, err error) (int, error) {
 
 // nonHost reports whether d is a regular file with no host descriptor behind its
 // backing (in-memory, user-defined), which a mapping must materialize.
-func (d *dfile) nonHost() bool { return d.vf != nil && d.f == nil }
+func (d *dfile) nonHost() bool {
+	if d.vf == nil {
+		return false
+	}
+	_, ok := hostFdOf(d.vf)
+	return !ok
+}
 
 // shared returns the live per-vnode MAP_SHARED backing, or nil. While one
 // exists it is the file's authoritative copy, so read/write/size/truncate route
@@ -200,14 +206,14 @@ func (d *dfile) vfSeek(off int64, whence int) (int64, error) {
 // seekDataHole finds the next data or hole at or after off: the host's sparse
 // map for a host file, else the whole file is data and its end the only hole.
 func (d *dfile) seekDataHole(off int64, hole bool) (int64, error) {
-	if d.f != nil {
-		p, e := seekDataHole(d.f, off, hole)
+	if fd, ok := d.hostFd(); ok && hostHoles && d.shared() == nil {
+		p, e := seekDataHole(fd, off, hole)
 		if e != 0 {
 			return 0, lxErr(e)
 		}
 		return p, nil
 	}
-	size, err := d.size0()
+	_, size, err := d.hostStat()
 	if err != nil {
 		return 0, err
 	}

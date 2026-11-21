@@ -1235,7 +1235,7 @@ func (g *dguest) openFile(gp string) (*os.File, lxErrno) {
 	if err != nil {
 		return nil, osErrno(err)
 	}
-	of, ok := hostOf(f)
+	of, ok := hostDupOf(f, gp)
 	if !ok {
 		// A non-host regular file (an in-memory backend: tmpfs, WithMount) a caller
 		// here must read as a host file — loading an executable to map and rewrite.
@@ -1243,6 +1243,7 @@ func (g *dguest) openFile(gp string) (*os.File, lxErrno) {
 		// here; it is served through the core.File directly.)
 		return g.spillToHost(f)
 	}
+	f.Close()
 	return of, 0
 }
 
@@ -1291,7 +1292,8 @@ func (g *dguest) spillToHost(vf core.File) (*os.File, lxErrno) {
 func (g *dguest) openDir(loc namespace.Loc, gp string) (*os.File, *memFile, lxErrno) {
 	f, err := loc.Node.Open(os.O_RDONLY)
 	if err == nil {
-		if of, ok := hostOf(f); ok {
+		if of, ok := hostDupOf(f, gp); ok {
+			f.Close()
 			return of, nil, 0
 		}
 		f.Close() // a backend returning a non-host File for a directory: treat as in-memory
@@ -1753,9 +1755,9 @@ func (g *dguest) lseek(fd, off, whence int64) int64 {
 	switch whence {
 	case io.SeekStart, io.SeekCurrent, io.SeekEnd:
 	case 3, 4: // SEEK_DATA, SEEK_HOLE
-		pos, e := seekDataHole(d.f, off, whence == 4)
-		if e != 0 {
-			return sErr(e)
+		pos, err := d.seekDataHole(off, whence == 4)
+		if err != nil {
+			return sErr(osErrno(err))
 		}
 		return pos
 	default:
@@ -1779,14 +1781,14 @@ func (g *dguest) closeFd(fd int64) int64 {
 	if !ok {
 		return sErr(lxEBADF)
 	}
-	if d.f != nil {
+	if d.held() {
 		g.dropPosixLocks(d)
 	}
 	last := d.refs.Load() == 1
 	if !g.ft.remove(int(fd)) {
 		return sErr(lxEBADF)
 	}
-	if last && d.f != nil {
+	if last && d.held() {
 		if d.writable() && d.fx.hasFlags {
 			g.notifyFd(d, inCloseWrite)
 		} else {
@@ -1908,8 +1910,8 @@ func (g *dguest) fcntl(fd, cmd int64, arg uint64) int64 {
 		if d.stub >= 0 {
 			syncStdio()
 		}
-		if d.f != nil && (d.fx.oflags^int64(arg))&lxOAppend != 0 && d.fx.hasFlags {
-			setHostAppend(d.f, arg&lxOAppend != 0)
+		if fd, ok := d.hostFd(); ok && (d.fx.oflags^int64(arg))&lxOAppend != 0 && d.fx.hasFlags {
+			setHostAppend(fd, arg&lxOAppend != 0)
 		}
 		if d.fx.hasFlags {
 			d.fx.oflags = d.fx.oflags&^(lxOSetflMask&^lxONonblock) | int64(arg)&(lxOSetflMask&^lxONonblock)

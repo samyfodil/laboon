@@ -113,7 +113,7 @@ func statIdentity(st *unix.Stat_t) rewrite.FileID {
 // identity returns the identity of the file code was mapped from, if any.
 func (src *codeSource) identity() (rewrite.FileID, bool) {
 	var st unix.Stat_t
-	if src == nil || src.f == nil || unix.Fstat(int(src.f.Fd()), &st) != nil {
+	if src == nil || src.fd < 0 || unix.Fstat(src.fd, &st) != nil {
 		return rewrite.FileID{}, false
 	}
 	return statIdentity(&st), true

@@ -832,6 +832,9 @@ func fdinfo(p *dguest, fd int) []byte {
 			}
 		}
 		_, ino = d.hostDevIno()
+	} else if d.vf != nil {
+		flags = uint64(d.fx.oflags & (lxOAccmod | lxOAppend))
+		_, ino = d.hostDevIno()
 	}
 	if d.nonblock.Load() {
 		flags |= lxONonblock

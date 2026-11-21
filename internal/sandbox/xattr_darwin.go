@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/samyfodil/laboon/core"
-	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"golang.org/x/sys/unix"
 )
 
@@ -57,7 +56,7 @@ func (g *dguest) xattr(op, kind uint64, a [6]uint64) int64 {
 		if !ok || dd.fx.opath {
 			return sErr(lxEBADF)
 		}
-		if dd.f == nil {
+		if _, ok := dd.hostFd(); !ok {
 			if op == 0 || op == 3 {
 				return sErr(lxEOPNOTSUPP)
 			}
@@ -100,6 +99,15 @@ func (g *dguest) xattr(op, kind uint64, a [6]uint64) int64 {
 	}
 }
 
+// inPlaceFd is the host descriptor an fd-level xattr change acts on, when the
+// change belongs on the open object itself (fdInPlace).
+func (g *dguest) inPlaceFd(d *dfile) (int, bool) {
+	if !g.fdInPlace(d) {
+		return -1, false
+	}
+	return d.hostFd()
+}
+
 func (g *dguest) getxattr(gp string, d *dfile, name string, buf uint64, size int64) int64 {
 	if strings.HasPrefix(name, "system.") {
 		return sErr(lxENODATA)
@@ -107,16 +115,17 @@ func (g *dguest) getxattr(gp string, d *dfile, name string, buf uint64, size int
 	var val []byte
 	var err error
 	if d != nil {
-		fi, serr := hostfs.FileStat(d.f)
+		mode, _, serr := d.hostStat()
 		if serr != nil {
 			return sErr(osErrno(serr))
 		}
-		if fi.Mode()&os.ModeSymlink != 0 && strings.HasPrefix(name, "user.") {
+		if mode&os.ModeSymlink != 0 && strings.HasPrefix(name, "user.") {
 			return sErr(lxENODATA)
 		}
 		raw := make([]byte, xattrSizeMax)
 		var n int
-		n, err = unix.Fgetxattr(hostFd(d.f), name, raw)
+		fd, _ := d.hostFd()
+		n, err = unix.Fgetxattr(fd, name, raw)
 		val = raw[:n]
 	} else {
 		loc, e := g.vns().Resolve(gp, false)
@@ -153,7 +162,8 @@ func (g *dguest) listxattr(gp string, d *dfile, buf uint64, size int64) int64 {
 	if d != nil {
 		b := make([]byte, 1<<16)
 		var n int
-		n, err = unix.Flistxattr(hostFd(d.f), b)
+		fd, _ := d.hostFd()
+		n, err = unix.Flistxattr(fd, b)
 		raw = b[:n]
 	} else {
 		loc, e := g.vns().Resolve(gp, false)
@@ -209,15 +219,15 @@ func (g *dguest) setxattr(gp string, d *dfile, name string, valAddr uint64, size
 		df |= unix.XATTR_REPLACE
 	}
 	user := strings.HasPrefix(name, "user.")
-	if g.fdInPlace(d) {
-		fi, serr := hostfs.FileStat(d.f)
+	if fd, ok := g.inPlaceFd(d); ok {
+		mode, _, serr := d.hostStat()
 		if serr != nil {
 			return sErr(osErrno(serr))
 		}
-		if user && !fi.Mode().IsRegular() && !fi.IsDir() {
+		if user && !mode.IsRegular() && !mode.IsDir() {
 			return sErr(lxEPERM)
 		}
-		err = fsetxattr(hostFd(d.f), name, val, df)
+		err = fsetxattr(fd, name, val, df)
 	} else {
 		loc, e := g.vns().Resolve(gp, false)
 		if e != nil {
@@ -244,8 +254,8 @@ func (g *dguest) removexattr(gp string, d *dfile, name string) int64 {
 		return sErr(lxENODATA)
 	}
 	var err error
-	if g.fdInPlace(d) {
-		err = unix.Fremovexattr(hostFd(d.f), name)
+	if fd, ok := g.inPlaceFd(d); ok {
+		err = unix.Fremovexattr(fd, name)
 	} else {
 		loc, e := g.vns().Resolve(gp, false)
 		if e != nil {

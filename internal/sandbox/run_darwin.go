@@ -17,9 +17,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"github.com/samyfodil/laboon/internal/namespace"
 	"github.com/samyfodil/laboon/internal/rewrite"
 	macstub "github.com/samyfodil/laboon/stub/macos"
@@ -78,14 +80,26 @@ func (g *dguest) rewriteLibSites(base, length, offset uint64, d *dfile) {
 func libSites(cache *rewrite.Cache, length, offset uint64, d *dfile) []uint64 {
 	// A non-host file has no host fd; its content is in the materialized mapf
 	// (mmapFd) the stub mapped, so read the ELF from whichever backs the mapping.
-	ef := d.f
-	if ef == nil {
+	var ef io.ReaderAt
+	var fi os.FileInfo
+	var err error
+	switch {
+	case d.f != nil:
+		ef = d.f
+		fi, err = hostfs.FileStat(d.f)
+	case d.mapf != nil:
 		ef = d.mapf
-	}
-	if ef == nil {
+		fi, err = hostfs.FileStat(d.mapf)
+	case d.vf != nil:
+		ef = d.vf
+		fi, err = d.vf.Stat()
+	default:
 		return nil
 	}
-	sites, err := computeSitesFile(cache, ef)
+	if err != nil {
+		return nil
+	}
+	sites, err := computeSitesFile(cache, ef, fi)
 	if err != nil {
 		return nil // not an ELF (or unreadable): nothing to rewrite
 	}
@@ -989,8 +1003,10 @@ func (r *progResolver) host(gp string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	if of, ok := hostOf(f); ok {
-		return of.Name(), nil // a host-backed file: map it directly, no spill
+	if fd, ok := hostFdOf(f); ok {
+		if p, err := fdPath(fd); err == nil {
+			return p, nil // a host-backed file: map it directly, no spill
+		}
 	}
 	tf, err := os.CreateTemp(r.tmp, "lc-prog-")
 	if err != nil {
@@ -1002,6 +1018,15 @@ func (r *progResolver) host(gp string) (string, error) {
 		return "", err
 	}
 	return tf.Name(), nil
+}
+
+// fdPath is the host path of the open file fd (F_GETPATH).
+func fdPath(fd int) (string, error) {
+	var buf [unix.PathMax / 8]uint64 // F_GETPATH fills MAXPATHLEN bytes
+	if err := unix.FcntlFstore(uintptr(fd), unix.F_GETPATH, (*unix.Fstore_t)(unsafe.Pointer(&buf[0]))); err != nil {
+		return "", err
+	}
+	return unix.ByteSliceToString(unsafe.Slice((*byte)(unsafe.Pointer(&buf[0])), unix.PathMax)), nil
 }
 
 // resolveInterp reads the guest ELF's PT_INTERP and maps the interpreter's guest

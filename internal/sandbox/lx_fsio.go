@@ -674,13 +674,25 @@ func (g *dguest) fallocate(fd, mode, off, n int64) int64 {
 	if d.nonHost() {
 		return g.vfFallocate(d, mode, off, n)
 	}
-	if d.f == nil {
+	if !d.held() {
 		return sErr(lxEBADF)
 	}
 	if !d.isRegular() {
 		return sErr(lxENODEV)
 	}
-	return g.fallocateHostFd(d, mode, off, n) // a regular host file with no node (O_TMPFILE)
+	return g.fallocateHostFd(d, mode, off, n)
+}
+
+// editable is a host-backed regular file's content for in-place edits: its
+// File, or a supervisor-owned file (O_TMPFILE, memfd) itself.
+func (d *dfile) editable() interface {
+	io.WriterAt
+	Truncate(int64) error
+} {
+	if d.vf != nil {
+		return d.vf
+	}
+	return d.f
 }
 
 // fallocateHostFd services fallocate on a host-backed regular file: a plain
@@ -707,7 +719,7 @@ func (g *dguest) fallocateHostFd(d *dfile, mode, off, n int64) int64 {
 			return sErr(e)
 		}
 		if end > size {
-			if err := d.f.Truncate(end); err != nil {
+			if err := d.editable().Truncate(end); err != nil {
 				return sErr(osErrno(err))
 			}
 		}
@@ -724,7 +736,7 @@ func (g *dguest) fallocateHostFd(d *dfile, mode, off, n int64) int64 {
 	if e := d.checkSeals(size, off+n, false); e != 0 {
 		return sErr(e)
 	}
-	if err := d.f.Truncate(off + n); err != nil {
+	if err := d.editable().Truncate(off + n); err != nil {
 		return sErr(osErrno(err))
 	}
 	g.modified(d)
@@ -738,7 +750,7 @@ func (d *dfile) zeroRange(off, end int64) lxErrno {
 	}
 	z := make([]byte, min(end-off, ioChunk))
 	for off < end {
-		n, err := d.f.WriteAt(z[:min(int64(len(z)), end-off)], off)
+		n, err := d.editable().WriteAt(z[:min(int64(len(z)), end-off)], off)
 		if err != nil {
 			return osErrno(err)
 		}

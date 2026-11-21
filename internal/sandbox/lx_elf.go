@@ -9,6 +9,7 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"github.com/samyfodil/laboon/internal/rewrite"
 )
@@ -37,12 +38,17 @@ func computeSites(c *rewrite.Cache, elfPath string) ([]uint32, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return computeSitesFile(c, f)
+	fi, err := hostfs.FileStat(f)
+	if err != nil {
+		return nil, err
+	}
+	return computeSitesFile(c, f, fi)
 }
 
 // computeSitesFile is computeSites over an already-open file (a runtime-loaded
-// shared library). It does not close f.
-func computeSitesFile(c *rewrite.Cache, f *os.File) ([]uint32, error) {
+// shared library) whose stat is fi, which keys the cache when it carries an
+// identity.
+func computeSitesFile(c *rewrite.Cache, f io.ReaderAt, fi os.FileInfo) ([]uint32, error) {
 	read := func() ([]uint32, error) {
 		b, err := io.ReadAll(io.NewSectionReader(f, 0, 1<<62))
 		if err != nil {
@@ -50,18 +56,24 @@ func computeSitesFile(c *rewrite.Cache, f *os.File) ([]uint32, error) {
 		}
 		return computeSitesBytes(c, b)
 	}
-	fi, err := hostfs.FileStat(f)
-	if err != nil {
-		return nil, err
-	}
-	st, ok := hostfs.StatOf(fi)
-	if !ok || st.Ino() == 0 {
+	id, ok := infoIdentity(fi)
+	if !ok {
 		return read()
 	}
-	return c.OffsetsByID(sitesSalt, rewrite.FileID{
-		Dev: st.Dev(), Ino: st.Ino(), Size: st.Size(),
-		Mtime: TsNano(st.Mtime()), Ctime: TsNano(st.Ctime()),
-	}, read)
+	return c.OffsetsByID(sitesSalt, id, read)
+}
+
+// infoIdentity is the cache identity of a file from its stat: a vfs Info's
+// node and attributes, or a host stat's; ok is false without an inode.
+func infoIdentity(fi os.FileInfo) (rewrite.FileID, bool) {
+	var id rewrite.FileID
+	if ci, ok := fi.(core.Info); ok {
+		a := ci.Attr()
+		id = rewrite.FileID{Dev: ci.ID().Dev, Ino: ci.ID().Ino, Size: a.Size, Mtime: a.Mtime, Ctime: a.Ctime}
+	} else if st, ok := hostfs.StatOf(fi); ok {
+		id = rewrite.FileID{Dev: st.Dev(), Ino: st.Ino(), Size: st.Size(), Mtime: TsNano(st.Mtime()), Ctime: TsNano(st.Ctime())}
+	}
+	return id, id.Ino != 0
 }
 
 func TsNano(t syscall.Timespec) int64 { return int64(t.Sec)*1e9 + int64(t.Nsec) }

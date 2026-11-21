@@ -35,6 +35,15 @@ func dupFile(f *os.File) (*os.File, lxErrno) {
 	return os.NewFile(uintptr(nfd), f.Name()), 0
 }
 
+// dupFd is an owned duplicate of the host fd, named name.
+func dupFd(fd int, name string) (*os.File, lxErrno) {
+	nfd, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, osErrno(err)
+	}
+	return os.NewFile(uintptr(nfd), name), 0
+}
+
 // hostFd returns the host fd behind f without the side effect of os.File.Fd,
 // which switches the file to blocking mode.
 func hostFd(f *os.File) int {
@@ -154,8 +163,7 @@ func hostAccMode(f *os.File) (acc int64, appendMode bool, err error) {
 }
 
 // setHostAppend turns f's host append mode on or off.
-func setHostAppend(f *os.File, on bool) {
-	hfd := hostFd(f)
+func setHostAppend(hfd int, on bool) {
 	if hfd < 0 {
 		return
 	}
@@ -171,12 +179,15 @@ func setHostAppend(f *os.File, on bool) {
 }
 
 // seekDataHole is lseek SEEK_DATA (hole false) or SEEK_HOLE on f.
-func seekDataHole(f *os.File, off int64, hole bool) (int64, lxErrno) {
+// hostHoles reports whether the host reports a file's holes.
+const hostHoles = true
+
+func seekDataHole(fd int, off int64, hole bool) (int64, lxErrno) {
 	whence := unix.SEEK_DATA
 	if hole {
 		whence = unix.SEEK_HOLE
 	}
-	pos, err := unix.Seek(hostFd(f), off, whence)
+	pos, err := unix.Seek(fd, off, whence)
 	if err != nil {
 		if errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ESPIPE) {
 			return 0, hostErrno(err.(unix.Errno))
