@@ -1,6 +1,11 @@
 package bind
 
-import . "github.com/samyfodil/laboon/core"
+import (
+	"errors"
+	"syscall"
+
+	. "github.com/samyfodil/laboon/core"
+)
 
 // Bind presents the subtree rooted at root (a node of fs) as its own
 // FileSystem, for a bind mount. Its root is root and every operation under it
@@ -30,4 +35,39 @@ func (b *bindFS) Remove(dir Node, name string, isDir bool) error {
 }
 func (b *bindFS) Rename(fromDir Node, from string, toDir Node, to string) error {
 	return b.fs.Rename(fromDir, from, toDir, to)
+}
+
+// The optional capabilities forward to fs, answering as an absent capability
+// would when fs lacks one.
+
+func (b *bindFS) StatFS(n Node) (StatFS, error) {
+	s, ok := b.fs.(StatFSer)
+	if !ok {
+		return StatFS{}, errors.ErrUnsupported
+	}
+	return s.StatFS(n)
+}
+
+func (b *bindFS) RenameExchange(fromDir Node, from string, toDir Node, to string) error {
+	x, ok := b.fs.(ExchangeRenamer)
+	if !ok {
+		return syscall.EINVAL
+	}
+	return x.RenameExchange(fromDir, from, toDir, to)
+}
+
+func (b *bindFS) BindSocket(dir Node, name string, bind func(addr string) error) (Node, error) {
+	s, ok := b.fs.(SocketFS)
+	if !ok {
+		return nil, ErrSocketUnsupported
+	}
+	return s.BindSocket(dir, name, bind)
+}
+
+func (b *bindFS) ReachSocket(n Node, op func(addr string) error) error {
+	s, ok := b.fs.(SocketFS)
+	if !ok {
+		return ErrSocketUnsupported
+	}
+	return s.ReachSocket(n, op)
 }

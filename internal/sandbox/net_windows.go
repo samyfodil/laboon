@@ -667,7 +667,7 @@ func (g *dguest) unixKey(raw []byte, create bool) (key any, canon []byte, e lxEr
 // mkSockNode creates the socket node a bind names, as mknod would: the parent
 // must exist and the name must not.
 func (g *dguest) mkSockNode(gp string) lxErrno {
-	if g.upperAbs == "" {
+	if g.dfs.passthrough() {
 		return lxEROFS
 	}
 	if fi, e := g.lstatGuest(path.Dir(gp)); e != 0 {

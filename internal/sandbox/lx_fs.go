@@ -226,45 +226,10 @@ func (fs *dfs) mountHostImage(root, upper string) error {
 	return nil
 }
 
-// overlayLayerHost returns the host directory backing a guest path named as a
-// layer of a guest-issued overlay mount, confined to the backing tree. A
-// container runtime extracts its layers into the writable upper, so such a path
-// resolves under upperAbs; without an upper (the whole host mounted as /) it is a
-// host path under rootAbs. The result is read raw (hostfs.NewHostDirFS), so the layer's
-// own files are seen directly rather than through laboon's outer overlay. ok is
-// false when the layer resolves outside the backing tree: a guest with
-// CAP_SYS_ADMIN could otherwise name a layer with ".." or a symlink to a host
-// path and have that mounted raw, escaping the sandbox root.
-func (fs *dfs) overlayLayerHost(gp string) (string, bool) {
-	base := fs.rootAbs
-	if fs.upperAbs != "" {
-		base = fs.upperAbs
-	}
-	h := filepath.Join(base, filepath.FromSlash(gp))
-	// A layer root must be fully symlink-resolved (as rootAbs/upperAbs are): a
-	// runtime names its lower layers through short symlinks (podman's overlay/l/*
-	// -> the real diff dir), and the confined backend will not follow a symlink
-	// standing in for a layer root. The resolved root must still lie within the
-	// backing tree, or the layer is an escape and is refused.
-	if r, err := filepath.EvalSymlinks(h); err == nil {
-		h = r
-	}
-	if !withinDir(base, h) {
-		return "", false
-	}
-	return h, true
-}
-
-// withinDir reports whether the clean absolute path p is dir or lies beneath it.
-// An empty dir is the rootless passthrough (the whole host is the tree), so
-// nothing is outside it.
-func withinDir(dir, p string) bool {
-	if dir == "" {
-		return true
-	}
-	dir, p = filepath.Clean(dir), filepath.Clean(p)
-	return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
-}
+// passthrough reports whether the guest has no root filesystem of its own and
+// sees the host tree directly; it may create and write there but not remove or
+// rename.
+func (fs *dfs) passthrough() bool { return fs.rootFS == nil && fs.rootAbs == "" }
 
 // buildNS composes the guest's filesystem as a vfs Namespace: the overlay union
 // (read-only root as the lower layer, the writable upper on top, sharing the

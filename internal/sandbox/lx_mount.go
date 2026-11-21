@@ -139,35 +139,26 @@ func (g *dguest) mount(srcAddr, tgtAddr, fsAddr, flags, dataAddr uint64) int64 {
 // mountOverlay services `mount -t overlay` (what a container runtime's overlay
 // storage driver issues to assemble a container rootfs): it unions the lowerdirs
 // and the upperdir the data string names into a real copy-on-write view and
-// mounts it at target. The layers are read from their BACKING host directories
-// (hostfs.NewHostDirFS reads a host subtree raw), so each layer's own content -- the
-// files a runtime extracted into it -- is seen directly, not through laboon's
-// outer overlay. lowerdir is colon-separated, highest-precedence first; overlayFS
-// takes layers lowest first with the writable top last.
+// mounts it at target. Each layer is a directory resolved through the Namespace
+// like any other path (overlayLayer), so a layer named with ".." or a symlink
+// stays inside the guest's own tree. lowerdir is colon-separated,
+// highest-precedence first; overlayFS takes layers lowest first with the
+// writable top last.
 func (g *dguest) mountOverlay(target, data string) int64 {
 	lower, upper, _ := parseOverlayOpts(data)
 	if len(lower) == 0 && upper == "" {
 		return sErr(lxEINVAL)
 	}
-	fs := g.dfs
-	var layers []core.FileSystem
-	for i := len(lower) - 1; i >= 0; i-- { // reverse: leftmost lower is highest precedence
-		h, ok := fs.overlayLayerHost(lower[i])
-		if !ok {
-			return sErr(lxEACCES) // a layer resolving outside the backing tree is an escape
-		}
-		lo := hostfs.NewHostDirFS(h, fs.hostFS)
-		lo.SetMeta(fs.ov.store)
-		layers = append(layers, lo)
-	}
 	if upper != "" {
-		h, ok := fs.overlayLayerHost(upper)
-		if !ok {
-			return sErr(lxEACCES)
+		lower = append([]string{upper}, lower...)
+	}
+	layers := make([]core.FileSystem, len(lower))
+	for i, p := range lower {
+		l, e := g.overlayLayer(p)
+		if e != 0 {
+			return sErr(e)
 		}
-		lo := hostfs.NewHostDirFS(h, fs.hostFS)
-		lo.SetMeta(fs.ov.store)
-		layers = append(layers, lo)
+		layers[len(lower)-1-i] = l
 	}
 	ovl := overlayfs.OverlayFS(layers...)
 	if err := g.vns().Mount(target, ovl); err != nil {
@@ -175,6 +166,33 @@ func (g *dguest) mountOverlay(target, data string) int64 {
 	}
 	g.addDynMount(target, ovl)
 	return 0
+}
+
+// overlayLayer presents the directory a guest overlay mount names as a layer as
+// a filesystem of its own (a bind view). Under laboon's own union it is the view
+// of the layer that holds the directory, which is where a runtime extracted the
+// layer's files: the whiteout and opaque markers the nested union reads and
+// writes there are then its own, not hidden by the outer union.
+func (g *dguest) overlayLayer(p string) (core.FileSystem, lxErrno) {
+	gp, e := g.guestAbs(lxAtFdcwd, p)
+	if e != 0 {
+		return nil, e
+	}
+	if gp, e = g.resolve(gp, true); e != 0 {
+		return nil, e
+	}
+	loc, err := g.vns().Resolve(gp, true)
+	if err != nil {
+		return nil, osErrno(err)
+	}
+	if loc.Node.Kind() != core.Dir {
+		return nil, lxENOTDIR
+	}
+	fsys, n := loc.FS, loc.Node
+	if l, ok := fsys.(core.Layered); ok {
+		fsys, n = l.Layer(n)
+	}
+	return bind.Bind(fsys, n), 0
 }
 
 // parseOverlayOpts pulls lowerdir/upperdir/workdir out of an overlay mount's

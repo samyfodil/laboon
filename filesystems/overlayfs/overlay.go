@@ -51,6 +51,12 @@ func (f *overlay) Gen() uint64 { return f.mutGen.Load() }
 
 func (f *overlay) top() FileSystem { return f.layers[len(f.layers)-1] }
 
+// Layer is the layer that owns n and n's node there.
+func (f *overlay) Layer(n Node) (FileSystem, Node) {
+	on := n.(*overlayNode)
+	return f.layers[on.owner], on.nodes[on.owner]
+}
+
 // overlayNode carries, for its overlay path, the backing node in each layer (nil
 // where absent); the owner is the top-most layer that has it.
 type overlayNode struct {

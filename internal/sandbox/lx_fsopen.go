@@ -453,9 +453,6 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		return g.install(loc.Node, nf, gp, flags)
 	}
 	if wr || flags&lxOTrunc != 0 {
-		if g.upperAbs == "" && g.rootAbs != "" {
-			return sErr(lxEROFS)
-		}
 		// A writable open copies the file up and opens the top copy, in the
 		// backend (ovNode.Open on a write flag copies up first).
 		loc, err := g.vns().Resolve(gp, true)
@@ -551,11 +548,6 @@ func (g *dguest) createFile(gp string, flags, mode int64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	if ploc.FS == g.overlay && g.upperAbs == "" && g.rootAbs != "" {
-		return sErr(lxEROFS) // the overlay root is read-only without a writable upper
-	}
-	// A bind or tmpfs mount is its own writable filesystem, so a create under it
-	// proceeds even when the overlay root has no upper.
 	c, err := g.create(ploc, gp, core.CreateSpec{Kind: core.Reg, Mode: perm})
 	if err != nil {
 		return sErr(osErrno(err))

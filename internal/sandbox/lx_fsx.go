@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path"
@@ -362,7 +363,7 @@ func (g *dguest) unlinkat(dirfd int64, pathAddr uint64, flags int64) int64 {
 	if e != 0 {
 		return sErr(e)
 	}
-	if g.upperAbs == "" {
+	if g.dfs.passthrough() {
 		return sErr(lxEROFS)
 	}
 	if rmdir {
@@ -492,7 +493,7 @@ func (g *dguest) renameat2(odfd int64, oaddr uint64, ndfd int64, naddr uint64, f
 			return sErr(lxENOTEMPTY)
 		}
 	}
-	if g.upperAbs == "" {
+	if g.dfs.passthrough() {
 		return sErr(lxEROFS)
 	}
 	if !exchange {
@@ -1292,20 +1293,20 @@ func (g *dguest) statfsPath(gp string) (core.StatFS, error) {
 	if err != nil {
 		return core.StatFS{}, err
 	}
-	sf, ok := loc.FS.(core.StatFSer)
-	if !ok {
-		if loc, err = g.vns().Resolve("/", false); err != nil {
-			return core.StatFS{}, err
-		}
-		if sf, ok = loc.FS.(core.StatFSer); !ok {
-			return core.StatFS{}, os.ErrInvalid
+	if sf, ok := loc.FS.(core.StatFSer); ok {
+		st, err := sf.StatFS(loc.Node)
+		if !errors.Is(err, errors.ErrUnsupported) {
+			return st, err
 		}
 	}
-	st, err := sf.StatFS(loc.Node)
-	if err != nil {
+	if loc, err = g.vns().Resolve("/", false); err != nil {
 		return core.StatFS{}, err
 	}
-	return st, nil
+	sf, ok := loc.FS.(core.StatFSer)
+	if !ok {
+		return core.StatFS{}, os.ErrInvalid
+	}
+	return sf.StatFS(loc.Node)
 }
 
 // faccessat2 checks access as the guest's root: anything that exists is

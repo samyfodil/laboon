@@ -48,3 +48,12 @@ type ReadOnlyFS interface{ ReadOnlyMount() }
 
 // IsReadOnly reports whether fs is marked read-only.
 func IsReadOnly(fs FileSystem) bool { _, ok := fs.(ReadOnlyFS); return ok }
+
+// Layered is a union FileSystem that can name the layer holding one of its
+// nodes: that layer's own filesystem and node, with the union's conventions
+// (whiteout and opaque markers) left as written. A union assembled over a
+// directory of this one (a guest's overlay mount) reads its layers there, so the
+// markers it writes stay visible to it.
+type Layered interface {
+	Layer(n Node) (FileSystem, Node)
+}
