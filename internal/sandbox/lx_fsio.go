@@ -141,6 +141,9 @@ func (d *dfile) writeAt(buf []byte, off int64) (int, error) {
 
 // readSome reads once at the current offset (a pipe read returns what is there).
 func (g *dguest) readSome(d *dfile, buf []byte, nonblock bool) (int, error) {
+	if d.vf != nil {
+		return d.vfRead(buf)
+	}
 	if d.pipe != nil && d.pipe.io != nil {
 		return d.pipe.io.read(g, d, buf, nonblock || d.nonblock.Load(), false)
 	}
@@ -155,6 +158,9 @@ func (g *dguest) readSome(d *dfile, buf []byte, nonblock bool) (int, error) {
 }
 
 func (g *dguest) writeAll(d *dfile, buf []byte, nonblock bool) (int, error) {
+	if d.vf != nil {
+		return d.vfWrite(buf)
+	}
 	if d.pipe != nil && d.pipe.io != nil {
 		return d.pipe.io.write(g, d, buf, nonblock || d.nonblock.Load())
 	}
@@ -183,17 +189,14 @@ func (d *dfile) sealCheckWrite(off int64, n int) lxErrno {
 }
 
 func (g *dguest) pread(fd int64, bufAddr uint64, n, off int64) int64 {
+	if d, ok := g.ft.get(int(fd)); ok && d.vf != nil {
+		if n < 0 || off < 0 {
+			return sErr(lxEINVAL)
+		}
+		return g.regRead(d, [][2]uint64{{bufAddr, uint64(n)}}, off)
+	}
 	d, e := g.ioFile(fd)
 	if e != 0 {
-		// A non-host regular file (memFS, WithMount) has no host fd, so ioFile
-		// rejects it; serve its positional read through the backing, up to the
-		// end of file, like the sequential read path does.
-		if d2, ok := g.ft.get(int(fd)); ok && d2.vf != nil {
-			if n < 0 || off < 0 {
-				return sErr(lxEINVAL)
-			}
-			return g.readFull(d2, bufAddr, n, off)
-		}
 		if r, ok := g.memPread(fd, bufAddr, n, off); ok {
 			return r
 		}
@@ -231,18 +234,18 @@ func (g *dguest) pread(fd int64, bufAddr uint64, n, off int64) int64 {
 }
 
 func (g *dguest) pwrite(fd int64, bufAddr uint64, n, off int64) int64 {
+	if d, ok := g.ft.get(int(fd)); ok && d.vf != nil {
+		if n < 0 || off < 0 {
+			return sErr(lxEINVAL)
+		}
+		return g.regWrite(d, [][2]uint64{{bufAddr, uint64(n)}}, off)
+	}
 	if r, ok := g.memPwrite(fd, bufAddr, n, off); ok {
 		return r
 	}
 	d, e := g.ioFile(fd)
 	if e != 0 {
-		// A non-host regular file has no host fd (see pread); its positional
-		// write goes through the backing via d.writeAt below.
-		if d2, ok := g.ft.get(int(fd)); ok && d2.vf != nil {
-			d, e = d2, 0
-		} else {
-			return sErr(e)
-		}
+		return sErr(e)
 	}
 	if d.served() {
 		return sErr(lxESPIPE)
@@ -293,6 +296,12 @@ func (g *dguest) preadv(fd int64, iov uint64, cnt, off int64, rwf uint64) int64 
 	if e != 0 {
 		return sErr(e)
 	}
+	if d, ok := g.ft.get(int(fd)); ok && d.vf != nil {
+		if off < 0 {
+			return sErr(lxEINVAL)
+		}
+		return g.regRead(d, v, off)
+	}
 	var total int64
 	for _, x := range v {
 		if x[1] == 0 {
@@ -324,6 +333,12 @@ func (g *dguest) pwritev(fd int64, iov uint64, cnt, off int64, rwf uint64) int64
 	if e != 0 {
 		return sErr(e)
 	}
+	if d, ok := g.ft.get(int(fd)); ok && d.vf != nil {
+		if off < 0 {
+			return sErr(lxEINVAL)
+		}
+		return g.regWrite(d, v, off)
+	}
 	var total int64
 	for _, x := range v {
 		if x[1] == 0 {
@@ -345,6 +360,9 @@ func (g *dguest) pwritev(fd int64, iov uint64, cnt, off int64, rwf uint64) int64
 }
 
 func (d *dfile) isRegular() bool {
+	if d.vf != nil {
+		return true
+	}
 	if d.f == nil || d.isDir || d.fx.opath {
 		return false
 	}
@@ -396,7 +414,7 @@ func (g *dguest) sendfile(outFd, inFd int64, offAddr uint64, count int64) int64 
 	}
 	// The source is a regular file (host or in-memory); the destination any
 	// writable, non-append fd.
-	if (in.vf == nil && (in.f == nil || !in.isRegular())) || out.f == nil || out.fx.oflags&lxOAppend != 0 || out.served() {
+	if !in.isRegular() || (out.f == nil && out.vf == nil) || out.fx.oflags&lxOAppend != 0 || out.served() {
 		return sErr(lxEINVAL)
 	}
 	if count < 0 {
@@ -417,13 +435,8 @@ func (g *dguest) sendfile(outFd, inFd int64, offAddr uint64, count int64) int64 
 		var err error
 		if off >= 0 {
 			n, err = in.readAt(chunk, off+total)
-		} else if in.vf != nil {
-			n, err = in.vfRead(chunk)
 		} else {
-			n, err = in.f.Read(chunk)
-			if err == io.EOF {
-				err = nil
-			}
+			n, err = in.seqRead(chunk)
 		}
 		if err != nil && n == 0 {
 			if total > 0 {
@@ -436,11 +449,7 @@ func (g *dguest) sendfile(outFd, inFd int64, offAddr uint64, count int64) int64 
 		}
 		w, werr := g.writeAll(out, chunk[:n], false)
 		if w < n && off < 0 { // give back what was not written
-			if in.vf != nil {
-				in.vfSeek(int64(w-n), io.SeekCurrent)
-			} else {
-				in.f.Seek(int64(w-n), io.SeekCurrent)
-			}
+			in.seek(int64(max(w, 0)-n), io.SeekCurrent)
 		}
 		total += int64(max(w, 0))
 		if werr != nil || w < n {
@@ -487,7 +496,7 @@ func (g *dguest) copyFileRange(inFd int64, offInAddr uint64, outFd int64, offOut
 		if addr != 0 {
 			return g.readOff(addr)
 		}
-		p, err := d.f.Seek(0, io.SeekCurrent)
+		p, err := d.tell()
 		if err != nil {
 			return 0, osErrno(err)
 		}
@@ -523,7 +532,7 @@ func (g *dguest) copyFileRange(inFd int64, offInAddr uint64, outFd int64, offOut
 		if r == 0 {
 			break
 		}
-		w, err := out.f.WriteAt(chunk[:r], ooff+total)
+		w, err := out.writeAt(chunk[:r], ooff+total)
 		total += int64(w)
 		if err != nil {
 			if total == 0 {
@@ -536,7 +545,7 @@ func (g *dguest) copyFileRange(inFd int64, offInAddr uint64, outFd int64, offOut
 		if addr != 0 {
 			return g.writeOff(addr, base+total)
 		}
-		_, err := d.f.Seek(base+total, io.SeekStart)
+		_, err := d.seek(base+total, io.SeekStart)
 		if err != nil {
 			return osErrno(err)
 		}
@@ -566,7 +575,7 @@ func (g *dguest) splice(inFd int64, offInAddr uint64, outFd int64, offOutAddr ui
 	if !out.writable() || in.fx.hasFlags && in.fx.oflags&lxOAccmod == lxOWronly {
 		return sErr(lxEBADF)
 	}
-	if in.f == nil || out.f == nil || in.served() || out.served() {
+	if (in.f == nil && in.vf == nil) || (out.f == nil && out.vf == nil) || in.served() || out.served() {
 		return sErr(lxEINVAL)
 	}
 	inPipe, outPipe := in.isPipe(), out.isPipe()
@@ -601,10 +610,7 @@ func (g *dguest) splice(inFd int64, offInAddr uint64, outFd int64, offOutAddr ui
 	case inPipe:
 		r, err = g.readSome(in, buf, nb)
 	default:
-		r, err = in.f.Read(buf)
-		if err == io.EOF {
-			err = nil
-		}
+		r, err = in.seqRead(buf)
 	}
 	if err != nil && r == 0 {
 		return sErr(ioErrno(err))
@@ -619,7 +625,7 @@ func (g *dguest) splice(inFd int64, offInAddr uint64, outFd int64, offOutAddr ui
 		w, err = g.writeAll(out, buf[:r], nb && outPipe)
 	}
 	if w < r && !inPipe && ioff < 0 {
-		in.f.Seek(int64(max(w, 0)-r), io.SeekCurrent)
+		in.seek(int64(max(w, 0)-r), io.SeekCurrent)
 	}
 	if err != nil && w <= 0 {
 		return sErr(ioErrno(err))
@@ -665,7 +671,7 @@ func (g *dguest) fallocate(fd, mode, off, n int64) int64 {
 	if d.isPipe() {
 		return sErr(lxESPIPE)
 	}
-	if d.vf != nil { // a regular file, whatever backs it
+	if d.nonHost() {
 		return g.vfFallocate(d, mode, off, n)
 	}
 	if d.f == nil {

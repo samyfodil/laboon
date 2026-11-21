@@ -3,6 +3,7 @@
 package hostfs
 
 import (
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -452,6 +453,22 @@ func (h hostFile) SetAttr(u core.AttrUpdate) error {
 		return FutimesOf(h.File, ats, mts)
 	}
 	return nil
+}
+
+// Append writes p at the end of the file. On a descriptor opened (or set by
+// F_SETFL) O_APPEND the host appends atomically; the seek to the end first
+// serves one that is not. The kernel offset it moves is laboon's alone: guest
+// reads and writes are positional.
+func (h hostFile) Append(p []byte) (int, int64, error) {
+	if _, err := h.File.Seek(0, io.SeekEnd); err != nil {
+		return 0, 0, err
+	}
+	n, err := h.File.Write(p)
+	end, serr := h.File.Seek(0, io.SeekCurrent)
+	if err == nil {
+		err = serr
+	}
+	return n, end, err
 }
 
 // HostFile is the descriptor behind h, for a host-backed fast path that needs it

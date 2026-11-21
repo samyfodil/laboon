@@ -110,7 +110,7 @@ func (g *dguest) mmapFd(fd int64, wshared, code bool) int64 {
 	if d.gp == "/dev/zero" {
 		return kindZero << 32
 	}
-	if d.vf != nil {
+	if d.nonHost() {
 		// A non-host file (in-memory, user-defined, network): the guest never
 		// touches the real backing. A writable shared mapping maps the one
 		// per-vnode shared backing (sharedback.go), so every mapping and fork

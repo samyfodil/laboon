@@ -12,10 +12,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/samyfodil/laboon/filesystems/memfs"
 )
 
 // TestFileOffset runs testdata/fileoffset.c, built against glibc and musl, over
-// the host root and over an overlay whose lower holds /lowerfile: offsets of
+// the host root, an in-memory mount and an overlay whose lower holds /lowerfile: offsets of
 // separate and shared descriptions, O_APPEND, files unlinked or replaced while
 // open, vectored I/O, fdinfo, SEEK_CUR locks and stdio redirection.
 func TestFileOffset(t *testing.T) {
@@ -35,6 +37,10 @@ func TestFileOffset(t *testing.T) {
 		t.Run(libc+"/host", func(t *testing.T) {
 			work := t.TempDir()
 			runFileOffset(t, bin, Config{Args: []string{"fileoffset", work}, RootFS: HostRoot("/")})
+		})
+		t.Run(libc+"/memfs", func(t *testing.T) {
+			work := t.TempDir()
+			runFileOffset(t, bin, Config{Args: []string{"fileoffset", work}, RootFS: HostRoot("/"), Mounts: []Mount{{Guest: work, FS: memfs.NewMemFS()}}})
 		})
 		t.Run(libc+"/overlay", func(t *testing.T) {
 			lower, upper := t.TempDir(), t.TempDir()

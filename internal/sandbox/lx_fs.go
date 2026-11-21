@@ -41,6 +41,7 @@ type dfs struct {
 	workAbs   string          // private dir beside the upper layer for staging host objects
 	keepUpper bool            // upperAbs is the caller's, kept after the run
 	tmpDir    string          // the run's temp directory (newRunTmp)
+	appendMu  sync.Mutex      // serializes O_APPEND writes to a backing that cannot append itself
 
 	mem  []byte          // shared channel region, inherited across the stub's forks
 	done <-chan struct{} // the main stub died
@@ -1329,45 +1330,15 @@ func (g *dguest) stubFd(fd int64) int {
 	return -1
 }
 
-// writeReg writes up to n bytes of guest memory at bufAddr to a non-host regular
-// file (memFS, WithMount) through its backing, a pooled chunk at a time so a large
-// write stages nothing in the supervisor, and reports how much it wrote.
-func (g *dguest) writeReg(d *dfile, bufAddr uint64, n int64) int64 {
-	buf := g.ioBuf(int(min(n, ioChunk)))
-	var total int64
-	for total < n {
-		b := buf[:min(n-total, int64(len(buf)))]
-		if g.getBuf(bufAddr+uint64(total), b) != nil {
-			if total == 0 {
-				return sErr(lxEFAULT)
-			}
-			break
-		}
-		m, err := d.vfWrite(b)
-		total += int64(m)
-		if err != nil {
-			if total == 0 {
-				return sErr(ioErrno(err))
-			}
-			break
-		}
-		if m < len(b) {
-			break
-		}
-	}
-	g.modified(d)
-	return total
-}
-
 func (g *dguest) writeFile(fd int64, bufAddr uint64, n int64) int64 {
+	if d, ok := g.ft.get(int(fd)); ok && d.vf != nil {
+		if n < 0 {
+			return sErr(lxEINVAL)
+		}
+		return g.regWrite(d, [][2]uint64{{bufAddr, uint64(n)}}, -1)
+	}
 	d, e := g.file(fd)
 	if e != 0 {
-		if d2, ok := g.ft.get(int(fd)); ok && d2.vf != nil {
-			if n < 0 {
-				return sErr(lxEINVAL)
-			}
-			return g.writeReg(d2, bufAddr, n) // a non-host regular file (memFS, WithMount)
-		}
 		if r, ok := g.memWrite(fd, bufAddr, n); ok {
 			return r
 		}
@@ -1497,14 +1468,14 @@ func (g *dguest) gatherPrefix(v [][2]uint64, off int, buf []byte) int {
 }
 
 func (g *dguest) read(fd int64, bufAddr uint64, n int64) int64 {
+	if d, ok := g.ft.get(int(fd)); ok && d.vf != nil {
+		if n < 0 {
+			return sErr(lxEINVAL)
+		}
+		return g.regRead(d, [][2]uint64{{bufAddr, uint64(n)}}, -1)
+	}
 	d, e := g.file(fd)
 	if e != 0 {
-		if d2, ok := g.ft.get(int(fd)); ok && d2.vf != nil {
-			if n < 0 {
-				return sErr(lxEINVAL)
-			}
-			return g.readFull(d2, bufAddr, n, -1) // a non-host regular file (memFS, WithMount)
-		}
 		if r, ok := g.memRead(fd, bufAddr, n); ok {
 			return r
 		}
@@ -1624,10 +1595,6 @@ func (g *dguest) readFull(d *dfile, bufAddr uint64, n, off int64) int64 {
 		var m int
 		var err error
 		switch {
-		case d.vf != nil && off < 0:
-			m, err = d.vfRead(b) // a regular file: positional read through its backing
-		case d.vf != nil:
-			m, err = d.vfReadAt(b, off+total)
 		case off < 0:
 			m, err = d.f.Read(b)
 		default:
@@ -1679,6 +1646,9 @@ func (g *dguest) writev(fd int64, iov uint64, cnt int64) int64 {
 	if e != 0 {
 		return sErr(e)
 	}
+	if d, ok := g.ft.get(int(fd)); ok && d.vf != nil {
+		return g.regWrite(d, v, -1)
+	}
 	if d, ok := g.ft.get(int(fd)); ok && d.sk != nil {
 		return g.sockWrite(d, v) // one send: a datagram is the whole vector
 	}
@@ -1711,6 +1681,9 @@ func (g *dguest) readv(fd int64, iov uint64, cnt int64) int64 {
 	v, e := g.iovecs(iov, cnt)
 	if e != 0 {
 		return sErr(e)
+	}
+	if d, ok := g.ft.get(int(fd)); ok && d.vf != nil {
+		return g.regRead(d, v, -1)
 	}
 	if d, ok := g.ft.get(int(fd)); ok && d.sk != nil {
 		return g.sockRead(d, v)

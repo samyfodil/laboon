@@ -819,10 +819,12 @@ func fdinfo(p *dguest, fd int) []byte {
 		flags = m.accmode()
 		ino = pino(d.gp)
 	}
-	if d.f != nil {
-		if off, err := d.f.Seek(0, 1); err == nil {
+	if d.f != nil || d.vf != nil {
+		if off, err := d.tell(); err == nil {
 			pos = off
 		}
+	}
+	if d.f != nil {
 		if acc, app, err := hostAccMode(d.f); err == nil {
 			flags = uint64(acc)
 			if app {

@@ -454,7 +454,7 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		if !ok {
 			return g.installVFile(gp, loc.Node, nf, flags)
 		}
-		return g.install(nf, of, gp, flags)
+		return g.install(loc.Node, nf, of, gp, flags)
 	}
 	if wr || flags&lxOTrunc != 0 {
 		if g.upperAbs == "" && g.rootAbs != "" {
@@ -477,7 +477,7 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		if flags&lxOTrunc != 0 {
 			g.fileModified(of)
 		}
-		fd := g.install(nf, of, gp, flags)
+		fd := g.install(loc.Node, nf, of, gp, flags)
 		if fd >= 0 && flags&lxOTrunc != 0 {
 			g.notify(gp, inModify, 0)
 		}
@@ -495,7 +495,7 @@ func (g *dguest) openPath(dirfd int64, p string, how openHow) (fd int64) {
 		return sErr(osErrno(err))
 	}
 	if of, ok := hostOf(nf); ok {
-		return g.install(nf, of, gp, flags)
+		return g.install(loc.Node, nf, of, gp, flags)
 	}
 	return g.installVFile(gp, loc.Node, nf, flags)
 }
@@ -583,7 +583,7 @@ func (g *dguest) createFile(gp string, flags, mode int64) int64 {
 		}
 		return fd
 	}
-	fd := g.install(nf, of, gp, flags)
+	fd := g.install(c, nf, of, gp, flags)
 	if fd >= 0 {
 		g.notify(gp, inCreate, 0)
 	}
@@ -623,14 +623,19 @@ func (g *dguest) installVFile(gp string, node core.Node, vf core.File, flags int
 
 // install tracks a freshly opened host file as a new description with the open
 // flags' status bits, honoring O_CLOEXEC and O_NONBLOCK. hf is the backend's vfs
-// handle (fstat goes through it); f is the borrowed data-plane descriptor.
-func (g *dguest) install(hf core.File, f *os.File, gp string, flags int64) int64 {
+// handle (fstat goes through it); f is the borrowed descriptor. A regular file's
+// bytes go through hf at laboon's offset, as any other backing's do; f serves
+// only what needs the host object itself (mmap, locks, poll).
+func (g *dguest) install(node core.Node, hf core.File, f *os.File, gp string, flags int64) int64 {
 	fi, err := f.Stat()
 	if err != nil {
 		f.Close()
 		return sErr(osErrno(err))
 	}
 	d := &dfile{f: f, hf: hf, gp: gp, isDir: fi.IsDir(), stub: -1}
+	if fi.Mode().IsRegular() {
+		d.vf, d.vn, d.fs = hf, node, g.dfs
+	}
 	return g.installD(d, flags)
 }
 

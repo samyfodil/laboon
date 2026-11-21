@@ -75,11 +75,11 @@ type lkey struct {
 }
 
 func (g *dguest) lockKey(d *dfile) (lkey, lxErrno) {
-	if d.f == nil || d.fx.opath {
+	if d.f == nil && d.vf == nil || d.fx.opath {
 		return lkey{}, lxEBADF
 	}
-	if d.hf != nil { // a filesystem object: its vfs identity, kept across copy-up
-		info, err := d.hf.Stat()
+	if h := d.fsFile(); h != nil { // a filesystem object: its vfs identity, kept across copy-up
+		info, err := h.Stat()
 		if err != nil {
 			return lkey{}, osErrno(err)
 		}
@@ -158,7 +158,7 @@ func (g *dguest) flock(fd, op int64) int64 {
 	if !ok || d.fx.opath {
 		return sErr(lxEBADF)
 	}
-	if d.f == nil {
+	if d.f == nil && d.vf == nil {
 		return 0 // stub-served stdio
 	}
 	nb := op&lxLockNb != 0
@@ -215,7 +215,7 @@ func (g *dguest) flock(fd, op int64) int64 {
 // fcntlLock serves F_GETLK/F_SETLK/F_SETLKW and their F_OFD_* forms. The arm64
 // struct flock is {s16 type, s16 whence, pad, s64 start, s64 len, s32 pid, pad}.
 func (g *dguest) fcntlLock(d *dfile, cmd int64, addr uint64) int64 {
-	if d.fx.opath || d.f == nil {
+	if d.fx.opath || d.f == nil && d.vf == nil {
 		return sErr(lxEBADF)
 	}
 	b, err := g.readMem(addr, 32)
@@ -237,7 +237,7 @@ func (g *dguest) fcntlLock(d *dfile, cmd int64, addr uint64) int64 {
 	switch whence {
 	case io.SeekStart:
 	case io.SeekCurrent:
-		p, err := d.f.Seek(0, io.SeekCurrent)
+		p, err := d.tell()
 		if err != nil {
 			return sErr(osErrno(err))
 		}

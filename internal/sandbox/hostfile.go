@@ -21,6 +21,15 @@ func hostOf(f core.File) (*os.File, bool) {
 	return nil, false
 }
 
+// fsFile is d's filesystem handle: a host-backed object's, or a non-host
+// regular file's backing; nil for a supervisor-owned object.
+func (d *dfile) fsFile() core.File {
+	if d.hf != nil {
+		return d.hf
+	}
+	return d.vf
+}
+
 // hostStat returns the open file's portable type bits and size. A guest
 // filesystem object (hf set) is read through its vfs handle, so the sandbox
 // never interprets host metadata itself; a supervisor-owned object (memfd, pipe,
@@ -28,8 +37,8 @@ func hostOf(f core.File) (*os.File, bool) {
 // type and permission bits and the size are portable across platforms; callers
 // that need the full Linux stat (identity, rdev) go through hf.Stat.
 func (d *dfile) hostStat() (os.FileMode, int64, error) {
-	if d.hf != nil {
-		info, err := d.hf.Stat()
+	if h := d.fsFile(); h != nil {
+		info, err := h.Stat()
 		if err != nil {
 			return 0, 0, err
 		}
@@ -50,8 +59,8 @@ func (d *dfile) hostStat() (os.FileMode, int64, error) {
 // supervisor-owned object (memfd, device) reports its own descriptor's. Zero on
 // error, so callers must not treat an all-zero result as a real identity.
 func (d *dfile) hostDevIno() (dev, ino uint64) {
-	if d.hf != nil {
-		info, err := d.hf.Stat()
+	if h := d.fsFile(); h != nil {
+		info, err := h.Stat()
 		if err != nil {
 			return 0, 0
 		}

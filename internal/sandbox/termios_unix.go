@@ -70,7 +70,7 @@ func (g *dguest) ttyIoctl(d *dfile, req, arg uint64) int64 {
 		n, err := unix.IoctlGetInt(fd, hostFIONREAD)
 		if err != nil {
 			if mode, size, serr := d.hostStat(); serr == nil && mode.IsRegular() {
-				off, _ := d.f.Seek(0, 1)
+				off, _ := d.tell()
 				n, err = int(max(size-off, 0)), nil
 			}
 		}

@@ -407,6 +407,18 @@ func grow(b []byte, n int) []byte {
 	return nb
 }
 
+// Append writes p at the end of the file, atomically with every other write.
+func (h *memFile) Append(p []byte) (int, int64, error) {
+	n := h.n
+	n.fs.mu.Lock()
+	defer n.fs.mu.Unlock()
+	off := int64(len(n.data))
+	n.data = grow(n.data, int(off)+len(p))
+	copy(n.data[off:], p)
+	n.mtime, n.ctime = memNow(), memNow()
+	return len(p), off + int64(len(p)), nil
+}
+
 func (h *memFile) Truncate(size int64) error {
 	if size < 0 {
 		return syscall.EINVAL

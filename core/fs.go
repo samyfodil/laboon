@@ -53,6 +53,13 @@ type File interface {
 	Stat() (Info, error)
 }
 
+// An Appender is a File that can write at its end atomically, as an O_APPEND
+// write does, even against writers outside this process. Append returns the
+// file's end after the write. A File without it is appended to at its Stat size.
+type Appender interface {
+	Append(p []byte) (n int, end int64, err error)
+}
+
 // Info is the result of File.Stat and the single shape a guest stat is built
 // from. It is an os.FileInfo, so code that only needs mode/size/modtime is
 // unchanged, and it carries the full backend-agnostic Attr and the object's

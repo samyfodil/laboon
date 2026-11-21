@@ -42,7 +42,7 @@ func (g *wguest) mapFile(dg *dguest, fd uint64) (*dfile, lxErrno) {
 	if d.fx.hasFlags && d.fx.oflags&lxOAccmod == lxOWronly {
 		return nil, lxEACCES
 	}
-	if d.vf != nil { // a non-host regular file (in-memory, user-defined, network)
+	if d.nonHost() { // a non-host regular file (in-memory, user-defined, network)
 		return d, 0
 	}
 	if d.f == nil {
@@ -96,7 +96,7 @@ func (g *wguest) mapSection(dg *dguest, fd, off, n, prot uint64) int64 {
 		if e != 0 {
 			return sErr(e)
 		}
-		if d.vf != nil {
+		if d.nonHost() {
 			// A non-host file (in-memory, user-defined, network): the guest never
 			// touches the real backing. A writable shared mapping maps the one
 			// per-vnode backing (sharedback.go) through a file-backed section, so

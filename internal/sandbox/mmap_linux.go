@@ -360,7 +360,7 @@ func (g *dguest) mmapFile(a [6]uint64) int64 {
 	if !ok {
 		return sErr(lxEBADF)
 	}
-	if d.vf != nil {
+	if d.nonHost() {
 		return g.mmapVF(d, a) // a non-host regular file (in-memory, user-defined, network)
 	}
 	if d.ev != nil || d.ep != nil || d.sk != nil || d.f == nil {

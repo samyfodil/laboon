@@ -64,7 +64,29 @@ func (fs *DarwinFS) atAny() int {
 }
 
 func (fs *DarwinFS) hOpen(p string, flag int, perm os.FileMode) (*os.File, error) {
-	return os.OpenFile(p, flag|fs.oAny(), perm)
+	// O_APPEND goes on the descriptor, not through os.OpenFile, whose append mode
+	// refuses WriteAt for good, even after F_SETFL clears the flag.
+	f, err := os.OpenFile(p, flag&^os.O_APPEND|fs.oAny(), perm)
+	if err != nil || flag&os.O_APPEND == 0 {
+		return f, err
+	}
+	rc, err := f.SyscallConn()
+	if err == nil {
+		cerr := rc.Control(func(fd uintptr) {
+			var fl int
+			if fl, err = unix.FcntlInt(fd, unix.F_GETFL, 0); err == nil {
+				_, err = unix.FcntlInt(fd, unix.F_SETFL, fl|unix.O_APPEND)
+			}
+		})
+		if err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
+		f.Close()
+		return nil, &os.PathError{Op: "open", Path: p, Err: err}
+	}
+	return f, nil
 }
 
 // hLstat is os.Lstat that refuses a symlink in any component but the last.
