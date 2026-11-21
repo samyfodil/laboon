@@ -48,8 +48,7 @@ const (
 	tebSlotStk = 0x1480 + 60*8
 	tebSlotTP  = 0x1480 + 63*8
 
-	exeBias    = 0x555555550000
-	interpBias = 0x7e0000000000
+	exeBias = 0x555555550000
 )
 
 // strictRewrite refuses an image with stray syscall encodings: set with
@@ -296,10 +295,15 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 	reported := pg.args
 
 	lay := drawWinLayout(dg)
-	w.brkGap = lay.brkGap
 	img, err := w.loadELF(src, lay.exe)
 	if err != nil {
 		return w, err
+	}
+	edge := lay.mmapBase
+	w.brkAt = img.hi + lay.brkGap
+	if img.base != 0 && img.interp == "" {
+		edge = sp.mmapPlace(img, edge, lay.legacy)
+		w.brkAt = lay.exe + lay.brkGap
 	}
 	// A dynamic program starts in its interpreter (ld-musl), which the
 	// supervisor loads beside it, as the kernel does; the interpreter maps the
@@ -316,8 +320,11 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 		if e != 0 {
 			return w, fmt.Errorf("interpreter %s: %w", img.interp, lxErr(e))
 		}
-		if interp, err = w.loadELF(isrc, lay.interp); err != nil {
+		if interp, err = w.loadELF(isrc, lay.mmapBase); err != nil {
 			return w, fmt.Errorf("%s: %w", img.interp, err)
+		}
+		if interp.base != 0 {
+			edge = sp.mmapPlace(interp, edge, lay.legacy)
 		}
 		if interp.interp != "" {
 			return w, fmt.Errorf("%s: an interpreter with an interpreter", img.interp)
@@ -340,10 +347,7 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 		}
 		w.traps.set([][2]uint64{{interp.lo, interp.hi}}, interp.traps)
 	}
-	stack, err := sp.alloc(lay.stack-stackSize, stackSize, windows.PAGE_READWRITE)
-	if err != nil { // the band is taken: the host chooses
-		stack, err = sp.alloc(0, stackSize, windows.PAGE_READWRITE)
-	}
+	stack, err := sp.allocStack(lay.stackTop)
 	if err != nil {
 		return w, fmt.Errorf("guest stack: %w", err)
 	}
@@ -382,7 +386,10 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 	if ready != nil {
 		ready(entry, gsp)
 	}
-	pg.args = [6]uint64{entry, gsp, top, stack, img.hi + w.brkGap, img.hi + w.brkGap + brkMax}
+	if lay.legacy {
+		edge |= 1
+	}
+	pg.args = [6]uint64{entry, gsp, top, edge, w.brkAt, w.brkAt + brkMax}
 	ch.reply(repStart)
 	return w, nil
 }
@@ -401,7 +408,7 @@ type wguest struct {
 	// once on the stub's stack.
 	exitEntry uint64
 	segs      []mapEnt   // the images' segments, as hostMaps reports them
-	brkGap    uint64     // between the program's end and its brk area, drawn per execve
+	brkAt     uint64     // the brk area, drawn per execve
 	anon      anonCode   // what is known of its code made executable at run time (anoncode.go)
 	link      *winLink   // its stub's service thread, for the shared-code registry (codereg_windows.go)
 	traps     *codeTraps // where the rewriter left traps in its file code (traps_windows.go)
@@ -541,32 +548,137 @@ func (img *wimage) relocate(d uint64) {
 }
 
 // winLayout is where an execve places a program on Windows, as Linux's ASLR
-// would, in the host's allocation granularity (64 KiB): a position-
-// independent one at exe (exeBias moved up by a random offset of the range
-// mmapRndBits pages span), its interpreter at interp (interpBias moved down by
-// another), the stack's top at stack (in a band of its own below the
-// interpreter's, moved down by stackRndBits pages), and its brk area a random
-// part of 1 GiB past its end. The mmap areas are the host's, which places each
-// process's anew. ADDR_NO_RANDOMIZE leaves them at their bases.
+// would, in the host's allocation granularity (64 KiB): the stack's top at
+// stackTop (STACK_TOP moved down by stackRndBits pages), the mmap area below
+// mmapBase (the task size less the stack's gap and mmapRndBits pages), or
+// above it in the legacy layout, a position-independent program with an
+// interpreter at exe (ELF_ET_DYN_BASE moved up by mmapRndBits pages), and the
+// interpreter, or a program with none, first in the mmap area. A program with
+// none has its brk area at exe, one with an interpreter past its end, each a
+// random part of 1 GiB further. ADDR_NO_RANDOMIZE leaves them at their bases.
+// An x86-64 guest has its own 47 bits; an arm64 one the 39 of a 4 KiB-page
+// kernel, which fit Windows' 47-bit user space.
 type winLayout struct {
-	exe, interp, stack, brkGap uint64
+	exe, stackTop, brkGap, mmapBase uint64
+	legacy                          bool
+}
+
+func winTask() (task, etDyn uint64) {
+	if guestArch == "aarch64" {
+		return 1 << 39, (1 << 39 / 3 * 2) &^ (allocGran - 1)
+	}
+	return vmTaskSize, exeBias
 }
 
 func drawWinLayout(dg *dguest) winLayout {
 	dg.dfs.mu.Lock()
-	norand := dg.ps.personality&addrNoRandomize != 0
+	pers := dg.ps.personality
+	rlimStack := dg.ps.rlim[rlimitStack].cur
 	dg.dfs.mu.Unlock()
-	span := uint64(1) << mmapRndBits * 0x1000 / allocGran
-	stackBase := interpBias - span*allocGran - 1<<30
-	if norand {
-		return winLayout{exe: exeBias, interp: interpBias, stack: stackBase, brkGap: brkGap}
+	task, etDyn := winTask()
+	l := winLayout{exe: etDyn, stackTop: task, brkGap: brkGap,
+		legacy: pers&addrCompatLayout != 0 || unlimitedStackLegacy && rlimStack == rlimInf}
+	var rnd uint64
+	pad := uint64(256 * pageSize)
+	if pers&addrNoRandomize == 0 {
+		rnd = randBelow(1<<mmapRndBits) * pageSize
+		pad += 1 << stackRndBits * pageSize
+		l.exe += randBelow(1<<mmapRndBits) * pageSize
+		l.stackTop -= randBelow(1<<stackRndBits) * pageSize
+		l.brkGap += randBelow(1<<30/allocGran) * allocGran
 	}
-	return winLayout{
-		exe:    exeBias + randBelow(span)*allocGran,
-		interp: interpBias - randBelow(span)*allocGran,
-		stack:  stackBase - randBelow(1<<stackRndBits*0x1000/allocGran)*allocGran,
-		brkGap: brkGap + randBelow(1<<30/allocGran)*allocGran,
+	gap := rlimStack
+	if gap+pad > gap {
+		gap += pad
 	}
+	gap = min(max(gap, 128<<20), task/6*5)
+	if l.legacy {
+		l.mmapBase = (task/unmappedDiv + rnd + allocGran - 1) &^ (allocGran - 1)
+	} else {
+		l.mmapBase = (task - gap - rnd) &^ (allocGran - 1)
+	}
+	l.exe &^= allocGran - 1
+	l.stackTop &^= allocGran - 1
+	return l
+}
+
+// mmapPlace moves a position-independent image into the mmap area: to the top
+// of the free span below edge, or to the bottom of the one above it when
+// legacy, as Linux's first mapping goes. It returns the area's new edge.
+func (s *stubProc) mmapPlace(img *wimage, edge uint64, legacy bool) uint64 {
+	size := img.hi - img.lo
+	if legacy {
+		if lo := s.freeAbove(edge, size); lo != 0 {
+			img.relocate(lo - img.lo)
+		}
+		return img.hi
+	}
+	if hi := s.freeBelow(edge, size); hi != 0 {
+		img.relocate((hi-size)&^(allocGran-1) - img.lo)
+	}
+	return img.lo
+}
+
+// freeBelow is the top of the highest free span of size bytes ending at or
+// below top in the stub's address space, or 0.
+func (s *stubProc) freeBelow(top, size uint64) uint64 {
+	var best uint64
+	s.freeRuns(func(lo, hi uint64) bool {
+		hi = min(hi, top) &^ (allocGran - 1)
+		if hi > lo && hi-lo >= size {
+			best = hi
+		}
+		return hi < top
+	})
+	return best
+}
+
+// freeAbove is the bottom of the lowest free span of size bytes starting at or
+// above lo, or 0.
+func (s *stubProc) freeAbove(lo, size uint64) uint64 {
+	var at uint64
+	s.freeRuns(func(a, b uint64) bool {
+		a = max(a, (lo+allocGran-1)&^(allocGran-1))
+		if b&^(allocGran-1) > a && b&^(allocGran-1)-a >= size {
+			at = a
+			return false
+		}
+		return true
+	})
+	return at
+}
+
+// freeRuns calls f with each free run of the stub's address space, lowest
+// first, in the host's allocation granularity, until f returns false. A query
+// reports a free run from the page asked about up, so the walk goes up.
+func (s *stubProc) freeRuns(f func(lo, hi uint64) bool) {
+	for a := uint64(allocGran); a < 1<<47; {
+		var mbi windows.MemoryBasicInformation
+		if windows.VirtualQueryEx(s.proc, uintptr(a), &mbi, unsafe.Sizeof(mbi)) != nil {
+			return
+		}
+		end := uint64(mbi.BaseAddress) + uint64(mbi.RegionSize)
+		if mbi.State == memFree && !f((uint64(mbi.BaseAddress)+allocGran-1)&^(allocGran-1), end) {
+			return
+		}
+		a = end
+	}
+}
+
+// allocStack commits the guest stack with its top at top or, the host having
+// something there (Windows' system DLLs lie in x86-64 Linux's stack band),
+// at the nearest free top below it.
+func (s *stubProc) allocStack(top uint64) (uint64, error) {
+	stack, err := s.alloc(top-stackSize, stackSize, windows.PAGE_READWRITE)
+	if err == nil {
+		return stack, nil
+	}
+	if t := s.freeBelow(top, stackSize); t != 0 {
+		if stack, err = s.alloc(t-stackSize, stackSize, windows.PAGE_READWRITE); err == nil {
+			return stack, nil
+		}
+	}
+	return s.alloc(0, stackSize, windows.PAGE_READWRITE)
 }
 
 // randBelow is a random number below n, a power of two.
@@ -732,15 +844,15 @@ func (g *wguest) mapImage(img *wimage, brk bool) error {
 	// After the program's image, past a gap, the brk area the stub commits
 	// as the break grows.
 	if brk {
-		_, err := g.sp.reserve(img.hi+g.brkGap, brkMax)
-		if err != nil && g.brkGap != brkGap {
-			// The randomized place is the stub's own memory: the area goes
-			// right past the image, as unrandomized.
-			g.brkGap = brkGap
-			_, err = g.sp.reserve(img.hi+g.brkGap, brkMax)
+		_, err := g.sp.reserve(g.brkAt, brkMax)
+		if err != nil && g.brkAt != img.hi+brkGap {
+			// The randomized place is taken: the area goes right past the
+			// image, as unrandomized.
+			g.brkAt = img.hi + brkGap
+			_, err = g.sp.reserve(g.brkAt, brkMax)
 		}
 		if err != nil {
-			return fmt.Errorf("brk area at %#x: %w", img.hi+g.brkGap, err)
+			return fmt.Errorf("brk area at %#x: %w", g.brkAt, err)
 		}
 	}
 	if img.view != nil {

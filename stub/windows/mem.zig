@@ -11,11 +11,14 @@
 // area is a region: a free placeholder, an anonymous allocation that replaced
 // one, or a section view that replaced one. Adjacent free placeholders of an
 // area are coalesced before a span is carved out of them; those of two areas
-// cannot be. A mapping the stub places itself leaves a free page above it,
-// which no mapping fills (each asks for its own page more): the arm64 stub
-// resumes the guest by a branch from a page within 128 MiB of the resume pc
-// (stubPage), and reservations packed together (a JVM's heap, code cache and
-// arenas) would leave the code among them out of every free page's reach.
+// cannot be. The stub places mappings as Linux does: the first area lies
+// right below the supervisor's images, under the mmap base it drew, and
+// mappings go top-down below it (bottom-up from it in the legacy layout). On
+// arm64 one of half a branch's reach or more leaves a free page above it,
+// which no mapping fills: the stub resumes the guest by a branch from a page
+// within 128 MiB of the resume pc (stubPage), and a large reservation packed
+// among others (a JVM's heap and code cache) would leave the code in it out
+// of every free page's reach.
 //
 // - Anonymous memory is committed when it is mapped, except PROT_NONE, which
 //   is only reserved until mprotect gives it access.
@@ -163,6 +166,7 @@ var brk_base: u64 = 0;
 var brk_limit: u64 = 0;
 var brk_cur: u64 = 0;
 var lock: u32 = 0;
+var legacy = false;
 
 fn neg(e: u64) u64 {
     return @bitCast(-@as(i64, @intCast(e)));
@@ -206,10 +210,21 @@ fn viewProt(p: u64) u32 {
     return if (p & PROT_WRITE != 0) 0x04 else if (p & PROT_READ != 0) 0x02 else 0x01;
 }
 
-pub fn init(base: u64, limit: u64) void {
+// init sets up the break between base and limit, and the first area at edge:
+// below it, or above it when edge's low bit asks for the legacy layout.
+pub fn init(base: u64, limit: u64, edge: u64) void {
+    legacy = edge & 1 != 0;
     var b: usize = 0;
     var s: usize = AREA_SIZE;
-    if (NtAllocateVirtualMemoryEx(SELF, &b, &s, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, 0x01, null, 0) < 0) root.die(0xE0000010);
+    if (firstArea(edge & ~@as(u64, 1))) |a| {
+        b = a[0];
+        s = a[1] - a[0];
+    }
+    if (NtAllocateVirtualMemoryEx(SELF, &b, &s, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, 0x01, null, 0) < 0) {
+        b = 0;
+        s = AREA_SIZE;
+        if (NtAllocateVirtualMemoryEx(SELF, &b, &s, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, 0x01, null, 0) < 0) root.die(0xE0000010);
+    }
     area_starts[0] = b;
     nareas = 1;
     regs[0] = .{ .lo = b, .hi = b + s, .kind = .free, .prot = 0, .sec = 0, .off = 0 };
@@ -217,6 +232,36 @@ pub fn init(base: u64, limit: u64) void {
     brk_base = base;
     brk_cur = base;
     brk_limit = limit;
+}
+
+const MEM_FREE_STATE: u32 = 0x10000;
+const AREA_MIN: u64 = 1 << 30;
+
+// firstArea is the span of the first area: the top of the free run of the
+// host's address space nearest below edge, or the bottom of the one above it
+// when legacy, at least AREA_MIN and at most AREA_SIZE long. A query reports a
+// free run from the page asked about up, so the walk goes up.
+fn firstArea(edge: u64) ?[2]u64 {
+    var best: ?[2]u64 = null;
+    var a: u64 = GRAN;
+    while (a < 1 << 47) {
+        var mi: MemInfo = undefined;
+        if (NtQueryVirtualMemory(SELF, a, 0, &mi, @sizeOf(MemInfo), null) < 0) break;
+        const end = mi.base + mi.size;
+        a = end;
+        if (mi.state != MEM_FREE_STATE) continue;
+        var lo = (mi.base + GRAN - 1) & ~(GRAN - 1);
+        var hi = end & ~(GRAN - 1);
+        if (legacy) {
+            lo = @max(lo, edge);
+            if (hi > lo and hi - lo >= AREA_MIN) return .{ lo, @min(hi, lo + AREA_SIZE) };
+        } else {
+            hi = @min(hi, edge & ~(GRAN - 1));
+            if (hi > lo and hi - lo >= AREA_MIN) best = .{ @max(lo, hi -| AREA_SIZE), hi };
+            if (end >= edge) break;
+        }
+    }
+    return best;
 }
 
 fn insertAt(i: usize, r: Region) bool {
@@ -300,21 +345,65 @@ fn carve(lo: u64, hi: u64) ?usize {
     return i;
 }
 
-// freeSpan finds the highest span of len free bytes.
-fn freeSpan(len: u64) ?u64 {
-    var i = nreg;
-    while (i > 0) {
-        i -= 1;
-        if (regs[i].kind != .free) continue;
-        const hi = regs[i].hi;
-        var lo = regs[i].lo;
-        var k = i;
-        while (hi - lo < len and k > 0 and regs[k - 1].kind == .free and regs[k - 1].hi == lo and !areaStart(lo)) {
-            k -= 1;
-            lo = regs[k].lo;
+// freeSpan finds a span of len free bytes aligned to al: the highest, or the
+// lowest in the legacy layout.
+fn freeSpan(len: u64, al: u64) ?u64 {
+    return spanIn(len, al, 0, std.math.maxInt(u64), !legacy);
+}
+
+// spanIn finds a span of len free bytes aligned to al within [lim_lo,
+// lim_hi): the highest when down, else the lowest.
+fn spanIn(len: u64, al: u64, lim_lo: u64, lim_hi: u64, down: bool) ?u64 {
+    var best: ?u64 = null;
+    var i: usize = 0;
+    while (i < nreg) {
+        if (regs[i].kind != .free) {
+            i += 1;
+            continue;
         }
-        if (hi - lo >= len) return hi - len;
-        i = k;
+        const a = regs[i].lo;
+        var b = regs[i].hi;
+        i += 1;
+        while (i < nreg and regs[i].kind == .free and regs[i].lo == b and !areaStart(b)) : (i += 1) b = regs[i].hi;
+        const lo = @max(a, lim_lo);
+        const hi = @min(b, lim_hi);
+        if (hi <= lo or hi - lo < len) continue;
+        if (down) {
+            const t = (hi - len) & ~(al - 1);
+            if (t >= lo) best = t;
+        } else {
+            const t = (lo + al - 1) & ~(al - 1);
+            if (t + len <= hi) return t;
+        }
+    }
+    return best;
+}
+
+// guard is the free page a mapping of len bytes leaves above it: see the top
+// of this file.
+fn guard(len: u64) u64 {
+    return if (@import("builtin").cpu.arch == .aarch64 and len >= REACH / 2) PAGE else 0;
+}
+
+// HUGE is a huge page: a page of page table entries' worth.
+const HUGE: u64 = PAGE * (PAGE / 8);
+const MAP_32BIT: u64 = 0x40;
+
+// low32 finds len free bytes for a MAP_32BIT mapping, between 1 and 2 GiB as
+// on x86-64 Linux, making an area of the host's free run there if none has
+// room.
+fn low32(len: u64) ?u64 {
+    const lo32: u64 = 0x4000_0000;
+    const hi32: u64 = 0x8000_0000;
+    if (spanIn(len, PAGE, lo32, hi32, false)) |a| return a;
+    var a = lo32;
+    while (a < hi32) {
+        var mi: MemInfo = undefined;
+        if (NtQueryVirtualMemory(SELF, a, 0, &mi, @sizeOf(MemInfo), null) < 0) return null;
+        const end = @min(mi.base + mi.size, hi32) & ~(GRAN - 1);
+        const b = (a + GRAN - 1) & ~(GRAN - 1);
+        if (mi.state == MEM_FREE_STATE and end > b and end - b >= len and reserveAt(b, end)) return b;
+        a = mi.base + mi.size;
     }
     return null;
 }
@@ -695,10 +784,16 @@ fn mmap(hint: u64, len0: u64, prot: u64, flags: u64, fd: u64, off: u64) u64 {
         // Code wider than a branch reaches takes a trampoline area on each
         // side (mapCode): leave room for both.
         const pad: u64 = if (len + up(need) <= REACH) 0 else up(need);
-        const span = len + 2 * pad + PAGE;
-        lo = hinted(addr, len) orelse (freeSpan(span) orelse newArea(span) orelse return neg(ENOMEM)) + pad;
+        const span = len + 2 * pad + guard(len);
+        lo = hinted(addr, len) orelse (freeSpan(span, PAGE) orelse newArea(span) orelse return neg(ENOMEM)) + pad;
+    } else if (flags & MAP_32BIT != 0 and @import("builtin").cpu.arch == .x86_64) {
+        lo = low32(len) orelse return neg(ENOMEM);
     } else {
-        lo = hinted(addr, len) orelse freeSpan(len + PAGE) orelse newArea(len + PAGE) orelse return neg(ENOMEM);
+        // A private anonymous mapping a whole number of huge pages long is
+        // huge-page aligned, as Linux places it for transparent huge pages.
+        const al: u64 = if (anon and typ == MAP_PRIVATE and len % HUGE == 0) HUGE else PAGE;
+        const g = guard(len);
+        lo = hinted(addr, len) orelse freeSpan(len + g, al) orelse newArea(len + g) orelse return neg(ENOMEM);
     }
     const i = carve(lo, lo + len) orelse return neg(ENOMEM);
     // Shared anonymous memory is a view of a section the supervisor makes,
@@ -832,10 +927,18 @@ fn mremap(old: u64, oldlen0: u64, newlen0: u64, flags: u64, newaddr: u64) u64 {
     if (!inArea(old, old + oldlen)) return neg(EINVAL);
     coolIn(old, old + oldlen);
     const i = find(old);
-    if (i == nreg or regs[i].kind != .anon or regs[i].hi < old + oldlen) return neg(EINVAL);
+    if (i == nreg or regs[i].kind != .anon) return neg(EINVAL);
     if (regs[i].vdso) return moveVdso(i, old, oldlen, newlen, flags, newaddr);
-    if (regs[i].code or regs[i].is_tramp or regs[i].pinned) return neg(EINVAL); // its sites branch to fixed trampolines
     const prot = regs[i].prot;
+    // The range may span regions (a mapping grown in place is two): all
+    // anonymous, alike, and not code, whose sites branch to fixed trampolines.
+    var j = i;
+    while (true) : (j += 1) {
+        const r = regs[j];
+        if (r.kind != .anon or r.prot != prot or r.vdso or r.code or r.is_tramp or r.pinned or r.hot) return neg(EINVAL);
+        if (r.hi >= old + oldlen) break;
+        if (j + 1 == nreg or regs[j + 1].lo != r.hi) return neg(EINVAL);
+    }
     if (flags & MREMAP_FIXED == 0) {
         if (newlen <= oldlen) {
             if (newlen < oldlen and !unmapRange(old + newlen, old + oldlen)) return neg(ENOMEM);
@@ -914,7 +1017,7 @@ fn aliasView(old: u64, newlen: u64, flags: u64, newaddr: u64) u64 {
         if (!inArea(lo, lo + newlen) and !reserveAt(lo, lo + newlen)) return neg(ENOMEM);
         if (anyMapped(lo, lo + newlen) and !unmapRange(lo, lo + newlen)) return neg(ENOMEM);
     } else {
-        lo = freeSpan(newlen + PAGE) orelse newArea(newlen + PAGE) orelse return neg(ENOMEM);
+        lo = freeSpan(newlen + guard(newlen), PAGE) orelse newArea(newlen + guard(newlen)) orelse return neg(ENOMEM);
     }
     const k = carve(lo, lo + newlen) orelse return neg(ENOMEM);
     if (!mapView(k, r.sec, r.off + (old - r.lo), r.prot, r.key, r.size)) {
@@ -2633,7 +2736,7 @@ fn shmat(shmid: u64, addr_in: u64, flg: u64) u64 {
             }
         }
     } else {
-        lo = freeSpan(n) orelse {
+        lo = freeSpan(n, PAGE) orelse {
             _ = NtClose(sec);
             return neg(ENOMEM);
         };

@@ -73,6 +73,7 @@ pub const WIN_TRACED: u32 = 1 << 31;
 pub const WIN_SECCOMP: u32 = 1 << 30;
 const REP_RESULT: u64 = 1;
 const REP_START: u64 = 3;
+const GUEST_STACK: u64 = 8 << 20;
 const AT_IGNORE: u64 = 1;
 const AT_SYSINFO_EHDR: u64 = 33;
 const REP_PEEK: u64 = 7; // copy guest memory into the slot window, reply MSG_HOSTRET
@@ -514,15 +515,16 @@ pub export fn wWinMainCRTStartup() callconv(win.WINAPI) noreturn {
         arch.tebStore(SLOT_CHAN, base + noff);
     }
     if (ch.kind != REP_START) die(0xE0000005);
-    // args: entry, sp, stack top, stack bottom, brk base, brk limit. The TEB
+    // args: entry, sp, stack top, the mmap area's edge (mem.init), brk base,
+    // brk limit. The stack is GUEST_STACK long, as the supervisor makes it. The TEB
     // describes the guest stack from here on, so exception dispatch and stack
     // probes in the handlers (which run on it) see a valid stack.
     if (@hasDecl(arch, "prefaultStack")) arch.prefaultStack();
     sig.keepWinStack();
     arch.tebStore(0x08, ch.args[2]);
-    arch.tebStore(0x10, ch.args[3]);
-    arch.tebStore(0x1478, ch.args[3]);
-    mem.init(ch.args[4], ch.args[5]);
+    arch.tebStore(0x10, ch.args[2] - GUEST_STACK);
+    arch.tebStore(0x1478, ch.args[2] - GUEST_STACK);
+    mem.init(ch.args[4], ch.args[5], ch.args[3]);
     const entry = ch.args[0];
     const sp = ch.args[1];
     setVdso(sp, mem.mapVdso());
