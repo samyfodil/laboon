@@ -62,17 +62,14 @@ func TestResolveCacheInvalidation(t *testing.T) {
 		t.Fatalf("removed file still resolves — STALE POSITIVE CACHE: %v", err)
 	}
 
-	// Copy-up of /a/g: resolve it, copy it up (via the Underlying capability),
-	// then a write through a freshly resolved node must land in the top layer and
+	// Copy-up of /a/g: resolve it, copy it up (a metadata change does), then a
+	// write through a freshly resolved node must land in the top layer and
 	// leave the lower untouched — proving the cache did not hand back a stale
 	// lower-layer node.
 	loc, err := ns.Resolve("/a/g", false)
 	must(err)
-	u, ok := loc.Node.(Underlying)
-	if !ok {
-		t.Fatal("overlay node is not Underlying")
-	}
-	if _, err := u.WritableUnderlying(); err != nil { // triggers copy-up + gen bump
+	mode := uint32(0o644)
+	if err := loc.Node.SetAttr(AttrUpdate{Mode: &mode}); err != nil { // triggers copy-up + gen bump
 		t.Fatalf("copy-up: %v", err)
 	}
 	loc2, err := ns.Resolve("/a/g", true)
@@ -111,9 +108,8 @@ func TestResolveCacheConcurrent(t *testing.T) {
 		for i := 0; i < 2000; i++ {
 			n := string(rune('a' + i%20))
 			if loc, err := ns.Resolve("/d/f"+n, false); err == nil {
-				if o, ok := loc.Node.(Underlying); ok {
-					o.WritableUnderlying()
-				}
+				mode := uint32(0o644)
+				loc.Node.SetAttr(AttrUpdate{Mode: &mode})
 			}
 			ofs.Create(dloc.Node, "new"+n, CreateSpec{Kind: Reg, Mode: 0o644})
 			ofs.Remove(dloc.Node, "new"+n, false)

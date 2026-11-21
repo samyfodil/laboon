@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -158,51 +159,81 @@ func (fs *DarwinFS) hMkfifo(p string, perm uint32) error {
 }
 
 // hMksock makes a socket file. Only root may mknod one on macOS, but binding
-// a socket leaves the same unbound socket file: one is bound by the file's
-// name in its directory, which this thread alone enters for the bind
-// (pthread_fchdir_np), so neither sun_path's length nor a rename comes in.
+// a socket leaves the same unbound socket file.
 func (fs *DarwinFS) hMksock(p string, perm uint32) error {
-	d, err := unix.Open(filepath.Dir(p), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|fs.oAny(), 0)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(d)
 	s, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
 	if err != nil {
 		return err
 	}
 	defer unix.Close(s)
-	name := filepath.Base(p)
-	// Enter the directory and bind by name, so neither sun_path's length nor a
-	// rename comes in. macOS has no per-thread chdir in the Go std library, so
-	// change the whole process's directory briefly on a locked, serialized thread
-	// and restore it; laboon's fs uses absolute paths and fds, not the process
-	// working directory, so this is invisible to it.
-	bindMu.Lock()
-	runtime.LockOSThread()
-	cwd, cerr := unix.Open(".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if cerr != nil {
-		runtime.UnlockOSThread()
-		bindMu.Unlock()
-		return cerr
-	}
-	if err = unix.Fchdir(d); err == nil {
-		err = unix.Bind(s, &unix.SockaddrUnix{Name: name})
-		unix.Fchdir(cwd)
-	}
-	unix.Close(cwd)
-	runtime.UnlockOSThread()
-	bindMu.Unlock()
+	err = fs.inDir(p, func(d int, name string) error {
+		if err := unix.Bind(s, &unix.SockaddrUnix{Name: name}); err != nil {
+			return err
+		}
+		return unix.Fchmodat(d, name, perm, unix.AT_SYMLINK_NOFOLLOW)
+	})
 	if err == unix.EADDRINUSE {
 		return unix.EEXIST
 	}
+	return err
+}
+
+// hBindSock binds at a name of its own in p's directory and renames it into
+// place, refusing an existing one, so the address the kernel reports for the
+// socket is unique to it rather than p's bare name, which another directory's
+// socket can share.
+func (fs *DarwinFS) hBindSock(p string, bind func(addr string) error) error {
+	return fs.inDir(p, func(d int, name string) error {
+		tmp := ".lcsock-" + strconv.Itoa(os.Getpid()) + "-" + strconv.FormatUint(sockSeq.Add(1), 36)
+		if err := bind(tmp); err != nil {
+			return err
+		}
+		if err := unix.RenameatxNp(d, tmp, d, name, unix.RENAME_EXCL); err != nil {
+			unix.Unlinkat(d, tmp, 0)
+			if err == unix.EEXIST {
+				return unix.EADDRINUSE
+			}
+			return err
+		}
+		return nil
+	})
+}
+
+var sockSeq atomic.Uint64
+
+func (fs *DarwinFS) hReachSock(p string, op func(addr string) error) error {
+	return fs.inDir(p, func(_ int, name string) error { return op(name) })
+}
+
+// inDir runs call with the process in p's parent directory, opened confined,
+// so a socket address is p's bare name: neither sun_path's 104 bytes nor a
+// symlink on the way comes in. macOS has no per-thread chdir in the Go
+// standard library, so the whole process's directory changes briefly on a
+// locked, serialized thread and is restored; laboon uses absolute paths and
+// descriptors, never the working directory, so nothing else sees it.
+func (fs *DarwinFS) inDir(p string, call func(dir int, name string) error) error {
+	d, err := unix.Open(filepath.Dir(p), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|fs.oAny(), 0)
 	if err != nil {
 		return err
 	}
-	return unix.Fchmodat(d, name, perm, unix.AT_SYMLINK_NOFOLLOW)
+	defer unix.Close(d)
+	bindMu.Lock()
+	defer bindMu.Unlock()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	cwd, err := unix.Open(".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(cwd)
+	if err := unix.Fchdir(d); err != nil {
+		return err
+	}
+	defer unix.Fchdir(cwd)
+	return call(d, filepath.Base(p))
 }
 
-// bindMu serializes the brief process-wide fchdir a socket bind needs.
+// bindMu serializes the brief process-wide fchdir of inDir.
 var bindMu sync.Mutex
 
 func (fs *DarwinFS) hRename(from, to string, exchange bool) error {

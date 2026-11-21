@@ -591,13 +591,6 @@ func (n *overlayNode) Removexattr(name string) error {
 	return xn.Removexattr(name)
 }
 
-// Underlying is the node of the layer that currently owns n, for a consumer that
-// must reach the concrete backing leaf (e.g. an AF_UNIX bind that asks the disk
-// leaf for its host socket path). WritableUnderlying first copies n up, so the
-// backing node is in the writable top.
-func (n *overlayNode) Underlying() Node                  { return n.nodes[n.owner] }
-func (n *overlayNode) WritableUnderlying() (Node, error) { return n.fs.copyUp(n) }
-
 // ID is the node's lowest layer's identity, not the owner's: a copy-up adds a
 // top node but the lowest (origin) id never changes, so a consumer keying on it
 // (a file lock, a directory pin) sees one identity across copy-up and needs no

@@ -224,6 +224,30 @@ func (f *devFS) Rename(fromDir core.Node, from string, toDir core.Node, to strin
 	return pseudoROFS("rename")
 }
 
+// BindSocket and ReachSocket pass a socket under /dev (a syslog /dev/log) to
+// the overlay, which holds every non-synthetic name there.
+func (f *devFS) BindSocket(dir core.Node, name string, bind func(addr string) error) (core.Node, error) {
+	d := dir.(*devNodeU)
+	s, ok := f.ovFS.(core.SocketFS)
+	if d.ov == nil || !ok {
+		return nil, core.ErrSocketUnsupported
+	}
+	n, err := s.BindSocket(d.ov, name, bind)
+	if err != nil {
+		return nil, err
+	}
+	return &devNodeU{fs: f, p: path.Join(d.p, name), ov: n}, nil
+}
+
+func (f *devFS) ReachSocket(n core.Node, op func(addr string) error) error {
+	u := n.(*devNodeU)
+	s, ok := f.ovFS.(core.SocketFS)
+	if u.ov == nil || !ok {
+		return core.ErrSocketUnsupported
+	}
+	return s.ReachSocket(u.ov, op)
+}
+
 func (n *devNodeU) ID() core.NodeID {
 	if n.syn != nil {
 		return core.NodeID{Dev: n.syn.dev, Ino: n.syn.ino}

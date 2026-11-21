@@ -41,15 +41,6 @@ type Cloner interface {
 	CloneNode() Node
 }
 
-// Underlying is a Node of a union filesystem that can hand back the concrete
-// backing node a consumer must reach -- e.g. an AF_UNIX bind that asks the disk
-// leaf for its real host socket path. WritableUnderlying first copies the node up
-// so the backing node is in the writable top layer.
-type Underlying interface {
-	Underlying() Node
-	WritableUnderlying() (Node, error)
-}
-
 // ReadOnlyFS marks a FileSystem whose namespace is immutable, so a caller can
 // refuse a write-mode open before attempting it. A filesystem that is read-only
 // of itself implements it directly; the readonly wrapper adds it to any other.

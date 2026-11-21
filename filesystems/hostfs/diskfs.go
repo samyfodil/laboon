@@ -215,10 +215,6 @@ func (d *DiskFS) Rename(fromDir core.Node, from string, toDir core.Node, to stri
 func (n *diskNode) ID() core.NodeID { return n.id }
 func (n *diskNode) Kind() core.Kind { return n.kind }
 
-// HostPath is the node's real path on the host, for a consumer that must reach
-// the concrete file (an AF_UNIX bind needs a real socket path).
-func (n *diskNode) HostPath() string { return n.fs.hp(n.p) }
-
 func (n *diskNode) Stat() (core.Attr, error) {
 	fi, err := os.Lstat(n.fs.hp(n.p))
 	if err != nil {

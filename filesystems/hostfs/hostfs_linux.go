@@ -128,6 +128,32 @@ func (fs *LinuxFS) hMksock(p string, perm uint32) error {
 	return fs.atParent(p, func(d int, base string) error { return unix.Mknodat(d, base, unix.S_IFSOCK|perm, 0) })
 }
 
+// sunPathMax is the size of Linux's sun_path, terminator included.
+const sunPathMax = 108
+
+// hBindSock binds through the parent directory's descriptor: the address is
+// /proc/self/fd/N/name, short whatever the path's length, and reaches no
+// further than the confined parent.
+func (fs *LinuxFS) hBindSock(p string, bind func(addr string) error) error {
+	return fs.atParent(p, func(d int, base string) error {
+		addr := "/proc/self/fd/" + strconv.Itoa(d) + "/" + base
+		if len(addr) >= sunPathMax {
+			return unix.ENAMETOOLONG
+		}
+		return bind(addr)
+	})
+}
+
+// hReachSock reaches the socket file itself through an O_PATH descriptor.
+func (fs *LinuxFS) hReachSock(p string, op func(addr string) error) error {
+	f, err := fs.open2(p, unix.O_PATH|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(f)
+	return op("/proc/self/fd/" + strconv.Itoa(f))
+}
+
 func (fs *LinuxFS) hRename(from, to string, exchange bool) error {
 	var flags uint
 	if exchange {

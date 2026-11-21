@@ -78,7 +78,7 @@ func (g *dguest) sendIov(d *dfile, iovs [][2]uint64, dest, ctl []byte, flags uin
 	}
 	total := iovTotal(iovs)
 	var to unix.Sockaddr
-	var unixDest string
+	var unixDest unixReach
 	sk.mu.Lock()
 	dnsPeer := sk.dns
 	peer := sk.peer
@@ -89,11 +89,11 @@ func (g *dguest) sendIov(d *dfile, iovs [][2]uint64, dest, ctl []byte, flags uin
 			return sErr(lxEISCONN)
 		}
 	case dest != nil && sk.family == lxAFUnix:
-		host, _, e := g.unixTarget(dest)
+		reach, _, e := g.unixTarget(dest)
 		if e != 0 {
 			return sErr(e)
 		}
-		unixDest = host
+		unixDest = reach
 	case dest != nil:
 		sa, e := inetSockaddr(dest, sk.family, true)
 		if e != 0 {
@@ -152,8 +152,8 @@ func (g *dguest) sendIov(d *dfile, iovs [][2]uint64, dest, ctl []byte, flags uin
 			var n int
 			err := g.sockIO(d, true, nb, sk.timeout(true), func(h int) error {
 				var err error
-				if unixDest != "" {
-					err = g.netState().viaShort(unixDest, func(sa *unix.SockaddrUnix) error {
+				if unixDest != nil {
+					err = unixDest(func(sa *unix.SockaddrUnix) error {
 						n, err = unix.SendmsgN(h, buf[off:], oob, sa, dwFlags)
 						return err
 					})
@@ -166,7 +166,7 @@ func (g *dguest) sendIov(d *dfile, iovs [][2]uint64, dest, ctl []byte, flags uin
 				if sent+off > 0 {
 					return int64(sent + off)
 				}
-				if unixDest != "" && err == unix.ENOTSOCK {
+				if unixDest != nil && err == unix.ENOTSOCK {
 					err = unix.ECONNREFUSED // the name is not a socket
 				}
 				return sErr(osErrno(err))

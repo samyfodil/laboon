@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/samyfodil/laboon/core"
-	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"golang.org/x/sys/unix"
 )
 
@@ -138,13 +137,14 @@ type dnet struct {
 	eg  *egress
 	dir string
 
-	mu      sync.Mutex
-	seq     int
-	names   map[string][]byte  // host socket path -> guest sockaddr
-	dnsFrom map[string]int     // family + server sockaddr -> sender fd
-	dnsPort map[[2]int][]byte  // {family, sender port} -> server sockaddr
-	dnsTCP  net.Listener       // DNS over TCP, started on first use
-	lent    map[[2]uint64]lent // descriptions in flight over SCM_RIGHTS, by token
+	mu        sync.Mutex
+	seq       int
+	names     map[string][]byte      // host socket path -> guest sockaddr
+	nodeSocks map[core.NodeID]string // socket node -> the supervisor socket bound for it (bindPath)
+	dnsFrom   map[string]int         // family + server sockaddr -> sender fd
+	dnsPort   map[[2]int][]byte      // {family, sender port} -> server sockaddr
+	dnsTCP    net.Listener           // DNS over TCP, started on first use
+	lent      map[[2]uint64]lent     // descriptions in flight over SCM_RIGHTS, by token
 
 	vports  map[vkey]*vport              // vnet: stream endpoint reservations by (scope, ip, port)
 	vudps   map[vkey]*vport              // vnet: datagram endpoint reservations
@@ -441,53 +441,53 @@ func (n *dnet) abstractPath(netns int32, name string) string {
 
 func binID(v int32) []byte { return []byte{byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)} }
 
-// unixTarget resolves the host path an AF_UNIX connect/sendto reaches: an
-// abstract name's supervisor file, or the guest path through the overlay.
-func (g *dguest) unixTarget(raw []byte) (string, []byte, lxErrno) {
+// unixReach runs op with a host address reaching a guest AF_UNIX name.
+type unixReach func(op func(sa *unix.SockaddrUnix) error) error
+
+// unixTarget resolves what an AF_UNIX connect/sendto reaches: an abstract
+// name's supervisor socket, or the socket node at the guest path, reached
+// through the filesystem holding it (which gives a host socket's address
+// itself) or else at the supervisor socket a bind there made for the node.
+func (g *dguest) unixTarget(raw []byte) (unixReach, []byte, lxErrno) {
 	name, abstract, canon, e := unixName(raw)
 	if e != 0 {
-		return "", nil, e
+		return nil, nil, e
 	}
+	n := g.netState()
 	if abstract {
-		return g.netState().abstractPath(g.ps.netns.Load(), name), canon, 0
+		p := n.abstractPath(g.ps.netns.Load(), name)
+		return func(op func(*unix.SockaddrUnix) error) error { return n.viaShort(p, op) }, canon, 0
 	}
 	gp, e := g.guestAbs(lxAtFdcwd, name)
 	if e != 0 {
-		return "", nil, e
+		return nil, nil, e
 	}
-	// Resolve through the Namespace (symlinks, mounts, the overlay layer choice),
-	// then take the backing host path from the resolved node.
 	loc, err := g.vns().Resolve(gp, true)
 	if err != nil {
-		return "", nil, osErrno(err)
+		return nil, nil, osErrno(err)
 	}
-	host, upper, ok := sockHostPath(loc.Node)
-	if !ok {
-		return "", nil, lxENOENT
-	}
-	if !upper && g.rootAbs != "" {
-		// A socket file in the read-only image is not a guest's: whatever listens
-		// there, if anything, is the host's. A host socket the caller wants shared
-		// is mounted with hostfs.Dir (confined, so upper is true above) and reached
-		// there, never falling here.
-		return "", nil, lxECONNREFUSED
-	}
-	return host, canon, 0
+	return func(op func(*unix.SockaddrUnix) error) error {
+		if s, ok := loc.FS.(core.SocketFS); ok {
+			err := s.ReachSocket(loc.Node, func(addr string) error { return op(&unix.SockaddrUnix{Name: addr}) })
+			if !errors.Is(err, core.ErrSocketUnsupported) {
+				return err
+			}
+		}
+		p, ok := n.nodeSock(loc.Node.ID())
+		if !ok {
+			return unix.ECONNREFUSED
+		}
+		return n.viaShort(p, op)
+	}, canon, 0
 }
 
-// sockHostPath gives the host path backing a resolved node and whether it is the
-// writable top layer, for the supervisor's AF_UNIX bind/connect. A synthetic
-// (non-host-backed) node yields ok=false.
-func sockHostPath(n core.Node) (host string, upper, ok bool) {
-	if u, has := n.(interface{ Underlying() core.Node }); has {
-		n = u.Underlying()
-	}
-	hn, has := n.(*hostfs.HostNode)
-	if !has {
-		return "", false, false
-	}
-	host, upper = hn.HostPath()
-	return host, upper, true
+// nodeSock is the supervisor socket bound for a socket node of a filesystem
+// that holds no host sockets (bindNode).
+func (n *dnet) nodeSock(id core.NodeID) (string, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	p, ok := n.nodeSocks[id]
+	return p, ok
 }
 
 // ---- bind / listen / accept / connect -------------------------------------------
@@ -541,7 +541,7 @@ func (g *dguest) bind(fd int64, addr, addrlen uint64) int64 {
 		return 0
 	}
 	n := g.netState()
-	var host string
+	var host, sockPath string
 	var canon []byte
 	abstract := false
 	if len(raw) == 2 {
@@ -561,9 +561,7 @@ func (g *dguest) bind(fd int64, addr, addrlen uint64) int64 {
 		if abs {
 			host = n.abstractPath(g.ps.netns.Load(), name)
 		} else {
-			if host, e = g.unixBindPath(name); e != 0 {
-				return sErr(e)
-			}
+			sockPath = name
 		}
 	}
 	d.sk.mu.Lock()
@@ -571,10 +569,17 @@ func (g *dguest) bind(fd int64, addr, addrlen uint64) int64 {
 	if d.sk.name != nil {
 		return sErr(lxEINVAL)
 	}
-	err := n.bindUnix(hfd, host)
-	g.upperChanged()
-	if err != nil {
-		return sErr(osErrno(err))
+	if abstract {
+		if err := n.bindUnix(hfd, host); err != nil {
+			return sErr(osErrno(err))
+		}
+	} else {
+		var e lxErrno
+		host, e = g.bindPath(hfd, sockPath)
+		g.upperChanged()
+		if e != 0 {
+			return sErr(e)
+		}
 	}
 	d.sk.name = canon
 	if abstract {
@@ -591,18 +596,18 @@ func (g *dguest) bind(fd int64, addr, addrlen uint64) int64 {
 	return 0
 }
 
-// unixBindPath returns the upper-layer host path a guest unix socket path is
-// created at: its parent must exist in the guest, the name must not.
-func (g *dguest) unixBindPath(name string) (string, lxErrno) {
+// bindPath binds the host socket hfd at guest path name, as bind(2) makes the
+// socket file: its parent must exist, the name must not. A filesystem that
+// holds host sockets binds it there; any other gets a Socket node, and hfd is
+// bound at a supervisor path the node's identity finds (nodeSock). It returns
+// the address hfd was bound at, which the kernel reports for it.
+func (g *dguest) bindPath(hfd int, name string) (string, lxErrno) {
 	gp, e := g.guestAbs(lxAtFdcwd, name)
 	if e != 0 {
 		return "", e
 	}
 	if gp, e = g.resolve(gp, false); e != 0 {
 		return "", e
-	}
-	if g.upperAbs == "" {
-		return gp, 0 // rootless: the guest path is the host path
 	}
 	if fi, e := g.lstatGuest(path.Dir(gp)); e != 0 {
 		return "", e
@@ -611,39 +616,49 @@ func (g *dguest) unixBindPath(name string) (string, lxErrno) {
 	}
 	if _, e := g.lstatGuest(gp); e == 0 {
 		return "", lxEADDRINUSE
+	} else if e != lxENOENT {
+		return "", e
 	}
-	// Copy the parent up through the backend (so the socket lands in the writable
-	// top), and bind the new name in it; no host path is mapped outside the core.
+	if e := g.dacCreate(gp); e != 0 {
+		return "", e
+	}
 	ploc, err := g.vns().Resolve(path.Dir(gp), true)
 	if err != nil {
 		return "", osErrno(err)
 	}
-	parent, err := writableHostPath(ploc.Node)
+	n := g.netState()
+	var bound string
+	if s, ok := ploc.FS.(core.SocketFS); ok {
+		_, err = s.BindSocket(ploc.Node, path.Base(gp), func(addr string) error {
+			bound = addr
+			return unix.Bind(hfd, &unix.SockaddrUnix{Name: addr})
+		})
+		if err == nil {
+			g.setWhite(gp, false)
+			g.notify(gp, inCreate, 0)
+			return bound, 0
+		}
+		if !errors.Is(err, core.ErrSocketUnsupported) {
+			return "", osErrno(err)
+		}
+	}
+	node, err := g.create(ploc, gp, core.CreateSpec{Kind: core.Socket, Mode: g.createPerm(0o777)})
 	if err != nil {
 		return "", osErrno(err)
 	}
-	g.setWhite(gp, false)
-	return parent + "/" + path.Base(gp), 0
-}
-
-// writableHostPath copies the resolved node up into the writable top and returns
-// its host path, for the supervisor's AF_UNIX bind.
-func writableHostPath(n core.Node) (string, error) {
-	if w, has := n.(interface {
-		WritableUnderlying() (core.Node, error)
-	}); has {
-		tn, err := w.WritableUnderlying()
-		if err != nil {
-			return "", err
-		}
-		n = tn
+	bound = n.tmpName()
+	if err := n.bindUnix(hfd, bound); err != nil {
+		ploc.FS.Remove(ploc.Node, path.Base(gp), false)
+		return "", osErrno(err)
 	}
-	hn, has := n.(*hostfs.HostNode)
-	if !has {
-		return "", os.ErrInvalid
+	n.mu.Lock()
+	if n.nodeSocks == nil {
+		n.nodeSocks = map[core.NodeID]string{}
 	}
-	host, _ := hn.HostPath()
-	return host, nil
+	n.nodeSocks[node.ID()] = bound
+	n.mu.Unlock()
+	g.notify(gp, inCreate, 0)
+	return bound, 0
 }
 
 func (g *dguest) listen(fd int64, backlog int) int64 {
@@ -803,11 +818,11 @@ func (g *dguest) connect(fd int64, addr, addrlen uint64) int64 {
 		return 0
 	}
 	if sk.family == lxAFUnix {
-		host, canon, e := g.unixTarget(raw)
+		reach, canon, e := g.unixTarget(raw)
 		if e != 0 {
 			return sErr(e)
 		}
-		err := g.netState().viaShort(host, func(sa *unix.SockaddrUnix) error { return unix.Connect(hfd, sa) })
+		err := reach(func(sa *unix.SockaddrUnix) error { return unix.Connect(hfd, sa) })
 		if err == unix.EINPROGRESS || err == unix.EAGAIN {
 			err = g.awaitConnect(d)
 		}

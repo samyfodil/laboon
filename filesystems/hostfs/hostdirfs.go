@@ -209,12 +209,6 @@ func (f *HostDirFS) RenameExchange(fromDir core.Node, from string, toDir core.No
 
 func (n *HostNode) ID() core.NodeID { return n.id }
 
-// HostPath is the host filesystem path n is backed by, and whether its
-// filesystem confines symlink resolution — for an AF_UNIX bind or connect the
-// supervisor performs on the node directly.
-func (n *HostNode) HostPath() (path string, confined bool) {
-	return n.fs.hp(n.p), n.fs.confine
-}
 func (n *HostNode) Kind() core.Kind {
 	if n.fs.meta != nil {
 		if o, ok := n.fs.meta.Get(n.id); ok && o.Special {
