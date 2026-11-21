@@ -41,7 +41,10 @@ type dfs struct {
 	workAbs   string          // private dir beside the upper layer for staging host objects
 	keepUpper bool            // upperAbs is the caller's, kept after the run
 	tmpDir    string          // the run's temp directory (newRunTmp)
-	appendMu  sync.Mutex      // serializes O_APPEND writes to a backing that cannot append itself
+	emptyOnce sync.Once
+	emptyPath string // the run's empty directory (openEmpty)
+	emptyErr  error
+	appendMu  sync.Mutex // serializes O_APPEND writes to a backing that cannot append itself
 
 	mem  []byte          // shared channel region, inherited across the stub's forks
 	done <-chan struct{} // the main stub died
@@ -1196,7 +1199,7 @@ func (g *dguest) openFile(gp string) (*os.File, lxErrno) {
 		// getdents reads the real listing through the namespace by path, as it does
 		// for the canonical /proc, /sys, /dev. A container runtime opens
 		// <rootfs>/sys to create mount points under it.
-		of, e := os.Open(emptyDir())
+		of, e := g.dfs.openEmpty()
 		if e != nil {
 			return nil, osErrno(e)
 		}
@@ -1268,7 +1271,7 @@ func (g *dguest) openDir(loc namespace.Loc, gp string) (*os.File, *memFile, lxEr
 		}
 		f.Close() // a backend returning a non-host File for a directory: treat as in-memory
 	} else if err == errPseudoOpen {
-		ed, e := os.Open(emptyDir())
+		ed, e := g.dfs.openEmpty()
 		if e != nil {
 			return nil, nil, osErrno(e)
 		}
@@ -1276,7 +1279,7 @@ func (g *dguest) openDir(loc namespace.Loc, gp string) (*os.File, *memFile, lxEr
 	} else if !errors.Is(err, core.ErrNoHostFile) {
 		return nil, nil, osErrno(err)
 	}
-	ed, e := os.Open(emptyDir())
+	ed, e := g.dfs.openEmpty()
 	if e != nil {
 		return nil, nil, osErrno(e)
 	}

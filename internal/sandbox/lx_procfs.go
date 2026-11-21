@@ -688,7 +688,7 @@ func (g *dguest) pseudoOpen(gp string, flags int64) (int64, bool) {
 		if wr {
 			return sErr(lxEISDIR), true
 		}
-		f, err := os.Open(emptyDir())
+		f, err := g.dfs.openEmpty()
 		if err != nil {
 			return sErr(osErrno(err)), true
 		}
@@ -741,21 +741,21 @@ func (g *dguest) pseudoOpen(gp string, flags int64) (int64, bool) {
 	return int64(fd), true
 }
 
-var (
-	emptyOnce sync.Once
-	emptyPath string
-)
-
-// emptyDir is the host directory behind an open synthetic directory: getdents
-// lists the node, but the fd still needs a real directory for fstat/fchdir.
-func emptyDir() string {
-	emptyOnce.Do(func() {
-		emptyPath = "/var/empty"
-		if _, err := os.Stat(emptyPath); err != nil {
-			emptyPath = os.TempDir()
+// openEmpty opens the run's own empty, read-only directory: the descriptor
+// behind a directory with no host directory of its own (a synthetic /proc or
+// /sys one, an in-memory one), which fstat and fchdir need. Its listing and
+// every path under it are answered through the Namespace by name.
+func (fs *dfs) openEmpty() (*os.File, error) {
+	fs.emptyOnce.Do(func() {
+		fs.emptyPath, fs.emptyErr = os.MkdirTemp(fs.tmpDir, "lc-empty-")
+		if fs.emptyErr == nil {
+			fs.emptyErr = os.Chmod(fs.emptyPath, 0o555)
 		}
 	})
-	return emptyPath
+	if fs.emptyErr != nil {
+		return nil, fs.emptyErr
+	}
+	return os.Open(fs.emptyPath)
 }
 
 // memFile is an open non-host file: it has no host file (dfile.f is nil), so
