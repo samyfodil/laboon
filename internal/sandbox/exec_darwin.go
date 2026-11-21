@@ -101,6 +101,7 @@ func (g *dguest) execve(dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 
 	g.closeExec() // drop close-on-exec fds; the rest survive the exec
 	execHook(g)
+	g.endRseq()
 	g.execDone(path.Base(gp))
 	g.noteExec(gp, gp, argv, g.exePin(&t))
 	g.dfs.mu.Lock()
@@ -303,6 +304,7 @@ func (g *dguest) execRespawn(t *execTarget, host, interpHost, mainSites, interpS
 		g.mp.anon.reset()
 	}
 	execHook(g)
+	g.endRseq()
 	fs.mu.Lock()
 	old := g.ps.ospid
 	atomic.StoreUint64(&g.ch.page.rip, 0)

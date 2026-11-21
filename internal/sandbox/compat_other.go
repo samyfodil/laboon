@@ -8,14 +8,18 @@ import (
 	"os"
 )
 
-// getcpu reports a CPU of the thread's affinity mask, NUMA node 0. The stub's
-// threads are not pinned, so which host CPU one is on says nothing: the
-// thread is given one of its mask's CPUs by its tid, spreading threads over
-// them as a scheduler would.
+// getcpu reports a CPU of the thread's affinity mask, NUMA node 0: the one
+// its rseq area names, else one by its tid. The stub's threads are not
+// pinned, so which host CPU one is on says nothing; the tid spreads threads
+// over the mask as a scheduler would.
 func (g *dguest) getcpu(cpu, node uint64) int64 {
 	mask := g.ps.cpus.Load()
 	var c, z [4]byte
-	put32(c[:], uint32(nthCPU(mask, g.pid%max(bits.OnesCount64(mask), 1))))
+	n := nthCPU(mask, g.pid%max(bits.OnesCount64(mask), 1))
+	if v, ok := g.rseqCPU(); ok {
+		n = v
+	}
+	put32(c[:], uint32(n))
 	if cpu != 0 && g.writeMem(cpu, c[:]) != nil || node != 0 && g.writeMem(node, z[:]) != nil {
 		return sErr(lxEFAULT)
 	}
@@ -33,10 +37,7 @@ func nthCPU(mask uint64, n int) int {
 	return 0
 }
 
-// rseq is ENOSYS, as from a kernel built without restartable sequences: the
-// stub cannot keep a thread's CPU number or abort its critical sections, and
-// a registration that seemed to work would leave per-CPU data unguarded.
-func (g *dguest) rseq(a [6]uint64) int64 { return sErr(lxENOSYS) }
+func (g *dguest) rseq(a [6]uint64) int64 { return g.rseqEmulated(a) }
 
 // The affinity calls keep the mask in the process's sched state: the stub's
 // threads are not pinned to it.

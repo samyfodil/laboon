@@ -227,6 +227,7 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 	// the stub adds it to its own mapping base to find the slot after forking.
 	g.ch.page.ret = uint64(parentPid)
 	g.ch.page.args = [6]uint64{uint64(idx * slotSize), r.flags, r.stack, 0, r.tls, r.ctid}
+	g.forkRseq(child)
 	g.ch.reply(repFork)
 	g.forked(gpid, parentPid, cch, stop, event, vforkDone != nil)
 	if vforkDone != nil {
@@ -368,6 +369,7 @@ func (g *dguest) forked(gpid, ret int, cch *channel, stop chan struct{}, event i
 		if g.ch.page.nr != nrForked {
 			return // not the report: left posted for the serve loop
 		}
+		g.rseqForked()
 		pid = int(g.ch.page.args[0])
 		if pid <= 0 {
 			g.ch.page.ret = 0

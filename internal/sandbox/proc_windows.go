@@ -508,6 +508,8 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 
 	pg.ret = uint64(gpid)
 	pg.args = [6]uint64{uint64(idx * slotSize), r.flags, r.stack, 0, r.tls, r.ctid}
+	g.forkRseq(child)
+	defer g.rseqForked()
 	g.ch.reply(repFork)
 	if err := g.ch.wait(); err != nil {
 		abandon()
@@ -724,6 +726,7 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	shared := dg.sharedStub()
 	dg.closeExec()
 	execHook(dg)
+	dg.endRseq()
 	fs.mu.Lock()
 	for _, p := range fs.procs {
 		if p.ps == dg.ps {

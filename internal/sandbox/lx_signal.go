@@ -119,6 +119,11 @@ const (
 	// handler, so the supervisor can decide whether to redirect it.
 	stBusy      = 72
 	stInHandler = 76
+	// stRseq and stRseqSig are the thread's registered rseq area and its
+	// signature, which the stub reads to abort a critical section a signal
+	// interrupts (darwin, windows: lx_rseq.go).
+	stRseq    = 0x800
+	stRseqSig = 0x808
 
 	spPending = 8
 	spMem     = 16
@@ -308,6 +313,8 @@ func (sr *sigRun) initThread(slot, procSlot, tid, tgid int, mask uint64, ss [3]u
 	atomic.StoreUint32(sr.p32(o+stSsFlags), uint32(ss[2]))
 	atomic.StoreUint32(sr.p32(o+stTid), uint32(tid))
 	atomic.StoreUint32(sr.p32(o+stTgid), uint32(tgid))
+	sr.st(o+stRseq, 0)
+	atomic.StoreUint32(sr.p32(o+stRseqSig), 0)
 }
 
 func (sr *sigRun) act(p *sigProc, sig int) sigAct {

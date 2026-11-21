@@ -852,5 +852,6 @@ func (g *wguest) syscall(dg *dguest, nr uint64, a [6]uint64) int64 {
 	if !ok {
 		return sErr(lxENOSYS)
 	}
+	dg.moveRseq()
 	return fromGeneric(nr, a, h(dg, ga))
 }

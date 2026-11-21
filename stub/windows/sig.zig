@@ -510,10 +510,38 @@ fn onStack(t: *Thread, sp: u64) bool {
     return t.ss_size != 0 and sp > t.ss_sp and sp - t.ss_sp <= t.ss_size;
 }
 
+// ---- restartable sequences --------------------------------------------------
+
+// RSEQ_OFF is where a thread's record holds its registered rseq area and, 8
+// bytes on, its signature (sandbox/lx_signal.go stRseq).
+const RSEQ_OFF: usize = 0x800;
+
+const RseqCs = extern struct { version: u32, flags: u32, start: u64, post: u64, abort: u64 };
+
+// rseqAbort is where a signal delivered at pc resumes the thread instead: the
+// abort handler of the critical section of a restartable sequence pc is in,
+// whose descriptor it clears, as the kernel does before it builds the frame.
+// A descriptor the kernel would refuse kills the process with SIGSEGV.
+fn rseqAbort(t: *Thread, pc: u64) ?u64 {
+    const rec = @intFromPtr(t);
+    const area = @atomicLoad(u64, @as(*const u64, @ptrFromInt(rec + RSEQ_OFF)), .acquire);
+    if (area == 0) return null;
+    const sig = @atomicLoad(u32, @as(*const u32, @ptrFromInt(rec + RSEQ_OFF + 8)), .acquire);
+    const p = get(u64, area + 8) orelse die(SIGSEGV);
+    if (p == 0) return null;
+    const cs = get(RseqCs, p) orelse die(SIGSEGV);
+    if (cs.version != 0 or cs.start +% cs.post < cs.start or cs.abort -% cs.start < cs.post) die(SIGSEGV);
+    if ((get(u32, cs.abort -% 4) orelse die(SIGSEGV)) != sig) die(SIGSEGV);
+    if (!put(u64, area + 8, 0)) die(SIGSEGV);
+    if (pc -% cs.start >= cs.post) return null;
+    return cs.abort;
+}
+
 // deliverOnto builds the rt_sigframe for sig on c's stack (or the alternate
 // stack) and points c at the handler. uc_mask is the mask sigreturn restores.
 fn deliverOnto(c: *Ctx, sig: u32, info: *const Info, act: Act, uc_mask: u64, is_fault: bool) void {
     const t = thr();
+    if (rseqAbort(t, A.ctxPc(c))) |a| A.setPc(c, a);
     var sp = A.sp(c);
     const on = onStack(t, sp);
     const ss_sp = t.ss_sp;

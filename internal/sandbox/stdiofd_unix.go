@@ -75,7 +75,7 @@ func (g *dguest) clearTraced() {}
 
 func (g *dguest) stdioMask() uint64 {
 	var m uint64
-	if g.ps.cpus.Load() != hostCPUMask() {
+	if g.ps.cpus.Load() != hostCPUMask() || g.vcpu != 0 {
 		m |= stdioAffinity
 	}
 	if g.traced.Load() {

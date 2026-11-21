@@ -756,6 +756,7 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 
 		default:
 			if h, ok := handler(gnr); ok && generic {
+				g.moveRseq()
 				ch.page.ret = uint64(g.fromGeneric(nr, a, h(g, ga)))
 				if cfg.Trace != nil {
 					fmt.Fprintf(cfg.Trace, "[pid %d]   -> ret=%#x\n", g.pid, ch.page.ret)

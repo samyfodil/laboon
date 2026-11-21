@@ -36,6 +36,7 @@ import (
 // the exit statuses wait4 reaps). A fork adds a process here; an exit records
 // its status. The one mutex guards all of it — both are low-frequency.
 type dfs struct {
+	vcpus     vcpuSet         // darwin, windows: the CPUs threads' rseq areas name (lx_rseq.go)
 	hostFS    hostfs.HostFS   // platform host ops the overlay's HostDirFS layers run on
 	rootFS    core.FileSystem // Config.RootFS: the guest root as a backend, "" rootAbs — any FileSystem, no host path behind it
 	rootAbs   string          // cleaned absolute Config.Root (lower layer), "" if none
@@ -659,7 +660,8 @@ type dguest struct {
 	isThread bool // created by clone(CLONE_VM): its exit (nr 93) retires only this slot
 	slotHeld bool // it led a process that outlived it, which keeps its slot (leaderExited)
 
-	rseqReg  [3]uint64 // the thread's registered rseq area, length and signature (Linux)
+	rseqReg  [3]uint64 // the thread's registered rseq area, length and signature
+	vcpu     int       // darwin, windows: the CPU its rseq area names + 1, 0 for none (lx_rseq.go)
 	forkTid  int       // a fork child's host pid, before its stub reports it (Linux)
 	forkMask []byte    // the forking thread's CPU affinity, for a fork child's first thread (Linux)
 
@@ -956,6 +958,7 @@ func (g *dguest) child(ch *hostChan, slot, pid int, ft *ftable) *dguest {
 func (g *dguest) fork(ch *hostChan, slot, pid int) *dguest {
 	c := g.child(ch, slot, pid, g.ft.clone())
 	c.pi = g.pi.forked()
+	c.rseqReg = g.rseqReg
 	if g.pfs != nil {
 		c.pfs = g.pfs.clone()
 	}
@@ -965,6 +968,7 @@ func (g *dguest) fork(ch *hostChan, slot, pid int) *dguest {
 // release drops this guest's reference to its fd table; the last thread out of
 // a shared table closes every fd it still holds (pipe ends, open files).
 func (g *dguest) release() {
+	g.dropVcpu()
 	if g.mp != nil {
 		g.mp.release(g)
 	}

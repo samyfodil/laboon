@@ -16,7 +16,8 @@ const stdioSinglestep = uint64(1) << 62
 // stub/macos/stub.zig and stub/macos/vmm.zig.
 const stdioSeccomp = uint64(1) << 61
 
-// stdioAffinity marks a slot whose process's affinity mask leaves out a CPU:
+// stdioAffinity marks a slot whose thread holds an rseq CPU (lx_rseq.go), or
+// whose process's affinity mask leaves out a CPU:
 // the darwin stub, which otherwise reports the host CPU it runs on, asks the
 // supervisor for getcpu, as that CPU may be outside the mask. Mirrors
 // STDIO_AFFINITY in stub/macos/stub.zig.
