@@ -146,6 +146,7 @@ type dnet struct {
 	dnsPort   map[[2]int][]byte      // {family, sender port} -> server sockaddr
 	dnsTCP    net.Listener           // DNS over TCP, started on first use
 	lent      map[[2]uint64]lent     // descriptions in flight over SCM_RIGHTS, by token
+	seqs      map[uint64]*seqPair    // seqpacket pairs on their way to an acceptor, by token (seqConnect)
 
 	vports  map[vkey]*vport              // vnet: stream endpoint reservations by (scope, ip, port)
 	vudps   map[vkey]*vport              // vnet: datagram endpoint reservations
@@ -163,7 +164,7 @@ type dnet struct {
 
 func (g *dguest) netState() *dnet {
 	g.dfs.netOnce.Do(func() {
-		n := &dnet{eg: newEgress(g.cfg), names: map[string][]byte{}, conns: map[string]*credLink{}, dnsFrom: map[string]int{}, dnsPort: map[[2]int][]byte{}, lent: map[[2]uint64]lent{}, vports: map[vkey]*vport{}, vudps: map[vkey]*vport{}, vconns: map[string]vconn{}, vEphem: 32768, ipNetns: map[uint32]int32{}}
+		n := &dnet{eg: newEgress(g.cfg), names: map[string][]byte{}, conns: map[string]*credLink{}, dnsFrom: map[string]int{}, dnsPort: map[[2]int][]byte{}, lent: map[[2]uint64]lent{}, seqs: map[uint64]*seqPair{}, vports: map[vkey]*vport{}, vudps: map[vkey]*vport{}, vconns: map[string]vconn{}, vEphem: 32768, ipNetns: map[uint32]int32{}}
 		if dir, err := os.MkdirTemp("/tmp", netTmpPrefix()); err == nil {
 			n.dir = dir
 		}
@@ -295,7 +296,11 @@ func (g *dguest) socket(family, typ, proto int) int64 {
 		d.sk.netns = g.ps.netns.Load()
 		return g.installSock(d, flags)
 	}
-	fd, err := unix.Socket(dw, base, proto)
+	hbase := base
+	if family == lxAFUnix && base == lxSockSeqpacket && !hostSeqpacket {
+		hbase = unix.SOCK_STREAM // until it connects (seqConnect)
+	}
+	fd, err := unix.Socket(dw, hbase, proto)
 	if err != nil {
 		return sErr(osErrno(err))
 	}
@@ -737,6 +742,13 @@ func (g *dguest) accept4(fd int64, addr, lenAddr uint64, flags int) int64 {
 			d.sk.mu.Lock()
 			nd.sk.name = d.sk.name
 			d.sk.mu.Unlock()
+			if d.sk.typ == lxSockSeqpacket && !hostSeqpacket {
+				if e := g.seqAccept(nd); e != 0 {
+					nd.refs.Add(1)
+					nd.unref()
+					return sErr(e)
+				}
+			}
 		} else {
 			peer = linuxSockaddr(sa)
 		}
@@ -816,6 +828,11 @@ func (g *dguest) connect(fd int64, addr, addrlen uint64) int64 {
 		}
 		if err != nil {
 			return sErr(osErrno(err))
+		}
+		if sk.typ == lxSockSeqpacket && !hostSeqpacket {
+			if e := g.seqConnect(d); e != 0 {
+				return sErr(e)
+			}
 		}
 		sk.mu.Lock()
 		sk.peer = canon

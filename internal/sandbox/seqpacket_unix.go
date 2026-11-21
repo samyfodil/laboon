@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"os"
 	"runtime"
 	"sync"
 
@@ -112,4 +113,95 @@ func (p *seqPair) release(side int) {
 		return
 	}
 	p.end(side)
+}
+
+// A SOCK_SEQPACKET socket from socket() on such a host is a host stream
+// socket until it connects, so binding, listening, fchmod and a name in the
+// filesystem behave as on Linux. A connect makes a seqPair: its other end goes
+// to the acceptor over the stream along with a token naming the pair, and each
+// side's stream is replaced by its end of the pair.
+
+func (g *dguest) seqConnect(d *dfile) lxErrno {
+	sp, fds, err := newSeqPair()
+	if err != nil {
+		return osErrno(err)
+	}
+	n := g.netState()
+	n.mu.Lock()
+	n.seq++
+	tok := uint64(n.seq)
+	n.seqs[tok] = sp
+	n.mu.Unlock()
+	var b [8]byte
+	put64(b[:], tok)
+	h := hostFd(d.f)
+	err = unix.Sendmsg(h, b[:], unix.UnixRights(fds[1]), nil, 0)
+	unix.Close(fds[1])
+	if err != nil {
+		unix.Close(fds[0])
+		n.mu.Lock()
+		delete(n.seqs, tok)
+		n.mu.Unlock()
+		sp.release(0)
+		sp.release(1)
+		return osErrno(err)
+	}
+	seqAdopt(d, fds[0])
+	d.sk.mu.Lock()
+	d.sk.sp, d.sk.side = sp, 0
+	d.sk.mu.Unlock()
+	return 0
+}
+
+func (g *dguest) seqAccept(d *dfile) lxErrno {
+	h := hostFd(d.f)
+	var b [8]byte
+	oob := make([]byte, unix.CmsgSpace(4))
+	var got, oobn int
+	var err error
+	for {
+		got, oobn, _, _, err = unix.Recvmsg(h, b[:], oob, 0)
+		if err == unix.EAGAIN {
+			unix.Poll([]unix.PollFd{{Fd: int32(h), Events: unix.POLLIN}}, -1)
+			continue
+		}
+		if err != unix.EINTR {
+			break
+		}
+	}
+	if err != nil || got != len(b) {
+		return lxECONNABORTED
+	}
+	msgs, err := unix.ParseSocketControlMessage(oob[:oobn])
+	if err != nil || len(msgs) != 1 {
+		return lxECONNABORTED
+	}
+	fds, err := unix.ParseUnixRights(&msgs[0])
+	if err != nil || len(fds) != 1 {
+		return lxECONNABORTED
+	}
+	n := g.netState()
+	n.mu.Lock()
+	sp := n.seqs[le64(b[:])]
+	delete(n.seqs, le64(b[:]))
+	n.mu.Unlock()
+	if sp == nil {
+		unix.Close(fds[0])
+		return lxECONNABORTED
+	}
+	seqAdopt(d, fds[0])
+	d.sk.mu.Lock()
+	d.sk.sp, d.sk.side = sp, 1
+	d.sk.mu.Unlock()
+	return 0
+}
+
+// seqAdopt puts the pair's datagram socket dfd behind d in place of its stream.
+func seqAdopt(d *dfile, dfd int) {
+	unix.CloseOnExec(dfd)
+	unix.SetNonblock(dfd, true)
+	sockNoSigpipe(dfd)
+	unix.SetsockoptInt(dfd, unix.SOL_SOCKET, unix.SO_SNDBUF, 256<<10)
+	unix.SetsockoptInt(dfd, unix.SOL_SOCKET, unix.SO_RCVBUF, 256<<10)
+	d.swapFile(os.NewFile(uintptr(dfd), "socket"))
 }
