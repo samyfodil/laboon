@@ -79,7 +79,7 @@ func (g *dguest) epollCtl(epfd int64, op int64, fd int64, evAddr uint64) int64 {
 		if err != nil {
 			return sErr(lxEFAULT)
 		}
-		events, data = le32(b), le64(b[8:])
+		events, data = le32(b), le64(b[epollEventSize-8:])
 	}
 
 	ep.mu.Lock()
@@ -279,7 +279,7 @@ func (ep *epoll) encode(evs []pendEv) []byte {
 	for _, p := range evs {
 		var b [epollEventSize]byte
 		put32(b[:], p.ev)
-		put64(b[8:], ep.interest[p.gfd].data)
+		put64(b[epollEventSize-8:], ep.interest[p.gfd].data)
 		out = append(out, b[:]...)
 	}
 	return out

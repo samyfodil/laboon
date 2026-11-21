@@ -1823,6 +1823,13 @@ const ExtInfo = extern struct {
     reusable: u32,
 };
 
+// hostRegion is Darwin's own memory inside the guest's window, which every
+// process has of its own: the shared region (a submap), at the top of an
+// x86-64 address space, and Rosetta's runtime (VM_MEMORY_ROSETTA tags).
+fn hostRegion(info: BasicInfo, ext: ExtInfo) bool {
+    return info.reserved != 0 or ext.user_tag >= 230 and ext.user_tag <= 239;
+}
+
 const Range = struct { lo: u64, hi: u64 };
 
 fn rangeLess(_: void, a: Range, b: Range) bool {
@@ -1868,7 +1875,7 @@ pub fn forkRegions(out: *std.ArrayList(ForkRegion)) bool {
             var ext: ExtInfo = undefined;
             var ecount: c_uint = @sizeOf(ExtInfo) / 4;
             if (mach_vm_region(task, &ea, &esize, VM_REGION_EXTENDED_INFO, &ext, &ecount, &obj) != 0) break;
-            if (info.inherit != VM_INHERIT_NONE) {
+            if (info.inherit != VM_INHERIT_NONE and !hostRegion(info, ext)) {
                 // A shared region stays shared even before anything is
                 // written to it; a private one never written is only a place.
                 const kind: RegionKind = if (info.inherit == VM_INHERIT_SHARE)
