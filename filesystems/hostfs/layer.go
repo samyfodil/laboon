@@ -136,8 +136,40 @@ func (l *Layer) Symlink(p, target string, mode uint32) error {
 	if err := l.mkparent(p); err != nil {
 		return err
 	}
+	return l.symlinkLocked(p, target)
+}
+
+// symlinkLocked makes p a symlink to target: a host symlink, or where the host
+// has none a placeholder file holding the target, typed in the override map.
+func (l *Layer) symlinkLocked(p, target string) error {
 	os.Remove(l.host(p))
-	return os.Symlink(target, l.host(p))
+	if hostSymlinks {
+		if o := l.over[clean(p)]; o != nil {
+			o.Special, o.Kind, o.Rdev = false, 0, 0
+			l.gc(p)
+		}
+		return os.Symlink(target, l.host(p))
+	}
+	if err := os.WriteFile(l.host(p), []byte(target), 0o600); err != nil {
+		return err
+	}
+	l.markSymlinkLocked(p)
+	return nil
+}
+
+// isSymlink reports whether the placeholder at p is a symlink.
+func (l *Layer) isSymlink(p string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	o := l.over[clean(p)]
+	return o != nil && o.Special && o.Kind == core.Symlink
+}
+
+// markSymlinkLocked types the placeholder at p, which holds a target, as a
+// symlink.
+func (l *Layer) markSymlinkLocked(p string) {
+	o := l.ov(p)
+	o.Special, o.Kind, o.Rdev, o.Mode, o.HasMode = true, core.Symlink, 0, 0, false
 }
 
 // Hardlink adds the name newp for the file already at oldp (a host hardlink, so
@@ -247,7 +279,7 @@ func (l *Layer) recordMode(p string, mode uint32, dir bool) {
 	hm := core.HostMode(mode, dir)
 	os.Chmod(l.host(p), hm)
 	p = clean(p)
-	if uint32(hm)&0o7777 == mode&0o7777 {
+	if hostModes && uint32(hm)&0o7777 == mode&0o7777 {
 		if o := l.over[p]; o != nil {
 			o.HasMode = false
 			l.gc(p)
@@ -307,7 +339,7 @@ func (l *Layer) SetModeAll(mode uint32) {
 			return nil
 		}
 		name := filepath.ToSlash(rel)
-		if core.Internal(path.Base(name)) || d.Type()&os.ModeSymlink != 0 {
+		if core.Internal(path.Base(name)) || d.Type()&os.ModeSymlink != 0 || l.isSymlink(name) {
 			return nil // markers/sidecar, and symlinks carry no mode
 		}
 		l.SetMode(name, mode)
@@ -352,6 +384,12 @@ func (l *Layer) attrLocked(p string, fi os.FileInfo) core.Attr {
 	if o := l.over[p]; o != nil {
 		if o.Special {
 			a.Kind, a.Rdev = o.Kind, o.Rdev
+			if o.Kind == core.Symlink {
+				a.Mode = 0o777
+				if b, err := os.ReadFile(l.host(p)); err == nil {
+					a.Target = string(b)
+				}
+			}
 		}
 		if o.HasMode {
 			a.Mode = o.Mode
@@ -380,8 +418,10 @@ func (l *Layer) adopt(src *Layer, p string, a core.Attr) error {
 			return err
 		}
 	case a.Kind == core.Symlink:
-		os.Remove(l.host(p))
-		if err := os.Symlink(a.Target, l.host(p)); err != nil {
+		l.mu.Lock()
+		err := l.symlinkLocked(p, a.Target)
+		l.mu.Unlock()
+		if err != nil {
 			return err
 		}
 	case a.Kind >= core.Fifo: // a special node placeholder

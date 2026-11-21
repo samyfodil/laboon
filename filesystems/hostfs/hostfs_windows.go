@@ -700,6 +700,17 @@ func (fs *WinFS) mkTyped(p string, mode uint32, data []byte) error {
 	return nil
 }
 
+// hTypeSymlink types the existing file p, which holds a symlink's target, as
+// that symlink.
+func (fs *WinFS) hTypeSymlink(p string) error {
+	k, _, err := keyOf(p)
+	if err != nil {
+		return err
+	}
+	metaSet(k, lxSIFLNK|0o777)
+	return nil
+}
+
 func (fs *WinFS) hSymlink(target, p string) error {
 	return fs.mkTyped(p, lxSIFLNK|0o777, []byte(target))
 }

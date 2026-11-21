@@ -20,3 +20,14 @@ func fileIdent(_ string, fi os.FileInfo) (id uint64, nlink uint64, ok bool) {
 func pathDevIno(_ string, fi os.FileInfo) (dev, ino uint64) {
 	return HostDevIno(fi)
 }
+
+// hostSymlinks reports that a layer holds a symlink as a host symlink, and
+// hostModes that a layer file holds its permission bits.
+const (
+	hostSymlinks = true
+	hostModes    = true
+)
+
+// hostTyped is the guest mode, type bits included, the host keeps for hp
+// beside the file itself; a unix host file carries its own.
+func hostTyped(string) (uint32, bool) { return 0, false }

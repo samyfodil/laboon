@@ -40,9 +40,9 @@ func LayerFromDir(dir string) (*Layer, error) {
 // layer's files, directories and symlinks and removes the paths its whiteouts
 // delete, so root accumulates the layers applied to it across build steps.
 func (l *Layer) ApplyTo(root string) error {
-	// root carries a sidecar of its own for the guest owners the host files cannot
-	// hold (an unprivileged supervisor cannot chown): a later build step reads it
-	// back and a non-OCI run hydrates it. Modes ride on the host files themselves.
+	// root carries a sidecar of its own for the guest owners and modes the host
+	// files cannot hold (an unprivileged supervisor cannot chown; NTFS has no
+	// modes): a later build step reads it back and a non-OCI run hydrates it.
 	dst, err := NewLayer(root)
 	if err != nil {
 		return err
@@ -118,7 +118,7 @@ func (l *Layer) ApplyTo(root string) error {
 				}
 			}
 		}
-		l.carryOwner(dst, name)
+		l.carryMeta(dst, name)
 		return nil
 	})
 	if err != nil {
@@ -127,26 +127,21 @@ func (l *Layer) ApplyTo(root string) error {
 	return dst.SaveMeta()
 }
 
-// carryOwner copies a non-root guest owner recorded for name in l into dst's
-// metadata, so it survives materialization (the host file cannot hold it).
-func (l *Layer) carryOwner(dst *Layer, name string) {
+// carryMeta copies what l records for name into dst's metadata, so it survives
+// materialization where the host file cannot hold it: an owner other than the
+// supervisor's, a mode below the owner floor or on a host with no POSIX modes,
+// and a special node's or placeholder symlink's kind.
+func (l *Layer) carryMeta(dst *Layer, name string) {
 	cp := clean(name)
 	l.mu.Lock()
-	o := l.over[cp]
-	var uid, gid uint32
-	has := o != nil && o.HasOwner
-	if has {
-		uid, gid = o.Uid, o.Gid
+	var o core.Override
+	if p := l.over[cp]; p != nil {
+		o = *p
 	}
 	l.mu.Unlock()
 	dst.mu.Lock()
-	if has {
-		m := dst.ov(cp)
-		m.Uid, m.Gid, m.HasOwner = uid, gid, true
-	} else if m := dst.over[cp]; m != nil {
-		m.Uid, m.Gid, m.HasOwner = 0, 0, false
-		dst.gc(cp)
-	}
+	*dst.ov(cp) = o
+	dst.gc(cp)
 	dst.mu.Unlock()
 }
 

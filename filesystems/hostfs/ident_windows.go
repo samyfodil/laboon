@@ -24,3 +24,23 @@ func pathDevIno(hp string, _ os.FileInfo) (dev, ino uint64) {
 	}
 	return uint64(k.vol), k.id
 }
+
+// hostSymlinks reports that a layer holds a symlink as a host symlink, and
+// hostModes that a layer file holds its permission bits. NTFS links need a
+// privilege and are not Linux symlinks, so a layer here keeps a placeholder
+// file holding the target, typed in its metadata; NTFS has no modes, so every
+// mode is metadata too.
+const (
+	hostSymlinks = false
+	hostModes    = false
+)
+
+// hostTyped is the guest mode, type bits included, WinFS keeps for hp in its
+// side table: a symlink, fifo or socket it made, or a mode it was given.
+func hostTyped(hp string) (uint32, bool) {
+	k, _, err := keyOf(hp)
+	if err != nil {
+		return 0, false
+	}
+	return metaGet(k)
+}

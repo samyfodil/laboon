@@ -527,11 +527,21 @@ func (f *HostDirFS) LoadSidecar() {
 		return
 	}
 	core.DecodeMeta(b, func(p string, o core.Override) {
+		if o.Special && o.Kind == core.Symlink {
+			// A placeholder holding a symlink's target, where the host keeps no
+			// symlinks: the host backend types it, and serves it as one.
+			t, ok := f.h.(interface{ hTypeSymlink(string) error })
+			if ok && t.hTypeSymlink(f.hp(p)) == nil {
+				o.Special, o.Kind = false, 0
+			}
+		}
 		n, err := f.node(p)
 		if err != nil {
 			return
 		}
-		f.meta.Update(n.ID(), func(d *core.Override) { *d = o })
+		if o.HasMode || o.HasOwner || o.Special {
+			f.meta.Update(n.ID(), func(d *core.Override) { *d = o })
+		}
 	})
 }
 
@@ -560,7 +570,24 @@ func (l *Layer) Persist(store *core.MetaStore) error {
 		gp := "/" + filepath.ToSlash(rel)
 		dev, ino := pathDevIno(hp, fi)
 		o, ok := store.Get(core.NodeID{Dev: dev, Ino: ino})
-		if fi.Mode()&os.ModeNamedPipe != 0 {
+		if t, typed := hostTyped(hp); typed && !(ok && o.Special) {
+			perm := t & 0o7777
+			if ok && o.HasMode {
+				perm = o.Mode
+			}
+			switch t & 0o170000 {
+			case 0o120000:
+				l.mu.Lock()
+				l.markSymlinkLocked(gp)
+				l.mu.Unlock()
+			case 0o010000:
+				l.Special(gp, core.Fifo, 0, perm)
+			case 0o140000:
+				l.Special(gp, core.Socket, 0, perm)
+			default:
+				l.SetMode(gp, perm)
+			}
+		} else if fi.Mode()&os.ModeNamedPipe != 0 {
 			perm := uint32(fi.Mode().Perm())
 			if ok && o.HasMode {
 				perm = o.Mode

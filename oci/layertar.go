@@ -110,8 +110,10 @@ func ReadTar(r io.Reader, dir string) (*hostfs.Layer, error) {
 		kind            core.Kind
 		special, setmod bool
 		rdev            uint64
+		link            string // a symlink's target
 	}
 	var metas []meta
+	links := map[string]string{} // symlinks made after extraction, by name
 	tr := tar.NewReader(r)
 	for {
 		hdr, err := tr.Next()
@@ -139,14 +141,18 @@ func ReadTar(r io.Reader, dir string) (*hostfs.Layer, error) {
 			}
 			m.setmod = true
 		case tar.TypeSymlink:
+			// Made through the layer below, as the host keeps symlinks.
 			root.Remove(name)
-			if err := root.Symlink(hdr.Linkname, name); err != nil {
-				root.Close()
-				return nil, err
-			}
+			m.link = hdr.Linkname
+			links[name] = hdr.Linkname
 		case tar.TypeLink:
 			root.Remove(name)
 			ln, _ := clean(hdr.Linkname)
+			if t, ok := links[ln]; ok {
+				m.link = t // a hard link to a symlink is that symlink again
+				links[name] = t
+				break
+			}
 			if err := root.Link(ln, name); err != nil {
 				root.Close()
 				return nil, err
@@ -199,6 +205,10 @@ func ReadTar(r io.Reader, dir string) (*hostfs.Layer, error) {
 	}
 	for _, m := range metas {
 		switch {
+		case m.link != "":
+			if err := l.Symlink(m.name, m.link, 0o777); err != nil {
+				return nil, err
+			}
 		case m.special:
 			l.Special(m.name, m.kind, m.rdev, m.mode)
 		case m.setmod:
