@@ -451,7 +451,7 @@ fn serve(nr: u64, a: [*]const u64) ?u64 {
 // and the supervisor's own host calls.
 pub const OUT_TAG: u64 = 2 << 62;
 const MAX_RW: u64 = 0x7ffff000;
-const EP_EVENT: u64 = 16;
+const EP_EVENT: u64 = if (X86) 12 else 16; // x86-64's struct epoll_event is packed
 var wgen = std.atomic.Value(u64).init(0);
 threadlocal var w_lo: u64 = 0;
 threadlocal var w_hi: u64 = 0;

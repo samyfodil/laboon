@@ -563,6 +563,9 @@ fn x64gen(nr: u64) u64 {
         309 => 168, // getcpu
         324 => 283, // membarrier
         281 => 22, // epoll_pwait
+        232 => 22, // epoll_wait: epoll_pwait's leading arguments, measured alike
+        441 => 441, // epoll_pwait2
+        327 => 286, // preadv2
         202 => 98, // futex
         60 => 93, // exit
         218 => 96, // set_tid_address
