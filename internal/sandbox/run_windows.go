@@ -294,16 +294,31 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 	w.exitEntry = pg.args[5]
 	reported := pg.args
 
+	// A base drawn where the host already has something close below (its own
+	// allocations go anywhere in the low terabyte under high-entropy ASLR) is
+	// drawn again: the mmap area would start past the host's region instead,
+	// the same place for every draw above it, and not where the program is.
 	lay := drawWinLayout(dg)
+	for i := 0; i < 8 && !lay.legacy && sp.freeDown(lay.mmapBase) < mmapAreaRoom; i++ {
+		lay = drawWinLayout(dg)
+	}
 	img, err := w.loadELF(src, lay.exe)
 	if err != nil {
 		return w, err
 	}
 	edge := lay.mmapBase
-	w.brkAt = img.hi + lay.brkGap
 	if img.base != 0 && img.interp == "" {
 		edge = sp.mmapPlace(img, edge, lay.legacy)
 		w.brkAt = lay.exe + lay.brkGap
+	} else {
+		// Where the host has something at the drawn place, a relocatable
+		// program goes to the nearest free span above.
+		if size := img.hi - img.lo; img.base != 0 && sp.freeAt(img.lo, size) < size {
+			if lo := sp.freeAbove(img.lo, size); lo != 0 {
+				img.relocate(lo - img.lo)
+			}
+		}
+		w.brkAt = img.hi + lay.brkGap
 	}
 	// A dynamic program starts in its interpreter (ld-musl), which the
 	// supervisor loads beside it, as the kernel does; the interpreter maps the
@@ -389,7 +404,7 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 	if lay.legacy {
 		edge |= 1
 	}
-	pg.args = [6]uint64{entry, gsp, top, edge, w.brkAt, w.brkAt + brkMax}
+	pg.args = [6]uint64{entry, gsp, top, edge, w.brkAt, w.brkEnd}
 	ch.reply(repStart)
 	return w, nil
 }
@@ -409,6 +424,7 @@ type wguest struct {
 	exitEntry uint64
 	segs      []mapEnt   // the images' segments, as hostMaps reports them
 	brkAt     uint64     // the brk area, drawn per execve
+	brkEnd    uint64     // its end: brkMax past it, or where the host has something
 	anon      anonCode   // what is known of its code made executable at run time (anoncode.go)
 	link      *winLink   // its stub's service thread, for the shared-code registry (codereg_windows.go)
 	traps     *codeTraps // where the rewriter left traps in its file code (traps_windows.go)
@@ -648,6 +664,37 @@ func (s *stubProc) freeAbove(lo, size uint64) uint64 {
 	return at
 }
 
+// mmapAreaRoom is the free room a top-down mmap area wants below its base:
+// the stub's first area (AREA_MIN, stub/windows/mem.zig) and a program.
+const mmapAreaRoom = 1<<30 + 256<<20
+
+// freeDown reports how far the free run holding the page below top reaches
+// down from top.
+func (s *stubProc) freeDown(top uint64) uint64 {
+	var n uint64
+	s.freeRuns(func(lo, hi uint64) bool {
+		if lo < top && top <= hi {
+			n = top - lo
+		}
+		return hi < top
+	})
+	return n
+}
+
+// freeAt reports how much of the size bytes at lo are free, in the host's
+// allocation granularity.
+func (s *stubProc) freeAt(lo, size uint64) uint64 {
+	var mbi windows.MemoryBasicInformation
+	if windows.VirtualQueryEx(s.proc, uintptr(lo), &mbi, unsafe.Sizeof(mbi)) != nil || mbi.State != memFree {
+		return 0
+	}
+	end := (uint64(mbi.BaseAddress) + uint64(mbi.RegionSize)) &^ (allocGran - 1)
+	if end <= lo {
+		return 0
+	}
+	return min(size, end-lo)
+}
+
 // freeRuns calls f with each free run of the stub's address space, lowest
 // first, in the host's allocation granularity, until f returns false. A query
 // reports a free run from the page asked about up, so the walk goes up.
@@ -844,15 +891,19 @@ func (g *wguest) mapImage(img *wimage, brk bool) error {
 	// After the program's image, past a gap, the brk area the stub commits
 	// as the break grows.
 	if brk {
+		g.brkEnd = g.brkAt + brkMax
 		_, err := g.sp.reserve(g.brkAt, brkMax)
-		if err != nil && g.brkAt != img.hi+brkGap {
-			// The randomized place is taken: the area goes right past the
-			// image, as unrandomized.
-			g.brkAt = img.hi + brkGap
-			_, err = g.sp.reserve(g.brkAt, brkMax)
-		}
 		if err != nil {
-			return fmt.Errorf("brk area at %#x: %w", g.brkAt, err)
+			// The randomized place is taken: the area goes right past the
+			// image, as unrandomized, and as on Linux the break stops short of
+			// whatever the host has above it.
+			g.brkAt = img.hi + brkGap
+			g.brkEnd = g.brkAt + g.sp.freeAt(g.brkAt, brkMax)
+			if g.brkEnd > g.brkAt {
+				if _, err := g.sp.reserve(g.brkAt, g.brkEnd-g.brkAt); err != nil {
+					return fmt.Errorf("brk area at %#x: %w", g.brkAt, err)
+				}
+			}
 		}
 	}
 	if img.view != nil {
