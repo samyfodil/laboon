@@ -139,13 +139,22 @@ func winSetThread(sr *sigRun, tid int, h windows.Handle, owns bool, st *winStub)
 }
 
 // winRegisterThread opens a clone or fork child's OS thread by the id it
-// reported, so a signal can reach it.
+// reported, so a signal can reach it. One whose process a job-control stop
+// already holds is held too before it runs guest code: the stop was reported
+// as in effect.
 func winRegisterThread(sr *sigRun, tid int, osTid uint32, st *winStub) {
 	h, err := windows.OpenThread(threadAccess, false, osTid)
 	if err != nil {
 		return
 	}
 	winSetThread(sr, tid, h, true, st)
+	if t := sr.thread(tid); t != nil {
+		if _, stopped := sr.jobStop(t.tgid); stopped {
+			if p := sr.proc(t.tgid); p != nil {
+				sr.hostStopThread(p, t)
+			}
+		}
+	}
 }
 
 func winUnregisterThread(sr *sigRun, tid int) {
