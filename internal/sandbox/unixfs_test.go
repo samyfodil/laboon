@@ -17,7 +17,7 @@ import (
 // sockets) and under /dev, and in a directory whose host path overruns
 // sun_path.
 func TestUnixSocketFS(t *testing.T) {
-	bin := guestBin(t, "unixfs")
+	bin := guestPath(t, "unixfs")
 	b, err := os.ReadFile(bin)
 	if err != nil {
 		t.Fatal(err)

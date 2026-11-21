@@ -1,8 +1,7 @@
-//go:build darwin
-
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -13,13 +12,11 @@ import (
 
 // TestRunTmpIsolated runs two guests in one supervisor and has the second
 // open the first one's channel and path files with raw Darwin syscalls
-// (sbescape.elf): each run's stubs may read only their own temp directory.
-// LC_TEST_ROOT names a rootfs with /bin/busybox and /sbescape.elf.
+// (testdata/sbescape_arm64.c): each run's stubs may read only their own temp
+// directory.
 func TestRunTmpIsolated(t *testing.T) {
-	root := os.Getenv("LC_TEST_ROOT")
-	if root == "" {
-		t.Skip("LC_TEST_ROOT unset")
-	}
+	root := busyboxRoot(t)
+	probe := addGuest(t, root, "sbescape_arm64")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -49,7 +46,7 @@ func TestRunTmpIsolated(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		code, err := Run(context.Background(), "/sbescape.elf", Config{
+		code, err := Run(context.Background(), probe, Config{
 			RootFS: HostRoot(root), Args: []string{"sbescape", target}, Stdout: f, Stderr: f,
 		})
 		f.Close()
@@ -60,4 +57,16 @@ func TestRunTmpIsolated(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// TestSeatbeltContains: guest code issuing raw Darwin syscalls, which the
+// rewriter leaves alone, meets the stub's Seatbelt profile and is denied
+// everything a stub does not do (testdata/sbescape_arm64.c).
+func TestSeatbeltContains(t *testing.T) {
+	root, probe := guestRoot(t, "sbescape_arm64")
+	var o bytes.Buffer
+	code, err := Run(context.Background(), probe, Config{RootFS: HostRoot(root), Args: []string{"sbescape"}, Stdout: &o, Stderr: &o})
+	if err != nil || code != 0 || !strings.HasSuffix(o.String(), "PASS\n") {
+		t.Fatalf("code=%d err=%v\n%s", code, err, o.String())
+	}
 }

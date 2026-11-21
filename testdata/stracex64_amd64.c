@@ -1,4 +1,4 @@
-// stracex64.c -- the x86-64 counterpart of stracearm.c: trace a child to a
+// stracex64_amd64.c -- the x86-64 counterpart of stracearm_arm64.c: trace a child to a
 // distinctive write(42) syscall and read its registers with
 // PTRACE_GETREGSET(NT_PRSTATUS), checking the syscall number (write = 1) and
 // the fd argument came through. Covers the syscall-entry stop, register

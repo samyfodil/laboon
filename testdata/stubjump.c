@@ -3,7 +3,7 @@
 // supervisor would mediate: here an mmap the supervisor never sees. The
 // stub's guest-thread filter admits none, so the kernel kills the process.
 // With "signal pid", it sends the stub's kick signal to a process outside the
-// sandbox instead, which Landlock's signal scope refuses.
+// sandbox instead, which the filter admits only to the stub's own process.
 #include <elf.h>
 #include <stdint.h>
 #include <signal.h>
@@ -75,8 +75,9 @@ int main(int argc, char **argv) {
     fflush(stdout);
     if (argc > 2 && strcmp(argv[1], "signal") == 0) {
         long pid = atol(argv[2]);
-        printf("tgkill %ld\n", call_gadget(g, SYS_tgkill, pid, pid, SIGURG, 0, 0, 0));
-        return 0;
+        long r = call_gadget(g, SYS_tgkill, pid, pid, SIGURG, 0, 0, 0);
+        printf("ESCAPED: tgkill of pid %ld through the stub returned %ld\n", pid, r);
+        return 1;
     }
     long r = call_gadget(g, SYS_mmap, 0, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     printf("ESCAPED: mmap through the stub returned %#lx\n", r);

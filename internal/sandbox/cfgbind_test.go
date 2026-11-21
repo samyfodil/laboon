@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,10 +15,7 @@ import (
 // A Config.Mounts host-directory bind must expose the host subtree at the guest
 // path, read and write, confined to the subtree.
 func TestMountFileBind(t *testing.T) {
-	exe := filepath.Join(t.TempDir(), "cfgbind")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/cfgbind.c").CombinedOutput(); err != nil {
-		t.Skipf("static gcc unavailable: %v\n%s", err, b)
-	}
+	root, exe := guestRoot(t, "cfgbind")
 	host := t.TempDir()
 	if err := os.WriteFile(filepath.Join(host, "hello"), []byte("laboon-bind"), 0o644); err != nil {
 		t.Fatal(err)
@@ -29,7 +25,7 @@ func TestMountFileBind(t *testing.T) {
 	var out bytes.Buffer
 	code, err := Run(ctx, exe, Config{
 		Args:   []string{exe},
-		RootFS: HostRoot("/"),
+		RootFS: HostRoot(root),
 		Mounts: []Mount{{Guest: "/laboonbind", FS: hostfs.Dir(host)}},
 		Stdout: &out, Stderr: &out,
 	})

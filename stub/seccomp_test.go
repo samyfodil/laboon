@@ -43,9 +43,9 @@ var filterArches = []filterArch{
 		// read write writev mmap mprotect munmap mremap madvise getpid gettid
 		// futex rt_sigreturn rt_sigprocmask arch_prctl exit exit_group sigaltstack
 		// msync mincore clock_gettime clock_getres gettimeofday getrusage getcpu
-		// rseq restart_syscall
+		// rseq restart_syscall membarrier set_tid_address
 		allowed: []uint32{0, 1, 20, 9, 10, 11, 25, 28, 39, 186, 202, 15, 14, 158, 60, 231, 131,
-			26, 27, 228, 229, 96, 98, 309, 334, 219},
+			26, 27, 228, 229, 96, 98, 309, 334, 219, 324, 218},
 		// getpid gettid futex rt_sigreturn rt_sigprocmask arch_prctl exit
 		// exit_group sigaltstack clock_gettime clock_getres gettimeofday
 		// getrusage getcpu rseq restart_syscall
@@ -58,9 +58,9 @@ var filterArches = []filterArch{
 		// read write writev mmap mprotect munmap mremap madvise getpid gettid
 		// futex rt_sigreturn rt_sigprocmask exit exit_group sigaltstack
 		// msync mincore clock_gettime clock_getres gettimeofday getrusage getcpu
-		// rseq restart_syscall
+		// rseq restart_syscall membarrier set_tid_address
 		allowed: []uint32{63, 64, 66, 222, 226, 215, 216, 233, 172, 178, 98, 139, 135, 93, 94, 132,
-			227, 232, 113, 114, 169, 165, 168, 293, 128},
+			227, 232, 113, 114, 169, 165, 168, 293, 128, 283, 96},
 		// getpid gettid futex rt_sigreturn rt_sigprocmask exit exit_group
 		// sigaltstack clock_gettime clock_getres gettimeofday getrusage getcpu
 		// rseq restart_syscall
@@ -69,8 +69,16 @@ var filterArches = []filterArch{
 	},
 }
 
+// selfPid is the pid the loaded guest policy names as its own, in place of
+// the SELF_PID mark the stub fills in with its process's when it loads it.
+const (
+	selfPidMark = 0xffff_fff0
+	selfPid     = 1234
+)
+
 // loadFilter reads a policy the stub installs behind its text-range check,
-// lc_seccomp_filter or lc_seccomp_guest_filter, from a built stub.
+// lc_seccomp_filter or lc_seccomp_guest_filter, from a built stub, as loaded
+// by process selfPid.
 func loadFilter(t *testing.T, bin, name string) *bpf.VM {
 	f, err := elf.Open(bin)
 	if err != nil {
@@ -99,12 +107,16 @@ func loadFilter(t *testing.T, bin, name string) *bpf.VM {
 	}
 	var prog []bpf.Instruction
 	for i := 0; i < len(raw); i += 8 {
-		ins := bpf.RawInstruction{
+		raw := bpf.RawInstruction{
 			Op: binary.LittleEndian.Uint16(raw[i:]),
 			Jt: raw[i+2],
 			Jf: raw[i+3],
 			K:  binary.LittleEndian.Uint32(raw[i+4:]),
-		}.Disassemble()
+		}
+		if raw.Op == 0x15 && raw.K == selfPidMark { // BPF_JMP|BPF_JEQ|BPF_K
+			raw.K = selfPid
+		}
+		ins := raw.Disassemble()
 		// The VM below reads words big-endian, so seccomp_data is encoded
 		// word by word to match; only aligned word loads keep that faithful.
 		if ld, ok := ins.(bpf.LoadAbsolute); ok && (ld.Size != 4 || ld.Off%4 != 0) {
@@ -259,8 +271,11 @@ func TestSeccompGuestFilter(t *testing.T) {
 			for _, flags := range []uint64{forkFlags, 0, threadFlags | 1<<32, threadFlags &^ 0x00010000} {
 				check(retKill, "clone", a.audit, a.clone, flags)
 			}
-			check(retAllow, "kick", a.audit, a.tgkill, 1234, 5678, sigURG)
-			check(retKill, "tgkill", a.audit, a.tgkill, 1234, 5678, 9)
+			check(retAllow, "kick", a.audit, a.tgkill, selfPid, 5678, sigURG)
+			check(retKill, "tgkill", a.audit, a.tgkill, selfPid, 5678, 9)
+			for _, pid := range []uint64{selfPid + 1, 1, selfPidMark, selfPid | 1<<32, ^uint64(0)} {
+				check(retKill, "kick another process", a.audit, a.tgkill, pid, 5678, sigURG)
+			}
 			for _, n := range a.stdio {
 				for _, fd := range []uint64{0, 1, 2} {
 					check(retAllow, "stdio", a.audit, n, fd, 0x7fff0000, 8)

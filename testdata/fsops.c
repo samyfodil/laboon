@@ -1,3 +1,4 @@
+// libc: musl
 // Filesystem and misc syscalls a guest expects; each failed check prints a
 // FAIL line, and the last line is "done fails=N". Runs with / as the root.
 #define _GNU_SOURCE

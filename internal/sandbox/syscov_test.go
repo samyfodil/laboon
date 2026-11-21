@@ -3,8 +3,6 @@ package sandbox
 import (
 	"bytes"
 	"context"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,14 +15,11 @@ import (
 // on one host OS must not silently become ENOSYS on another. The macOS and
 // Windows gates run the same probe against their hosts.
 func TestSyscallCoverage(t *testing.T) {
-	exe := filepath.Join(t.TempDir(), "syscov")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/syscov.c").CombinedOutput(); err != nil {
-		t.Skipf("static gcc unavailable: %v\n%s", err, b)
-	}
+	root, exe := guestRoot(t, "syscov")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var out bytes.Buffer
-	code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot("/"), Stdout: &out, Stderr: &out})
+	code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot(root), Stdout: &out, Stderr: &out})
 	if err != nil || code != 0 {
 		t.Fatalf("probe exited code=%d err=%v\n%s", code, err, out.String())
 	}

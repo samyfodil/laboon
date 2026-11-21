@@ -31,19 +31,16 @@ func stubsOf(t *testing.T, chanPath string) []string {
 }
 
 // orphanCheck runs the calling test again as a helper supervisor whose guest
-// runs args, waits until at least want stubs share its channel file, SIGKILLs
-// it and fails unless they all exit. LC_TEST_ROOT names the rootfs.
-func orphanCheck(t *testing.T, want int, args ...string) {
-	root := os.Getenv("LC_TEST_ROOT")
-	if os.Getenv("LC_ORPHAN_HELPER") != "" {
-		Run(context.Background(), "/bin/busybox", Config{RootFS: HostRoot(root), Args: args})
+// runs testdata/<name>.c with args, waits until at least want stubs share its
+// channel file, SIGKILLs it and fails unless they all exit.
+func orphanCheck(t *testing.T, want int, name string, args ...string) {
+	if root := os.Getenv("LC_ORPHAN_ROOT"); root != "" {
+		Run(context.Background(), "/"+name, Config{RootFS: HostRoot(root), Args: append([]string{"/" + name}, args...)})
 		return
 	}
-	if root == "" {
-		t.Skip("LC_TEST_ROOT unset")
-	}
+	root, _ := guestRoot(t, name)
 	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
-	cmd.Env = append(os.Environ(), "LC_ORPHAN_HELPER=1", "LC_TEST_ROOT="+root)
+	cmd.Env = append(os.Environ(), "LC_ORPHAN_ROOT="+root)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -83,9 +80,15 @@ func orphanCheck(t *testing.T, want int, args ...string) {
 
 // TestStubsDieWithSupervisor SIGKILLs a supervisor whose guest has forked
 // children and whose stub pool is full, and expects every one of its stubs to
-// exit. LC_TEST_ROOT names a rootfs with /bin/busybox.
+// exit: the guest's, its two children's and the pool's two.
 func TestStubsDieWithSupervisor(t *testing.T) {
-	orphanCheck(t, 4, "sh", "-c", "/bin/true; /bin/true; sleep 60 & sleep 60 & wait")
+	orphanCheck(t, 5, "orphans")
+}
+
+// TestHvfStubsDieWithSupervisor is TestStubsDieWithSupervisor for a
+// position-dependent guest, whose stubs run it in the VM and have no pool.
+func TestHvfStubsDieWithSupervisor(t *testing.T) {
+	orphanCheck(t, 3, "orphans_nopie")
 }
 
 // TestSweepDead removes the temp entries of exited supervisors only.

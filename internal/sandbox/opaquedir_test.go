@@ -1,12 +1,9 @@
-//go:build linux
-
 package sandbox
 
 import (
 	"bytes"
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -32,9 +29,7 @@ func TestOverlayOpaqueRecreate(t *testing.T) {
 		}
 	}
 	bin := filepath.Join(lower, "opaquedir")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/opaquedir.c").CombinedOutput(); err != nil {
-		t.Skipf("build: %v\n%s", err, b)
-	}
+	copyGuest(t, bin, "opaquedir")
 
 	var out bytes.Buffer
 	code, err := Run(context.Background(), "/opaquedir", Config{

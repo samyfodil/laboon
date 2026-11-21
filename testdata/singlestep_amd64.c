@@ -1,4 +1,5 @@
-// singlestep.c -- PTRACE_SINGLESTEP: advance the child to a syscall stop, then
+// build: -O0 -static
+// singlestep_amd64.c -- PTRACE_SINGLESTEP: advance the child to a syscall stop, then
 // single-step instruction by instruction until a one-byte step (a NOP) is seen,
 // each with a TRAP_TRACE SIGTRAP and rip advancing by one instruction. Prints
 // SINGLESTEP-OK. Stepping from a syscall stop exercises the stub's syscall-return

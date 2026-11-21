@@ -1,5 +1,3 @@
-//go:build linux || darwin
-
 package sandbox
 
 import (
@@ -17,7 +15,7 @@ import (
 // A guest path walk follows Linux semantics, on a host-directory root and on
 // an in-memory one (testdata/walkconf.c).
 func TestWalkSemantics(t *testing.T) {
-	bin := guestBin(t, "walkconf")
+	bin := guestPath(t, "walkconf")
 	b, err := os.ReadFile(bin)
 	if err != nil {
 		t.Fatal(err)

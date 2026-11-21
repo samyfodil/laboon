@@ -1,3 +1,4 @@
+// libc: musl
 // File-offset and append semantics of open regular files: separate and shared
 // descriptions, O_APPEND (open, F_SETFL, pwrite), files unlinked or replaced
 // while open, vectored I/O, /proc fdinfo, SEEK_CUR locks, stdio redirection, and

@@ -1,5 +1,3 @@
-//go:build linux || darwin
-
 package sandbox
 
 import (
@@ -17,7 +15,7 @@ import (
 // chroot confines every later path walk to the new root, on a host-directory
 // root and on an in-memory one (testdata/chrootconf.c).
 func TestChrootConfined(t *testing.T) {
-	bin := guestBin(t, "chrootconf")
+	bin := guestPath(t, "chrootconf")
 	b, err := os.ReadFile(bin)
 	if err != nil {
 		t.Fatal(err)

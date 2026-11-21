@@ -14,6 +14,6 @@ import (
 // glibc guest — which is why the matrix stages both libcs. The minimal guest
 // just writes a marker and returns 0; the crash, if present, is at exit.
 func TestGuestStartupExit(t *testing.T) {
-	exe := guestBin(t, "startup")
+	exe := guestPath(t, "startup")
 	runMmapGuest(t, exe, memfs.NewMemFS(), "STARTUP-OK")
 }

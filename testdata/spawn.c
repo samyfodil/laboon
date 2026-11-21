@@ -1,3 +1,4 @@
+// libc: musl
 /* posix_spawn, which libcs issue as clone(CLONE_VM|CLONE_VFORK) on a stack
    of the child's own. argv[1] is a program that exits 7 (hello.c). A
    missing program must fail posix_spawn itself, which glibc reports through

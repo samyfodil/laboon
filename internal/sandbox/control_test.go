@@ -4,8 +4,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -15,10 +13,7 @@ import (
 // Control.Signal must reach the guest's init process as a real signal it can
 // handle, and Control.Pid must name the running host leader.
 func TestControlSignal(t *testing.T) {
-	exe := filepath.Join(t.TempDir(), "sigwait")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/sigwait.c").CombinedOutput(); err != nil {
-		t.Skipf("static gcc unavailable: %v\n%s", err, b)
-	}
+	root, exe := guestRoot(t, "sigwait")
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -34,7 +29,7 @@ func TestControlSignal(t *testing.T) {
 	}
 	done := make(chan res, 1)
 	go func() {
-		code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot("/"), Stdout: pw, Control: ctrl})
+		code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot(root), Stdout: pw, Control: ctrl})
 		pw.Close()
 		done <- res{code, err}
 	}()

@@ -1,4 +1,4 @@
-// stracelocalx64.c -- the x86-64 counterpart of stracelocal.c: trace a child to
+// stracelocalx64_amd64.c -- the x86-64 counterpart of stracelocal_arm64.c: trace a child to
 // a syscall the sandbox serves in-guest (getrandom) rather than posting to the
 // supervisor, and confirm it still appears at a ptrace syscall-entry stop.
 // Prints LOCALTRACE-OK on success.

@@ -3,8 +3,6 @@ package sandbox
 import (
 	"bytes"
 	"context"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,14 +12,11 @@ import (
 // visible in another: a child unshares CLONE_NEWNS, mounts a tmpfs + marker, and
 // the root-namespace parent must not see it.
 func TestMountNamespaceIsolation(t *testing.T) {
-	exe := filepath.Join(t.TempDir(), "mntiso")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/mntiso.c").CombinedOutput(); err != nil {
-		t.Skipf("static gcc unavailable: %v\n%s", err, b)
-	}
+	groot, exe := guestRoot(t, "mntiso")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var out bytes.Buffer
-	code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot("/"), Stdout: &out, Stderr: &out})
+	code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot(groot), Stdout: &out, Stderr: &out})
 	s := out.String()
 	if err != nil || code != 0 || !strings.Contains(s, "MNTISO-DONE") {
 		t.Fatalf("code=%d err=%v out=%q", code, err, s)

@@ -1,5 +1,3 @@
-//go:build linux || darwin
-
 package sandbox
 
 import (
@@ -17,7 +15,7 @@ import (
 // A tmpfs is the same filesystem wherever it is mounted, on a host-directory
 // root and on an in-memory one (testdata/tmpfsany.c).
 func TestTmpfsAnywhere(t *testing.T) {
-	bin := guestBin(t, "tmpfsany")
+	bin := guestPath(t, "tmpfsany")
 	b, err := os.ReadFile(bin)
 	if err != nil {
 		t.Fatal(err)

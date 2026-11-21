@@ -3,8 +3,6 @@ package sandbox
 import (
 	"bytes"
 	"context"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,14 +13,11 @@ import (
 // IPC_RMID. Each host maps the segment its own way -- the Linux and macOS stubs
 // map a stub fd, the Windows stub a duplicated section.
 func TestShm(t *testing.T) {
-	exe := filepath.Join(t.TempDir(), "shmtest")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/shmtest.c").CombinedOutput(); err != nil {
-		t.Skipf("static gcc unavailable: %v\n%s", err, b)
-	}
+	root, exe := guestRoot(t, "shmtest")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var out bytes.Buffer
-	code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot("/"), Stdout: &out, Stderr: &out})
+	code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot(root), Stdout: &out, Stderr: &out})
 	if err != nil || code != 0 || !strings.Contains(out.String(), "SHM-OK") {
 		t.Fatalf("code=%d err=%v out=%q", code, err, out.String())
 	}

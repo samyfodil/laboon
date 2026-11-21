@@ -1,5 +1,3 @@
-//go:build linux
-
 package sandbox
 
 import (
@@ -28,12 +26,13 @@ func TestHostDirFSMountedOnRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "sub", "f"), []byte("nested"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("hello", filepath.Join(dir, "link")); err != nil {
+	// The sandbox's platform fs, as a FileSystem mounted on /. The symlink is
+	// made through it, as a guest's is: each host has its own way to hold one.
+	fsys := hostfs.Dir(dir)
+	if _, err := fsys.Create(fsys.Root(), "link", core.CreateSpec{Kind: core.Symlink, Target: "hello"}); err != nil {
 		t.Fatal(err)
 	}
-
-	// The sandbox's platform fs, as a FileSystem mounted on /.
-	ns := namespace.NewNamespace(hostfs.NewHostDirFS(dir, hostfs.NewHostFS(dir, "", "")))
+	ns := namespace.NewNamespace(fsys)
 
 	read := func(p string) string {
 		t.Helper()
@@ -58,7 +57,7 @@ func TestHostDirFSMountedOnRoot(t *testing.T) {
 	}
 	// Symlink: not followed, then followed — resolution is the Namespace's.
 	if loc, err := ns.Resolve("/link", false); err != nil || loc.Node.Kind() != core.Symlink {
-		t.Fatalf("/link nofollow kind=%v %v", loc.Node.Kind(), err)
+		t.Fatalf("/link nofollow: %+v %v", loc, err)
 	}
 	if loc, err := ns.Resolve("/link", true); err != nil || loc.Path != "/hello" {
 		t.Fatalf("/link follow -> %+v %v", loc, err)

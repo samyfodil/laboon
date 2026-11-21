@@ -27,18 +27,40 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/made-by-guest", argv[2]);
     int fd = open(p, O_CREAT | O_WRONLY, 0644);
     if (fd >= 0) close(fd);
-    DIR *d = opendir("/");
-    CHECK(d != NULL, "opendir /");
-    if (d) {
+    // The program is bound at its own host path (on Windows /C:/...), so each
+    // directory on its path holds exactly the next component; / also has the
+    // run's pseudo filesystems and /tmp.
+    char self[4096];
+    ssize_t sn = readlink("/proc/self/exe", self, sizeof self - 1);
+    CHECK(sn > 1 && self[0] == '/', "readlink /proc/self/exe");
+    if (sn <= 1) return 1;
+    self[sn] = 0;
+    char dir[4096] = "/";
+    const char *rest = self + 1;
+    for (;;) {
+        const char *slash = strchr(rest, '/');
+        size_t n = slash ? (size_t)(slash - rest) : strlen(rest);
+        char want[256];
+        snprintf(want, sizeof want, "%.*s", (int)n, rest);
+        DIR *d = opendir(dir);
+        CHECK(d != NULL, "opendir %s", dir);
+        if (!d)
+            break;
         struct dirent *e;
         while ((e = readdir(d))) {
-            const char *n = e->d_name;
-            if (!strcmp(n, ".") || !strcmp(n, "..") || !strcmp(n, "proc") || !strcmp(n, "sys") ||
-                !strcmp(n, "dev") || !strcmp(n, "tmp"))
+            const char *nm = e->d_name;
+            if (!strcmp(nm, ".") || !strcmp(nm, "..") || !strcmp(nm, want))
                 continue;
-            CHECK(0, "/ lists host entry %s", n);
+            if (!strcmp(dir, "/") && (!strcmp(nm, "proc") || !strcmp(nm, "sys") || !strcmp(nm, "dev") ||
+                                      !strcmp(nm, "tmp")))
+                continue;
+            CHECK(0, "%s lists host entry %s", dir, nm);
         }
         closedir(d);
+        if (!slash)
+            break;
+        snprintf(dir + strlen(dir), sizeof dir - strlen(dir), "%s%s", strcmp(dir, "/") ? "/" : "", want);
+        rest = slash + 1;
     }
     printf("done fails=%d\n", fails);
     return fails != 0;

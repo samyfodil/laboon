@@ -1,12 +1,9 @@
-//go:build linux
-
 package sandbox
 
 import (
 	"bytes"
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -24,7 +21,12 @@ import (
 // lower+upper as an overlayFS and assert the merged view matches — modes,
 // symlink target, whiteout, content.
 func TestOverlayFSConformance(t *testing.T) {
-	dir := t.TempDir()
+	// The run resolves its root canonically (macOS's /var is a symlink), and
+	// the confined backend opened here does no resolution of its own.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	lower := filepath.Join(dir, "lower")
 	upper := filepath.Join(dir, "upper")
 	for _, d := range []string{lower, upper} {
@@ -38,9 +40,7 @@ func TestOverlayFSConformance(t *testing.T) {
 		}
 	}
 	bin := filepath.Join(lower, "vfsmutate")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/vfsmutate.c").CombinedOutput(); err != nil {
-		t.Skipf("build: %v\n%s", err, b)
-	}
+	copyGuest(t, bin, "vfsmutate")
 
 	var out bytes.Buffer
 	code, err := Run(context.Background(), "/vfsmutate", Config{

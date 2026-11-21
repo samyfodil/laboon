@@ -1,5 +1,3 @@
-//go:build linux || darwin
-
 package sandbox
 
 import (
@@ -14,7 +12,7 @@ import (
 
 // Terminals resolve as devices through the Namespace (testdata/ptyfs.c).
 func TestPtyFS(t *testing.T) {
-	bin := guestBin(t, "ptyfs")
+	bin := guestPath(t, "ptyfs")
 	b, err := os.ReadFile(bin)
 	if err != nil {
 		t.Fatal(err)

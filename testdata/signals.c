@@ -1,3 +1,4 @@
+// libc: musl
 /* Linux signal semantics, one check per line: "<name> ok" or "<name> FAIL".
    Build static with glibc or musl, with -pthread. */
 #define _GNU_SOURCE

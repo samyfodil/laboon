@@ -14,7 +14,7 @@ import (
 // boundary, and read() agrees. Guards the virtual-file mmap path after
 // File.Stat() became core.Info.
 func TestMmapTarFS(t *testing.T) {
-	exe := guestBin(t, "mmaptarfs")
+	exe := guestPath(t, "mmaptarfs")
 
 	content := make([]byte, 8192)
 	copy(content[0:], "TARFS-PAGE0-CONTENT")

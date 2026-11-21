@@ -13,7 +13,7 @@ import (
 // flushes the content back to the core.File. The guest proves cross-open coherence;
 // the test proves write-back by reading the memFS file afterward.
 func TestMmapSharedNonHost(t *testing.T) {
-	exe := guestBin(t, "mmapshared")
+	exe := guestPath(t, "mmapshared")
 	mem := memfs.NewMemFS()
 	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
 		t.Fatal(err)
@@ -28,7 +28,7 @@ func TestMmapSharedNonHost(t *testing.T) {
 // so a store through the mapping is visible to a plain read() with no msync and a
 // write() is visible through the mapping (no clobber); both reach the memFS.
 func TestMmapCacheCoherence(t *testing.T) {
-	exe := guestBin(t, "mmapcache")
+	exe := guestPath(t, "mmapcache")
 	mem := memfs.NewMemFS()
 	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestMmapCacheCoherence(t *testing.T) {
 // A MAP_SHARED mapping that runs past the end of a short file must not grow the
 // file: only [0, EOF) is written back, stores past the end are dropped.
 func TestMmapSharedNoEOFExtend(t *testing.T) {
-	exe := guestBin(t, "mmapeof")
+	exe := guestPath(t, "mmapeof")
 	mem := memfs.NewMemFS()
 	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 100)); err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestMmapSharedNoEOFExtend(t *testing.T) {
 // An explicit munmap of a shared mapping writes the backing back to the file and
 // releases it; the stores reach the memFS even with no msync and before teardown.
 func TestMmapEvictWriteBack(t *testing.T) {
-	exe := guestBin(t, "mmapevict")
+	exe := guestPath(t, "mmapevict")
 	mem := memfs.NewMemFS()
 	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
 		t.Fatal(err)
@@ -80,7 +80,7 @@ func TestMmapEvictWriteBack(t *testing.T) {
 // backing survives while a child still maps it; both processes' stores reach the
 // memFS.
 func TestMmapForkCoherent(t *testing.T) {
-	exe := guestBin(t, "mmapfork")
+	exe := guestPath(t, "mmapfork")
 	mem := memfs.NewMemFS()
 	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "f", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, make([]byte, 4096)); err != nil {
 		t.Fatal(err)

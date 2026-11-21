@@ -1,5 +1,3 @@
-//go:build linux
-
 package sandbox
 
 import (
@@ -8,7 +6,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -19,14 +16,18 @@ import (
 // /tmp/.X11-unix/: a socket bind lets the guest reach it; without one the
 // connect is refused, as a host socket in the rootfs is.
 func TestMountSocket(t *testing.T) {
-	const sockPath = "/tmp/.X11-unix/X231" // an unused display number
-	os.Remove(sockPath)
-	ln, err := net.Listen("unix", sockPath)
+	const sockPath = "/tmp/.X11-unix/X231"
+	// The host's X socket lives in the guest's rootfs, as /tmp/.X11-unix would.
+	root, bin := guestRoot(t, "x11sock")
+	sockDir := filepath.Join(root, "tmp", ".X11-unix")
+	if err := os.Mkdir(sockDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", filepath.Join(sockDir, "X231"))
 	if err != nil {
-		t.Skipf("listen %s: %v", sockPath, err)
+		t.Fatal(err)
 	}
 	defer ln.Close()
-	defer os.Remove(sockPath)
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -41,17 +42,11 @@ func TestMountSocket(t *testing.T) {
 		}
 	}()
 
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "x11sock")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/x11sock.c").CombinedOutput(); err != nil {
-		t.Skipf("build: %v\n%s", err, b)
-	}
-
 	run := func(mounts []Mount) (int, string) {
 		var out bytes.Buffer
 		code, err := Run(context.Background(), bin, Config{
 			Args:   []string{"x11sock", sockPath},
-			RootFS: HostRoot("/"), Mounts: mounts,
+			RootFS: HostRoot(root), Mounts: mounts,
 			Stdout: &out, Stderr: &out,
 		})
 		if err != nil {
@@ -61,7 +56,7 @@ func TestMountSocket(t *testing.T) {
 	}
 
 	// With the bind, the guest reaches the host socket.
-	if code, out := run([]Mount{{Guest: "/tmp/.X11-unix", FS: hostfs.Dir("/tmp/.X11-unix")}}); code != 0 {
+	if code, out := run([]Mount{{Guest: "/tmp/.X11-unix", FS: hostfs.Dir(sockDir)}}); code != 0 {
 		t.Fatalf("with mount: code %d (testdata/x11sock.c line)\n%s", code, out)
 	}
 	// Without it, a host socket in the rootfs is refused.

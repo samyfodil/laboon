@@ -1,12 +1,9 @@
-//go:build linux
-
 package sandbox
 
 import (
 	"bytes"
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,16 +22,14 @@ func TestCreateRace(t *testing.T) {
 		}
 	}
 	bin := filepath.Join(lower, "createrace")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", bin, "../../testdata/createrace.c").CombinedOutput(); err != nil {
-		t.Skipf("static gcc unavailable: %v\n%s", err, b)
-	}
+	copyGuest(t, bin, "createrace")
 	for _, c := range []struct {
 		name string
 		cfg  Config
 		prog string
 	}{
 		{"overlay", Config{Args: []string{"createrace", "/work"}, RootFS: HostRoot(lower), Upper: upper}, "/createrace"},
-		{"host", Config{Args: []string{"createrace", filepath.Join(dir, "work")}, RootFS: HostRoot("/")}, bin},
+		{"ephemeral", Config{Args: []string{"createrace", "/work"}, RootFS: HostRoot(lower)}, "/createrace"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var o bytes.Buffer

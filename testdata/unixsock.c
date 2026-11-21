@@ -5,6 +5,7 @@
 // sockets work by path and abstract name. The exit status is the line of the
 // first failed check, 0 if none failed.
 #include <errno.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>

@@ -1,3 +1,4 @@
+// libc: musl
 // Detached threads exiting: musl's exit of a detached thread unmaps the
 // thread's own stack (__unmapself) and then exits. Prints "detach ok".
 #include <pthread.h>

@@ -1,12 +1,9 @@
-//go:build linux
-
 package sandbox
 
 import (
 	"bytes"
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,9 +32,7 @@ func TestChownOwnerReadback(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(lower, "ownerck")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/ownerck.c").CombinedOutput(); err != nil {
-		t.Skipf("static gcc unavailable: %v\n%s", err, b)
-	}
+	copyGuest(t, bin, "ownerck")
 
 	mem := memfs.NewMemFS()
 	if _, err := mem.(core.WriteFileSystem).WriteFile(mem.Root(), "mf", core.CreateSpec{Kind: core.Reg, Mode: 0o644}, []byte("mem")); err != nil {

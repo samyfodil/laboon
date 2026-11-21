@@ -16,10 +16,10 @@ import (
 // mount and an overlay whose lower holds /lowerfile: offsets of separate and
 // shared descriptions, O_APPEND from two processes, files unlinked or replaced
 // while open (which Windows allows only with POSIX share and delete semantics),
-// vectored I/O, fdinfo, SEEK_CUR locks and stdio redirection. On Linux it is
-// built against glibc and musl; elsewhere it is the staged guest (guestBin).
+// vectored I/O, fdinfo, SEEK_CUR locks and stdio redirection, built against
+// glibc and musl.
 func TestFileOffset(t *testing.T) {
-	bins := fileOffsetBins(t)
+	bins := map[string]string{"glibc": guestPath(t, "fileoffset"), "musl": guestPath(t, "fileoffset+musl")}
 	for name, bin := range bins {
 		b, err := os.ReadFile(bin)
 		if err != nil {

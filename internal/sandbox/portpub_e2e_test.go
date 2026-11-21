@@ -1,9 +1,11 @@
-//go:build linux
+//go:build linux || darwin
 
 package sandbox
 
 import (
+	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,7 +13,8 @@ import (
 )
 
 // TestPortPublishEndToEnd drives the whole generic -p path: a DNAT rule in the
-// model (the real native-nft bytes: host 8080 -> 10.88.0.5:80) is realized into
+// model (the real native-nft bytes, host 8080 -> 10.88.0.5:80, with its host
+// port moved to a free one) is realized into
 // a host listener by reconcilePublish, and a connection to that host port is
 // relayed to a container listener registered on the virtual network. No netavark
 // recognition is involved; the publication comes from the firewall model.
@@ -53,10 +56,22 @@ func TestPortPublishEndToEnd(t *testing.T) {
 		}
 	}()
 
-	// The firewall model for the host namespace, holding the real DNAT rule.
+	// The firewall model for the host namespace, holding the real DNAT rule
+	// with its destination-port match on a port this host has free.
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := free.Addr().(*net.TCPAddr).Port
+	free.Close()
+	const dport8080 = "060001001f90"
+	if strings.Count(dnatNativeHex, dport8080) != 1 {
+		t.Fatal("the DNAT rule's port match moved")
+	}
+	rule := strings.Replace(dnatNativeHex, dport8080, fmt.Sprintf("06000100%04x", port), 1)
 	n.nftns[0] = &nftState{tables: []*nftTable{{
 		family: 2, name: "nat",
-		chains: []*nftChain{{name: "pre", rules: []*nftRule{{exprs: unhex(t, dnatNativeHex)}}}},
+		chains: []*nftChain{{name: "pre", rules: []*nftRule{{exprs: unhex(t, rule)}}}},
 	}}}
 
 	n.mu.Lock()
@@ -64,11 +79,11 @@ func TestPortPublishEndToEnd(t *testing.T) {
 	published := len(n.pubs[0])
 	n.mu.Unlock()
 	if published == 0 {
-		t.Skip("host port 8080 unavailable on this machine")
+		t.Fatalf("host port %d was not published", port)
 	}
 
 	// A host connection to the published port must reach the container listener.
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8080", 3*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 3*time.Second)
 	if err != nil {
 		t.Fatalf("dial published port: %v", err)
 	}

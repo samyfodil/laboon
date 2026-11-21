@@ -73,11 +73,9 @@ int main(void) {
 	BOTH("lrcpc", F(isar1, 20) >= 1, hc & (1 << 15));
 	BOTH("i8mm", F(isar1, 52), hc2 & (1 << 13));
 	BOTH("bf16", F(isar1, 44), hc2 & (1 << 14));
-	// Every other set field must be backed by a host feature; spot-check the
-	// ones we never map, which must stay zero.
-	SAFE("isar0 sm3", F(isar0, 36), 0);
-	SAFE("isar0 sm4", F(isar0, 40), 0);
-	SAFE("isar1 ptrauth-apa", F(isar1, 4), 0);
+	BOTH("sm3", F(isar0, 36), hc & (1 << 18));
+	BOTH("sm4", F(isar0, 40), hc & (1 << 19));
+	SAFE("isar1 ptrauth-apa", F(isar1, 4), hc & (1UL << 30));
 
 	CHECK(mpidr == 0x80000000, "mpidr %#lx, want 0x80000000", mpidr);
 	CHECK(revidr == 0, "revidr %#lx, want 0", revidr);

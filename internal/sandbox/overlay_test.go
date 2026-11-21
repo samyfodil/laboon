@@ -1,30 +1,24 @@
-//go:build linux
-
 package sandbox
 
 import (
 	"bytes"
 	"context"
-	"os/exec"
+	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
-// runBusybox runs a busybox shell script with the host as the read-only root.
+// runBusybox runs a busybox shell script over a root holding only busybox.
 func runBusybox(t *testing.T, script string) (int, string) {
 	t.Helper()
-	bb, err := exec.LookPath("busybox")
-	if err != nil {
-		t.Skip("busybox unavailable")
-	}
 	var out bytes.Buffer
-	code, err := Run(context.Background(), bb, Config{
-		Args:   []string{"sh", "-c", script},
+	code, err := Run(context.Background(), "/bin/busybox", Config{
+		Args:   []string{"sh", "-c", "/bin/busybox --install -s /bin; " + script},
+		Env:    []string{"PATH=/bin"},
 		Stdout: &out,
 		Stderr: &out,
-		RootFS: HostRoot("/"),
+		RootFS: HostRoot(busyboxRoot(t)),
 	})
 	if err != nil {
 		t.Fatalf("run: %v (output %q)", err, out.String())
@@ -49,31 +43,32 @@ func TestListMergesOverlayLayers(t *testing.T) {
 		}
 		return n
 	}
-	if count("usr") != 3 || count("lc-new") != 1 || count("lc-file") != 1 {
+	if count("bin") != 3 || count("lc-new") != 1 || count("lc-file") != 1 {
 		t.Fatalf("output %q", out)
 	}
 }
 
-// TestFsOps runs testdata/fsops.c, built against glibc and musl, with the
-// host root as the image: file attributes, links, FIFOs, locks, vectored
-// I/O, copies, shared mappings and fd ioctls.
+// TestFsOps runs testdata/fsops.c, built against glibc and musl, over a host
+// directory image: file attributes, links, FIFOs, locks, vectored I/O, copies,
+// shared mappings and fd ioctls.
 func TestFsOps(t *testing.T) {
-	dir := t.TempDir()
-	builds := map[string][]string{
-		"glibc": {"gcc", "-O2", "-static", "-w", "-pthread", "-o", filepath.Join(dir, "glibc"), "../../testdata/fsops.c"},
-	}
-	if z := zigCC(); z != "" {
-		target := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH] + "-linux-musl"
-		builds["musl"] = []string{z, "cc", "-target", target, "-O2", "-static", "-o", filepath.Join(dir, "musl"), "../../testdata/fsops.c"}
-	}
-	for libc, c := range builds {
-		if b, err := exec.Command(c[0], c[1:]...).CombinedOutput(); err != nil {
-			t.Skipf("build: %v\n%s", err, b)
+	for _, name := range []string{"fsops", "fsops+musl"} {
+		// The probe works on a lower /etc/passwd and runs /usr/bin/env.
+		root, prog := guestRoot(t, name)
+		withBusybox(t, root)
+		for _, d := range []string{"etc", "usr/bin"} {
+			if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+				t.Fatal(err)
+			}
 		}
+		if err := os.WriteFile(filepath.Join(root, "etc", "passwd"), []byte("root:x:0:0:root:/root:/bin/sh\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		copyFile(t, filepath.Join(root, "bin", "busybox"), filepath.Join(root, "usr", "bin", "env"))
 		var o bytes.Buffer
-		code, err := Run(context.Background(), filepath.Join(dir, libc), Config{Args: []string{"fsops"}, Stdout: &o, Stderr: &o, RootFS: HostRoot("/")})
+		code, err := Run(context.Background(), prog, Config{Args: []string{"fsops"}, Stdout: &o, Stderr: &o, RootFS: HostRoot(root)})
 		if err != nil || code != 0 || !strings.Contains(o.String(), "done fails=0") {
-			t.Errorf("%s: code=%d err=%v\n%s", libc, code, err, o.String())
+			t.Errorf("%s: code=%d err=%v\n%s", name, code, err, o.String())
 		}
 	}
 }

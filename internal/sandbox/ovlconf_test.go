@@ -1,5 +1,3 @@
-//go:build linux || darwin
-
 package sandbox
 
 import (
@@ -18,7 +16,7 @@ import (
 // host directory as a layer, whether the root is a host directory with an upper
 // or an in-memory filesystem (testdata/ovlconf.c).
 func TestOverlayMountConfined(t *testing.T) {
-	bin := guestBin(t, "ovlconf")
+	bin := guestPath(t, "ovlconf")
 	b, err := os.ReadFile(bin)
 	if err != nil {
 		t.Fatal(err)

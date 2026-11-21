@@ -3,8 +3,6 @@ package sandbox
 import (
 	"bytes"
 	"context"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,14 +13,11 @@ import (
 // signal nor read the memory of the (root) process it no longer owns. The guest
 // runs as root (Config.User nil), so the child can setuid away.
 func TestKillCred(t *testing.T) {
-	exe := filepath.Join(t.TempDir(), "killcred")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-o", exe, "../../testdata/killcred.c").CombinedOutput(); err != nil {
-		t.Skipf("static gcc unavailable: %v\n%s", err, b)
-	}
+	root, exe := guestRoot(t, "killcred")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var out bytes.Buffer
-	code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot("/"), Stdout: &out, Stderr: &out})
+	code, err := Run(ctx, exe, Config{Args: []string{exe}, RootFS: HostRoot(root), Stdout: &out, Stderr: &out})
 	s := out.String()
 	if err != nil || code != 0 || !strings.Contains(s, "KILLCRED-DONE") {
 		t.Fatalf("probe code=%d err=%v out=%q", code, err, s)

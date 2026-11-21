@@ -1,12 +1,8 @@
-//go:build linux
-
 package sandbox
 
 import (
 	"bytes"
 	"context"
-	"os/exec"
-	"path/filepath"
 	"testing"
 )
 
@@ -15,15 +11,11 @@ import (
 // report it. This fails under an ack-and-fake netlink (which would show only the
 // host's loopback), so it guards that a non-host netns is really modelled.
 func TestNetModelEndToEnd(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "netmodel")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/netmodel.c").CombinedOutput(); err != nil {
-		t.Skipf("build: %v\n%s", err, b)
-	}
+	root, bin := guestRoot(t, "netmodel")
 	var out bytes.Buffer
 	code, err := Run(context.Background(), bin, Config{
 		Args:   []string{"netmodel"},
-		Stdout: &out, Stderr: &out, RootFS: HostRoot("/"), Net: true,
+		Stdout: &out, Stderr: &out, RootFS: HostRoot(root), Net: true,
 	})
 	if err != nil || code != 0 {
 		t.Fatalf("code %d err %v\n%s", code, err, out.String())
@@ -35,15 +27,11 @@ func TestNetModelEndToEnd(t *testing.T) {
 // link dump alongside the real host loopback, i.e. the host netns is a live view
 // of the real interfaces with the guest's own additions layered on.
 func TestNetModelHostEndToEnd(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "netmodelhost")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/netmodelhost.c").CombinedOutput(); err != nil {
-		t.Skipf("build: %v\n%s", err, b)
-	}
+	root, bin := guestRoot(t, "netmodelhost")
 	var out bytes.Buffer
 	code, err := Run(context.Background(), bin, Config{
 		Args:   []string{"netmodelhost"},
-		Stdout: &out, Stderr: &out, RootFS: HostRoot("/"), Net: true,
+		Stdout: &out, Stderr: &out, RootFS: HostRoot(root), Net: true,
 	})
 	if err != nil || code != 0 {
 		t.Fatalf("code %d err %v\n%s", code, err, out.String())

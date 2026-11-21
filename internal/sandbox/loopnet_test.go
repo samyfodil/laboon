@@ -1,12 +1,9 @@
-//go:build linux
-
 package sandbox
 
 import (
 	"bytes"
 	"context"
 	"net"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -19,9 +16,7 @@ import (
 func TestLoopbackWithoutNet(t *testing.T) {
 	dir := t.TempDir() // the guest's root: the program is all it needs
 	bin := filepath.Join(dir, "loopnet")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "testdata/loopnet.c").CombinedOutput(); err != nil {
-		t.Skipf("build: %v\n%s", err, b)
-	}
+	copyGuest(t, bin, "loopnet")
 	host, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

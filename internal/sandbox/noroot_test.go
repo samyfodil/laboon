@@ -13,7 +13,7 @@ import (
 // With no root filesystem the guest sees nothing of the host's: not a host file,
 // not a host directory to write into (testdata/noroot.c).
 func TestNoRootNoHostView(t *testing.T) {
-	bin := guestBin(t, "noroot")
+	bin := guestPath(t, "noroot")
 	dir := t.TempDir()
 	secret := filepath.Join(dir, "secret")
 	if err := os.WriteFile(secret, []byte("host"), 0o644); err != nil {

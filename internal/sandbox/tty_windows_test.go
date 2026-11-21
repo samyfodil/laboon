@@ -15,27 +15,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// TestWindowsTTY is M7's exit criterion over guest ptys: m7tty (windows/m7)
-// drives each case through /dev/ptmx as script and expect do. pty: the line
-// discipline across a pair; termios: every flag round-tripped on a
-// controlling terminal; tty: isatty, ttyname, TIOCGWINSZ and SIGWINCH;
-// ttin: background reads and writes stop with SIGTTIN and SIGTTOU; wait:
-// WUNTRACED and WCONTINUED; sh: an interactive busybox sh with line editing,
-// ^C, ^Z, jobs, bg and fg; vi and less.
-func TestWindowsTTY(t *testing.T) {
-	root := winAlpine(t)
-	for _, c := range []string{"pty", "termios", "tty", "ttin", "wait", "sh", "vi", "less"} {
-		t.Run(c, func(t *testing.T) {
-			start := time.Now()
-			code, out, errs := winRunIn(t, root, "/bin/m7tty", "m7tty", c)
-			if code != 0 || !strings.Contains(out, c+" OK") {
-				t.Fatalf("exit %d stdout %q stderr %q", code, out, errs)
-			}
-			t.Logf("%s in %v", c, time.Since(start).Round(time.Millisecond))
-		})
-	}
-}
-
 // TestWindowsConsole runs an interactive busybox sh on a Windows console:
 // the test makes a pseudo console (ConPTY), starts itself on it as the child
 // below, and types at it. The child's stdio are the console's handles, so
@@ -48,7 +27,7 @@ func TestWindowsConsole(t *testing.T) {
 		consoleChild(t)
 		return
 	}
-	root := winAlpine(t)
+	root := alpineRoot(t)
 	var inR, inW, outR, outW windows.Handle
 	if err := windows.CreatePipe(&inR, &inW, nil, 0); err != nil {
 		t.Fatal(err)

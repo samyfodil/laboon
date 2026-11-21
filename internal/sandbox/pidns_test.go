@@ -1,12 +1,8 @@
-//go:build linux
-
 package sandbox
 
 import (
 	"bytes"
 	"context"
-	"os/exec"
-	"path/filepath"
 	"testing"
 )
 
@@ -15,15 +11,11 @@ import (
 // outer parent reaps it by the pid clone returned — the pid translation
 // Chromium's zygote relies on.
 func TestPidNamespace(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "pidns")
-	if b, err := exec.Command("gcc", "-O2", "-static", "-w", "-o", bin, "../../testdata/pidns.c").CombinedOutput(); err != nil {
-		t.Skipf("build: %v\n%s", err, b)
-	}
+	root, bin := guestRoot(t, "pidns")
 	var out bytes.Buffer
 	code, err := Run(context.Background(), bin, Config{
 		Args:   []string{"pidns"},
-		Stdout: &out, Stderr: &out, RootFS: HostRoot("/"),
+		Stdout: &out, Stderr: &out, RootFS: HostRoot(root),
 	})
 	if err != nil || code != 0 {
 		t.Fatalf("code %d err %v\n%s", code, err, out.String())

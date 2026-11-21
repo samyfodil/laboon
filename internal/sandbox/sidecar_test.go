@@ -1,5 +1,3 @@
-//go:build linux || darwin
-
 package sandbox
 
 import (
@@ -18,7 +16,7 @@ import (
 // A host image's sidecar records the owners and mode bits its host files cannot
 // hold; the guest sees them, and a kept upper records the ones the guest set.
 func TestImageSidecar(t *testing.T) {
-	bin := guestBin(t, "statls")
+	bin := guestPath(t, "statls")
 	b, err := os.ReadFile(bin)
 	if err != nil {
 		t.Fatal(err)

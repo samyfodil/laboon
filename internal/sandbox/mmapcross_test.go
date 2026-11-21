@@ -5,10 +5,7 @@ import (
 	"context"
 	"io"
 	"io/fs"
-	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,41 +16,8 @@ import (
 	"github.com/samyfodil/laboon/filesystems/memfs"
 )
 
-// guestBin returns a static guest ELF built from testdata/<name>.c, so the mmap
-// tests run on every host. On Linux it is built with the host gcc. On another OS
-// a Linux guest cannot be built locally, so it is taken from $LC_GUEST_DIR/<name>
-// — a directory of prebuilt guests for this arch that the cross-platform gate
-// stages (built `gcc -static-pie`, because on macOS a non-PIE ET_EXEC forces the
-// hypervisor backend, which copies file mappings into VM RAM instead of sharing
-// them); the test skips when that is not provided. LC_MMAP_BIN remains a legacy
-// single-guest override for mmapguest. It is built static-PIE on Linux too, so
-// one build convention serves every host.
-func guestBin(t *testing.T, name string) string {
-	t.Helper()
-	if dir := os.Getenv("LC_GUEST_DIR"); dir != "" {
-		exe := filepath.Join(dir, name)
-		if _, err := os.Stat(exe); err != nil {
-			t.Skipf("guest %q not staged in LC_GUEST_DIR (testdata/%s.c)", name, name)
-		}
-		return exe
-	}
-	if name == "mmapguest" {
-		if exe := os.Getenv("LC_MMAP_BIN"); exe != "" {
-			return exe
-		}
-	}
-	if runtime.GOOS != "linux" {
-		t.Skipf("set LC_GUEST_DIR to a dir of static-PIE guests for this arch (testdata/%s.c)", name)
-	}
-	exe := filepath.Join(t.TempDir(), name)
-	if b, err := exec.Command("gcc", "-O2", "-static-pie", "-w", "-o", exe, "../../testdata/"+name+".c").CombinedOutput(); err != nil {
-		t.Skipf("static gcc unavailable: %v\n%s", err, b)
-	}
-	return exe
-}
-
 // mmapGuestBin is the multi-mode mmap guest (testdata/mmapguest.c).
-func mmapGuestBin(t *testing.T) string { return guestBin(t, "mmapguest") }
+func mmapGuestBin(t *testing.T) string { return guestPath(t, "mmapguest") }
 
 // Writable MAP_SHARED of a non-host file works on every backend: cross-open
 // coherence, a mapping store visible to read() with no msync, a write() visible
@@ -95,17 +59,13 @@ func TestMmapMsyncWriteBack(t *testing.T) {
 	}
 }
 
-// runMmapGuest runs exe (with any guest args) and mem mounted at /data,
-// requiring want in its output. The program path is resolved as a guest path
-// under the host root, so on unix the root is "/" and the guest path is exe;
-// on Windows, where "/" is not a host path, the root is the guest binary's
-// directory and the guest runs it by its base name.
+// runMmapGuest runs exe (with any guest args) in a private root with mem
+// mounted at /data, requiring want in its output.
 func runMmapGuest(t *testing.T, exe string, mem core.FileSystem, want string, args ...string) {
 	t.Helper()
-	root, gp := HostRoot("/"), exe
-	if runtime.GOOS == "windows" {
-		root, gp = HostRoot(filepath.Dir(exe)), "/"+filepath.Base(exe)
-	}
+	dir := t.TempDir()
+	copyFile(t, exe, filepath.Join(dir, filepath.Base(exe)))
+	root, gp := HostRoot(dir), "/"+filepath.Base(exe)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	var out bytes.Buffer

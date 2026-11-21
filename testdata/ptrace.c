@@ -1,3 +1,6 @@
+// build: -static
+// (the tracer reads its re-exec'd child's memory at its own address of
+// mem_area, which only a fixed-address build shares)
 #define _GNU_SOURCE
 #include <sys/ptrace.h>
 #include <linux/ptrace.h>
