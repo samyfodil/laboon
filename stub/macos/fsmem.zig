@@ -301,6 +301,48 @@ pub fn emulate(mc: *std.c.mcontext_t) bool {
             const res = loadN(ea, size) & gpr(mc, reg).*;
             mc.ss.rflags = logicFlags(mc.ss.rflags, size, res);
         },
+        0xf6, 0xf7 => { // TEST r/m, imm; NOT; NEG
+            const a = loadN(ea, size);
+            switch ((modrm >> 3) & 7) {
+                0, 1 => {
+                    const ilen: u8 = if (op == 0xf6) 1 else if (op66) @as(u8, 2) else 4;
+                    const raw = loadN(@intFromPtr(code + i), ilen);
+                    const imm = if ((raw & signBit(ilen)) != 0) raw | ~mask(ilen) else raw;
+                    i += ilen;
+                    mc.ss.rflags = logicFlags(mc.ss.rflags, size, a & imm);
+                },
+                2 => storeN(ea, size, ~a),
+                3 => {
+                    var f = subFlags(mc.ss.rflags, size, 0, a) & ~CF;
+                    if ((a & mask(size)) != 0) f |= CF;
+                    mc.ss.rflags = f;
+                    storeN(ea, size, 0 -% a);
+                },
+                else => return fault(mc),
+            }
+        },
+        0xfe, 0xff => { // INC/DEC r/m (CF preserved)
+            const a = loadN(ea, size);
+            const cf = mc.ss.rflags & CF;
+            switch ((modrm >> 3) & 7) {
+                0 => {
+                    mc.ss.rflags = (addFlags(mc.ss.rflags, size, a, 1) & ~CF) | cf;
+                    storeN(ea, size, a +% 1);
+                },
+                1 => {
+                    mc.ss.rflags = (subFlags(mc.ss.rflags, size, a, 1) & ~CF) | cf;
+                    storeN(ea, size, a -% 1);
+                },
+                else => return fault(mc),
+            }
+        },
+        0x86, 0x87 => { // XCHG r/m, r
+            if (hiByte) return fault(mc);
+            const r = gpr(mc, reg);
+            const m = loadN(ea, size);
+            storeN(ea, size, r.*);
+            setReg(r, size, m);
+        },
         else => {
             // ALU grid 0x00..0x3b: ADD/OR/AND/SUB/XOR/CMP (ADC/SBB excluded).
             if ((op & 0xc4) != 0 or (op & 7) >= 4 or hiByte) return fault(mc);

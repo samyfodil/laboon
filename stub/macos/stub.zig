@@ -33,6 +33,20 @@ const sig = @import("sig.zig");
 const tstate = @import("tstate.zig");
 const life = @import("life.zig");
 
+// Rosetta's translation of the x86-64 stub mistranslates the code at the very
+// start of __text (Zig's linker metadata about it is wrong), so a trap fills
+// that spot and no function starts there.
+comptime {
+    if (!tstate.arm64) asm (
+        \\ .text
+        \\ .p2align 4
+        \\ .globl _lc_text_head
+        \\ .no_dead_strip _lc_text_head
+        \\_lc_text_head:
+        \\ ud2
+    );
+}
+
 // The guest syscall instruction the rewriter traps: arm64 `svc` is 4 bytes and
 // is branch-rewritten to an island; x86-64 `syscall` is 2 bytes (too small for a
 // branch) and is overwritten with `ud2` (0f 0b) in place, serviced from the
@@ -924,12 +938,17 @@ const PARK_STACK: usize = 256 << 10;
 extern "c" fn free(p: ?*anyopaque) void;
 
 fn vforkSpawn(ch: *chan.Chan, h: *CloneHandoff, tid: u64, frame: [*]u64) u64 {
-    const top = if (tstate.arm64) proc.guestSp(frame) else @intFromPtr(frame) + 816;
+    // x86-64 serves the call on the Darwin alternate stack, so the child
+    // running on the shared guest stack clobbers nothing the parent needs.
+    if (!tstate.arm64) {
+        const ok = spawnThread(h);
+        vforkWait(ch, CLONE_VFORK);
+        return if (ok) tid else neg(EAGAIN);
+    }
+    const top = proc.guestSp(frame);
     const stk = malloc(PARK_STACK) orelse return cloneFailed(h.slot - @intFromPtr(g_base), CLONE_VFORK, ch);
     var v = VforkPark{ .ch = ch, .h = h, .lo = 0, .len = 0, .save = undefined, .ok = false };
-    v.lo = if (tstate.arm64) frame[98] else asm volatile ("movq %%rsp, %[o]"
-        : [o] "=r" (-> u64),
-    );
+    v.lo = frame[98];
     v.len = top - v.lo;
     v.save = @ptrCast(malloc(v.len) orelse {
         free(stk);
@@ -958,13 +977,6 @@ comptime {
         \\ ldp x9, x30, [sp], #16
         \\ mov sp, x9
         \\ ret
-    ) else asm (
-        // vfork path; not on the x86-64 startup milestone. Trap if ever reached.
-        \\ .text
-        \\ .p2align 4
-        \\ .globl _lc_call_on_stack
-        \\_lc_call_on_stack:
-        \\ ud2
     );
 }
 
@@ -2121,8 +2133,9 @@ fn loadAndEnter(path: [*:0]const u8, interpPath: ?[*:0]const u8, mainSites: [*:0
         vdso = img.lo;
     }
 
-    const stk = mmap(@ptrFromInt(mem.stack_top - GUEST_STACK), GUEST_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0) orelse _exit(7);
-    mem.noteImage(@intFromPtr(stk), @intFromPtr(stk) + GUEST_STACK);
+    const stk_at = mem.mapStack(GUEST_STACK);
+    if (stk_at >= std.math.maxInt(u64) - 4095) _exit(7);
+    const stk: *anyopaque = @ptrFromInt(stk_at);
     const sp = buildInitStack(@intFromPtr(stk), GUEST_STACK, argv, envp, main_img.phdr, main_img.phent, main_img.phnum, main_img.entry, atBase, vdso);
     procinfo.info.sp = sp;
     procinfo.info.stack_lo = @intFromPtr(stk);

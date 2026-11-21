@@ -52,6 +52,11 @@ const HUGE: u64 = PAGE * (PAGE / 8);
 const LAYOUT_COMPAT: u32 = 2; // sandbox/exec_darwin.go layoutCompat
 const LAYOUT_RLIM_INF: u32 = 0xffffff;
 
+// guest_top is where the guest's address space ends: HOST_TOP, but under Rosetta
+// the host keeps the window's highest gigabytes (the x86-64 shared region,
+// Rosetta's runtime and dyld's stack below it), so an x86-64 guest ends under
+// them, as on a kernel with a smaller task size (noteHost).
+pub var guest_top: u64 = HOST_TOP;
 pub var hint_exe: u64 = ET_DYN_BASE;
 pub var stack_top: u64 = HOST_TOP;
 var mmap_base: u64 = TASK_SIZE - (128 << 20);
@@ -81,22 +86,24 @@ pub fn drawLayout(flags: u32) void {
         rnd = randBelow(MMAP_RND_PAGES) * PAGE;
         pad += STACK_RND;
     }
+    const tsize: u64 = if (X86) guest_top else TASK_SIZE;
     var gap = rlim;
     if (gap +% pad > gap) gap += pad;
-    gap = std.math.clamp(gap, 128 << 20, TASK_SIZE / 6 * 5);
-    mmap_base = (TASK_SIZE - gap - rnd) & ~(PAGE - 1);
+    gap = std.math.clamp(gap, 128 << 20, tsize / 6 * 5);
+    mmap_base = (tsize - gap - rnd) & ~(PAGE - 1);
     legacy_base = rdUp(TASK_SIZE / UNMAPPED_DIV) + rnd;
     if (norand) {
-        stack_top = HOST_TOP;
+        stack_top = guest_top;
         hint_exe = ET_DYN_BASE;
         brk_gap = 0;
     } else {
-        stack_top = HOST_TOP - randBelow((STACK_RND - (TASK_SIZE - HOST_TOP)) / PAGE) * PAGE;
+        stack_top = guest_top - randBelow((STACK_RND - (tsize - guest_top)) / PAGE) * PAGE;
         hint_exe = ET_DYN_BASE + randBelow(MMAP_RND_PAGES) * PAGE;
         brk_gap = randBelow((1 << 30) / PAGE) * PAGE;
     }
     lock.lock();
     taken.clearRetainingCapacity();
+    takeHost();
     lock.unlock();
 }
 
@@ -971,7 +978,7 @@ fn clear(lo: u64, hi: u64) bool {
 // boundary (thp_get_unmapped_area). lock held.
 fn pick(hint: u64, n: u64, anon: bool) ?u64 {
     if (n == 0 or n > TASK_SIZE) return null;
-    if (hint != 0 and hint >= PAGE and hint <= HOST_TOP - n and clear(hint, hint + n)) return hint;
+    if (hint != 0 and hint >= PAGE and hint <= guest_top - n and clear(hint, hint + n)) return hint;
     if (anon and hint == 0 and n % HUGE == 0) {
         if (search(n + HUGE)) |a| {
             const skip = (HUGE - a % HUGE) % HUGE;
@@ -987,7 +994,7 @@ fn search(n: u64) ?u64 {
     if (!legacy) {
         if (topDown(n, GUEST_BASE, mmap_base)) |a| return a;
     }
-    return bottomUp(n, legacy_base, HOST_TOP);
+    return bottomUp(n, legacy_base, guest_top);
 }
 
 // topDown finds the highest a in [low, high-n] with [a, a+n) clear, as
@@ -1037,6 +1044,12 @@ pub fn pickFree(n: u64) u64 {
     lock.lock();
     defer lock.unlock();
     return pick(0, n, false) orelse 0;
+}
+
+// mapStack maps the initial stack of n bytes, ending at the layout's top of
+// stack when that is free.
+pub fn mapStack(n: u64) u64 {
+    return place(stack_top - n, n, PROT_RW, D_PRIVATE | D_ANON, -1, 0, false);
 }
 
 pub fn noteImage(lo: u64, hi: u64) void {
@@ -1861,6 +1874,42 @@ pub fn noteHost() void {
         nhost += 1;
         a = ra + size;
     }
+    if (X86) {
+        var floor: u64 = HOST_TOP;
+        for (host_at_start[0..nhost]) |r| {
+            if (r.lo >= HOST_BLOCK) floor = @min(floor, r.lo);
+        }
+        guest_top = floor & ~@as(u64, (1 << 30) - 1);
+    }
+}
+
+// HOST_BLOCK bounds from below where the host's own high block starts.
+const HOST_BLOCK: u64 = 0x7ff0_0000_0000;
+
+// takeHost marks the host's memory in the guest's upper window taken, so no
+// placement lands on it (lock held).
+fn takeHost() void {
+    const t = mach_task_self();
+    var a: u64 = TOP_LO;
+    while (a < HOST_TOP) {
+        var ra = a;
+        var size: u64 = 0;
+        var info: BasicInfo = undefined;
+        var count: c_uint = @sizeOf(BasicInfo) / 4;
+        var obj: c_uint = 0;
+        if (mach_vm_region(t, &ra, &size, VM_REGION_BASIC_INFO_64, &info, &count, &obj) != 0) break;
+        if (obj != 0) _ = mach_port_deallocate(t, obj);
+        if (ra >= HOST_TOP) break;
+        var ea = ra;
+        var esize: u64 = 0;
+        var ext: ExtInfo = undefined;
+        var ecount: c_uint = @sizeOf(ExtInfo) / 4;
+        if (mach_vm_region(t, &ea, &esize, VM_REGION_EXTENDED_INFO, &ext, &ecount, &obj) != 0) break;
+        if (obj != 0) _ = mach_port_deallocate(t, obj);
+        if (hostRegion(info, ext, ra, ra + size)) takenAdd(ra, ra + size);
+        a = ra + size;
+    }
+    if (guest_top < HOST_TOP) takenAdd(guest_top, HOST_TOP);
 }
 
 const Range = struct { lo: u64, hi: u64 };
@@ -1984,6 +2033,7 @@ pub fn forkLoad(b: *[]const u8) bool {
     nrooms = st.nroom;
     taken.clearRetainingCapacity();
     for (std.mem.bytesAsSlice(Run, @as([]align(1) const u8, b.*[nv + na + nr .. nv + na + nr + nt]))) |e| taken.append(gpa, e) catch return false;
+    takeHost();
     b.* = b.*[nv + na + nr + nt ..];
     return true;
 }

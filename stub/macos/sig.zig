@@ -1704,9 +1704,8 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
         if (fsmem.emulate(mc)) return;
     }
     var dsig = dsig_in;
-    // The arm64 W^X/OOL fault handling and the stub's copy-helper landmarks are
-    // arm64-only (x86-64 has no in-guest JIT window machinery on the syscall
-    // path); a guest fault falls through to the generic signal delivery below.
+    // The W^X/OOL fault handling is arm64-only (x86-64 has no in-guest JIT
+    // window machinery on the syscall path).
     if (tstate.arm64) {
     if (dsig == DW_SIGSEGV or dsig == DW_SIGBUS) {
         const page = mc.es.far & ~@as(u64, 0x3fff);
@@ -1749,6 +1748,7 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
             mc.es.far = f.far;
         }
     }
+    }
     if (tl.busy and tstate.pc(mc) >= @intFromPtr(&lc_copy) and tstate.pc(mc) < @intFromPtr(&lc_copy_fault)) {
         tstate.setPc(mc, @intFromPtr(&lc_copy_fault));
         return;
@@ -1756,7 +1756,6 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
     if (tl.busy and tstate.pc(mc) == @intFromPtr(&lc_load32)) {
         tstate.setPc(mc, @intFromPtr(&lc_load32_fault));
         return;
-    }
     }
     if (!tl.ready or tl.busy) {
         _ = signal(dsig_in, DW_SIG_DFL); // a fault in the stub itself: crash for real

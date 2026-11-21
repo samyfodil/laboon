@@ -808,15 +808,12 @@ func writeSeatbeltPaths(chanPath, root string) error {
 // architecture, ad-hoc codesigned (arm64 refuses to run an unsigned binary):
 // the x86-64 stub for an x86-64 guest, which runs under Rosetta, else the arm64
 // stub. The supervisor's own architecture does not matter -- a native arm64
-// build hosts an x86-64 guest this way. Both get the legacyX18 Mach-O patch; it
-// matters only to the arm64 stub (the guest's GCC code uses x18 as scratch,
-// which Darwin preserves only for a legacy-versioned image) and is a harmless
-// build-version edit on the x86-64 one.
+// build hosts an x86-64 guest this way. Both get the patchStub Mach-O edits.
 func signedStubFor(x64 bool) (string, error) {
 	if x64 {
-		return signAdhoc(legacyX18(macstub.BinaryAmd64), "stubx64-")
+		return signAdhoc(patchStub(macstub.BinaryAmd64), "stubx64-")
 	}
-	return signAdhoc(legacyX18(macstub.BinaryArm64), "stub-")
+	return signAdhoc(patchStub(macstub.BinaryArm64), "stub-")
 }
 
 // signAdhoc writes bin to the user cache directory under its content hash,
@@ -869,7 +866,7 @@ const hvfEntitlement = `<?xml version="1.0" encoding="UTF-8"?>
 
 // signedHvfStub returns the path of the embedded HVF stub, ad-hoc codesigned
 // WITH the hypervisor entitlement and cached under its content hash like
-// signedStub. Unlike the native stub it needs no legacyX18 patch: the guest's
+// signedStub. Unlike the native stub it needs no patchStub edits: the guest's
 // Linux code runs in the VM, not in the stub's own registers, so the stub is
 // ordinary macOS code.
 func signedHvfStub() (string, error) {
@@ -941,14 +938,18 @@ func needsHvf(elfPath string) bool {
 	return false
 }
 
-// legacyX18 returns a copy of the stub Mach-O with its LC_BUILD_VERSION minos
-// and sdk lowered to macOS 10.12. Linux arm64 code uses x18 as an ordinary
-// register, and Darwin zeroes x18 on context switch except in binaries linked
-// for an old OS. Zig's SDK cannot link that old, so the fields are patched here,
-// before the ad-hoc re-sign. (os_set_custom_x18_abi_enabled is not enough: the
-// kernel drops that per-thread opt-in on every block and core migration.)
-func legacyX18(bin []byte) []byte {
+// patchStub returns a copy of the stub Mach-O edited before the ad-hoc
+// re-sign. Its LC_BUILD_VERSION minos and sdk drop to macOS 10.12: Linux arm64
+// code uses x18 as an ordinary register, and Darwin zeroes x18 on context
+// switch except in binaries linked for an old OS, which Zig's SDK cannot link
+// (os_set_custom_x18_abi_enabled is not enough: the kernel drops that
+// per-thread opt-in on every block and core migration). And its
+// LC_FUNCTION_STARTS is emptied: Zig's linker writes entries pointing into the
+// Mach-O header, and Rosetta's ahead-of-time translation of the x86-64 stub
+// trusts them, decoding header bytes on into the first function of __text.
+func patchStub(bin []byte) []byte {
 	const lcBuildVersion = 0x32
+	const lcFunctionStarts = 0x26
 	const macos1012 = 10<<16 | 12<<8
 	b := append([]byte(nil), bin...)
 	le := binary.LittleEndian
@@ -959,6 +960,9 @@ func legacyX18(bin []byte) []byte {
 		if cmd == lcBuildVersion {
 			le.PutUint32(b[off+12:], macos1012) // minos
 			le.PutUint32(b[off+16:], macos1012) // sdk
+		}
+		if cmd == lcFunctionStarts {
+			le.PutUint32(b[off+12:], 0) // datasize
 		}
 		off += size
 	}
