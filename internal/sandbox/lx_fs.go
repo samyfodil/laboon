@@ -2111,9 +2111,15 @@ func (g *dguest) applyInitDir(cfg Config) error {
 
 // lstatGuest lstats a resolved guest path through the overlay (upper wins,
 // whiteouts hide the lower), so stat/getdents see written and deleted files.
+// A create registers before its name appears and records the owner before it
+// ends, so waiting after the lookup catches any create the lookup could have
+// seen half done.
 func (g *dguest) lstatGuest(gp string) (os.FileInfo, lxErrno) {
-	g.ov.mk.await(gp)
-	return g.lstatNode(gp)
+	fi, e := g.lstatNode(gp)
+	if g.ov.mk.await(gp) {
+		return g.lstatNode(gp)
+	}
+	return fi, e
 }
 
 // lstatNode is lstatGuest without waiting for a create making gp.
@@ -2143,7 +2149,14 @@ func (g *dguest) lstatNode(gp string) (os.FileInfo, lxErrno) {
 // through vfs rather than the duplicated upper/lower dance. Pseudo and tty paths
 // keep their synthetic stat.
 func (g *dguest) statGuest(gp string) (lxStat, lxErrno) {
-	g.ov.mk.await(gp)
+	st, e := g.statNode(gp)
+	if g.ov.mk.await(gp) {
+		return g.statNode(gp)
+	}
+	return st, e
+}
+
+func (g *dguest) statNode(gp string) (lxStat, lxErrno) {
 	if fi, e, ok := g.ttyLstat(gp); ok {
 		if e != 0 {
 			return lxStat{}, e

@@ -142,7 +142,7 @@ func (g *dguest) create(ploc namespace.Loc, gp string, spec core.CreateSpec) (co
 	defer g.ov.mk.end(gp)
 	n, err := ploc.FS.Create(ploc.Node, path.Base(gp), spec)
 	if err == nil {
-		g.dacOwn(gp, spec.Uid, spec.Gid)
+		g.dacOwn(n.ID(), spec.Uid, spec.Gid)
 	}
 	return n, err
 }
@@ -176,26 +176,27 @@ func (m *makes) end(gp string) {
 	m.mu.Unlock()
 }
 
-// await waits until no create is making gp.
-func (m *makes) await(gp string) {
+// await waits until no create is making gp and reports whether one was.
+func (m *makes) await(gp string) bool {
 	if m.n.Load() == 0 {
-		return
+		return false
 	}
 	m.mu.Lock()
+	waited := false
 	for m.m[gp] > 0 {
+		waited = true
 		m.cond.Wait()
 	}
 	m.mu.Unlock()
+	return waited
 }
 
-// dacOwn records uid and gid as the owner of the file the caller just created
-// at gp, for a backend whose create does not keep the owner itself.
-func (g *dguest) dacOwn(gp string, uid, gid uint32) {
-	fi, e := g.lstatNode(gp)
-	if e != 0 {
-		return
-	}
-	k := inodeKey(fi)
+// dacOwn records uid and gid as the owner of the node the caller just created,
+// for a backend whose create does not keep the owner itself. It keys on the
+// created node, not a fresh lookup of its name, which another process's
+// concurrent miss can leave stale in the host cache.
+func (g *dguest) dacOwn(id core.NodeID, uid, gid uint32) {
+	k := ikey{id.Dev, id.Ino}
 	if _, ok := g.ov.get(k); !ok && uid == 0 && gid == 0 {
 		return
 	}
