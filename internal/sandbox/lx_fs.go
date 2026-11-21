@@ -1038,40 +1038,46 @@ const lxAtFdcwd = -100
 func (g *dguest) guestAbs(dirfd int64, p string) (string, lxErrno) {
 	dirfd = int64(int32(dirfd))
 	if path.IsAbs(p) {
-		return path.Clean(g.chrootRoot() + p), 0
+		return g.within(g.rootDir(), p), 0
 	}
 	if dirfd == lxAtFdcwd {
-		return path.Clean(g.getCwd() + "/" + p), 0
+		return g.within(g.getCwd(), p), 0
 	}
 	d, ok := g.ft.get(int(dirfd))
 	if !ok {
 		return "", lxEBADF
 	}
-	return path.Clean(d.name() + "/" + p), 0
+	return g.within(d.name(), p), 0
+}
+
+// rootDir is the overlay-absolute directory the process sees as "/".
+func (g *dguest) rootDir() string {
+	if r := g.chrootRoot(); r != "" {
+		return r
+	}
+	return "/"
+}
+
+// within joins rel onto the overlay-absolute directory base as the process
+// resolves it: from a base inside the process root, ".." stops at that root as
+// it does at "/". A base outside it (a directory opened before a chroot) climbs
+// freely, as on Linux.
+func (g *dguest) within(base, rel string) string {
+	if root := g.chrootRoot(); root != "" {
+		if r, ok := strings.CutPrefix(base, root); ok && (r == "" || r[0] == '/') {
+			if p := path.Clean("/" + r + "/" + rel); p != "/" {
+				return root + p
+			}
+			return root
+		}
+	}
+	return path.Clean(base + "/" + rel)
 }
 
 // resolve follows symlinks in the guest namespace (an absolute target restarts
 // at the guest root, never the host's) and returns the symlink-free guest path.
 // followLast controls the final component (lstat/readlink/unlink don't follow).
 func (g *dguest) resolve(gp string, followLast bool) (string, lxErrno) {
-	if g.rootAbs == "" && !isPseudoPath(gp) {
-		// A non-host root has no host path to resolve against; the namespace does
-		// the walk. For an exec target or interpreter (followLast) the host kernel
-		// would follow a final symlink -- e.g. an image's /bin/ls -> coreutils --
-		// but here nothing does, so follow it through the namespace, which applies
-		// the same confinement as any path. On any failure, leave gp for the
-		// caller's open to report the real error.
-		if !followLast {
-			return gp, 0
-		}
-		if loc, err := g.vns().Resolve(gp, true); err == nil {
-			if loc.Path == "" {
-				return "/", 0
-			}
-			return loc.Path, 0
-		}
-		return gp, 0
-	}
 	parts := strings.Split(strings.TrimPrefix(path.Clean(gp), "/"), "/")
 	cur := "/"
 	hops := 0
@@ -1081,7 +1087,7 @@ func (g *dguest) resolve(gp string, followLast bool) (string, lxErrno) {
 			continue
 		}
 		if p == ".." {
-			cur = path.Dir(cur)
+			cur = g.within(cur, "..")
 			continue
 		}
 		next := path.Join(cur, p)
@@ -1096,15 +1102,14 @@ func (g *dguest) resolve(gp string, followLast bool) (string, lxErrno) {
 		if hops++; hops > 40 {
 			return "", lxELOOP
 		}
-		if path.IsAbs(t) {
-			// An absolute target is relative to the process root, except a procfs
-			// magic link (/proc/<pid>/fd/*, exe, ...) which names an already-open
+		switch {
+		case path.IsAbs(t) && isPseudoPath(next):
+			// A procfs magic link (/proc/<pid>/fd/*, exe, ...) names an already-open
 			// object and resolves the same whatever root the follower chrooted to.
-			if !isPseudoPath(next) {
-				t = g.chrootRoot() + t
-			}
-		} else {
-			t = path.Join(cur, t)
+		case path.IsAbs(t):
+			t = g.within(g.rootDir(), t)
+		default:
+			t = g.within(cur, t)
 		}
 		rest := parts[i+1:]
 		parts = append(strings.Split(strings.TrimPrefix(path.Clean(t), "/"), "/"), rest...)

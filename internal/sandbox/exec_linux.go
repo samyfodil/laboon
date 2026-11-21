@@ -69,7 +69,11 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	defer exe.release()
 	var interp *image
 	if exe.interp != "" {
-		ipf, err := dg.openProgram(execSrc{gp: exe.interp})
+		ip, e := dg.guestAbs(lxAtFdcwd, exe.interp)
+		if e != 0 {
+			return fail(e)
+		}
+		ipf, err := dg.openProgram(execSrc{gp: ip})
 		if err != nil {
 			return fail(osErrno(err))
 		}

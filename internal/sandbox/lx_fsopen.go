@@ -246,8 +246,10 @@ func (g *dguest) resolveHow(dirfd int64, p string, follow bool, resolve uint64) 
 		}
 		base = d.name()
 	}
-	root := "/"
-	if resolve&(lxResolveBeneath|lxResolveInRoot) != 0 {
+	top := g.rootDir()
+	root := top
+	scoped := resolve&(lxResolveBeneath|lxResolveInRoot) != 0
+	if scoped {
 		root = base
 		if path.IsAbs(p) {
 			if resolve&lxResolveBeneath != 0 {
@@ -260,7 +262,7 @@ func (g *dguest) resolveHow(dirfd int64, p string, follow bool, resolve uint64) 
 	parts := strings.Split(p, "/")
 	cur := base
 	if path.IsAbs(p) {
-		cur = "/"
+		cur = root
 	}
 	hops := 0
 	under := func(x string) bool { return root == "/" || x == root || strings.HasPrefix(x, root+"/") }
@@ -270,11 +272,11 @@ func (g *dguest) resolveHow(dirfd int64, p string, follow bool, resolve uint64) 
 			continue
 		}
 		if c == ".." {
-			if cur == root {
-				if beneath {
+			if cur == root || cur == top {
+				if beneath && cur == root {
 					return "", lxEXDEV
 				}
-				continue // IN_ROOT: ".." at the root stays there
+				continue // ".." at the process root, or the IN_ROOT root, stays there
 			}
 			cur = path.Dir(cur)
 			continue
@@ -303,7 +305,7 @@ func (g *dguest) resolveHow(dirfd int64, p string, follow bool, resolve uint64) 
 		}
 		parts = append(strings.Split(t, "/"), parts[i+1:]...)
 		i = -1
-		if !under(cur) {
+		if scoped && !under(cur) {
 			return "", lxEXDEV
 		}
 	}

@@ -305,7 +305,11 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 	ranges := [][2]uint64{{img.lo, img.hi}}
 	var interp *wimage
 	if img.interp != "" {
-		isrc, e := dg.readImage(execSrc{gp: img.interp})
+		ip, e := dg.guestAbs(lxAtFdcwd, img.interp)
+		if e != 0 {
+			return w, fmt.Errorf("interpreter %s: %w", img.interp, lxErr(e))
+		}
+		isrc, e := dg.readImage(execSrc{gp: ip})
 		if e != 0 {
 			return w, fmt.Errorf("interpreter %s: %w", img.interp, lxErr(e))
 		}

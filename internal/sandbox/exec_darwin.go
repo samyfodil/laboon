@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -35,25 +34,17 @@ func (g *dguest) execve(dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 		return fail(e)
 	}
 	host, prefix, skip, gp := t.src, t.prefix, t.skip, t.gp
-	// The dynamic linker's guest path mapped to a host path: under a
-	// host-directory root the real linker file; for a non-host root resolved and
-	// spilled through the guest fs, the same as the program (execTarget) was.
+	// The dynamic linker is resolved from the process root and made a private
+	// copy through the Namespace, the same as the program (execTarget) was.
 	linkerHost := func(ip string) (string, error) {
-		if g.rootAbs != "" {
-			h := filepath.Join(g.rootAbs, filepath.Clean("/"+ip))
-			if abs, err := filepath.Abs(h); err == nil {
-				h = abs
+		gp, e := g.guestAbs(lxAtFdcwd, ip)
+		if e == 0 {
+			var s execSrc
+			if s, e = g.execSource(gp, nil); e == 0 {
+				return string(s), nil
 			}
-			if _, err := os.Stat(h); err != nil {
-				return "", err
-			}
-			return h, nil
 		}
-		s, e := g.execSource(ip, nil)
-		if e != 0 {
-			return "", fmt.Errorf("dynamic linker %q: errno %d", ip, e)
-		}
-		return string(s), nil
+		return "", fmt.Errorf("dynamic linker %q: errno %d", ip, e)
 	}
 	interpHost, ierr := resolveInterp(host, linkerHost)
 	if ierr != nil {
