@@ -5,7 +5,6 @@ package sandbox
 import (
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -186,22 +185,29 @@ func init() {
 
 // ---- opening ------------------------------------------------------------------
 
+// openTTY opens the guest terminal device gp, told by the device the path
+// resolves to (the pty multiplexor, the controlling terminal, or a pty slave),
+// reporting false when gp is not one of them.
 func (g *dguest) openTTY(gp string, flags int64) (int64, bool) {
-	switch {
-	case gp == "/dev/ptmx":
+	n, e, ok := g.pseudo(gp)
+	if !ok || e != 0 || n.kind != pDev {
+		return 0, false
+	}
+	switch major, minor := lxMajor(n.rdev), lxMinor(n.rdev); {
+	case major == 5 && minor == 2:
 		return g.openPtmx(flags), true
-	case gp == "/dev/tty":
+	case major == 5 && minor == 0:
 		d := g.term.cttyOf(g.mySid())
 		if d == nil {
 			return sErr(lxENXIO), true
 		}
 		return g.openSlave(d, "/dev/tty", flags|lxONoctty), true
-	case strings.HasPrefix(gp, "/dev/pts/"):
-		d := g.ptsDev(strings.TrimPrefix(gp, "/dev/pts/"))
+	case major == 136:
+		d := g.term.dev(int(minor))
 		if d == nil {
 			return sErr(lxENOENT), true
 		}
-		return g.openSlave(d, gp, flags), true
+		return g.openSlave(d, "/dev/pts/"+strconv.Itoa(int(minor)), flags), true
 	}
 	return 0, false
 }

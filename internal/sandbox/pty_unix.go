@@ -4,7 +4,8 @@ package sandbox
 
 import (
 	"os"
-	"strings"
+	"slices"
+	"strconv"
 	"sync"
 	"syscall"
 )
@@ -51,30 +52,32 @@ func (ts *termState) close() {
 }
 
 // openTTY opens the guest terminal device gp, reporting false when gp is not
-// one of them.
+// one of them. A terminal is told by the device the path resolves to, as the
+// kernel picks a driver by device number: the pty multiplexor, the controlling
+// terminal, or a pty slave.
 func (g *dguest) openTTY(gp string, flags int64) (int64, bool) {
-	switch {
-	case gp == "/dev/ptmx":
+	n, e, ok := g.pseudo(gp)
+	if !ok || e != 0 || n.kind != pDev {
+		return 0, false
+	}
+	switch major, minor := lxMajor(n.rdev), lxMinor(n.rdev); {
+	case major == 5 && minor == 2:
 		return g.openPtmx(flags), true
-	case gp == "/dev/tty":
+	case major == 5 && minor == 0:
 		ctty := g.cttyPath()
 		if ctty == "" {
 			return sErr(lxENXIO), true
 		}
 		return g.openTTYPath(ctty, flags), true
-	case strings.HasPrefix(gp, "/dev/pts/"):
-		n, ok := g.ptsVisible(gp)
-		if !ok {
-			return sErr(lxENOENT), true
-		}
+	case major == 136:
 		g.term.mu.Lock()
-		p := g.term.ptmx[n]
+		p := g.term.ptmx[int(minor)]
 		locked := p != nil && p.locked
 		g.term.mu.Unlock()
 		if locked {
 			return sErr(lxEIO), true
 		}
-		fd := g.openTTYPath(hostPtsPath(n), flags)
+		fd := g.openTTYPath(n.host, flags)
 		if p != nil && fd >= 0 {
 			p.release()
 		}
@@ -83,11 +86,10 @@ func (g *dguest) openTTY(gp string, flags int64) (int64, bool) {
 	return 0, false
 }
 
-// ptsVisible parses a guest /dev/pts/N and reports whether the guest may see
+// ptsVisible parses a /dev/pts entry name and reports whether the guest may see
 // it: a slave of a ptmx this run created, or the run's stdio terminal. Other
 // host terminals belong to other sessions of the user.
-func (g *dguest) ptsVisible(gp string) (int, bool) {
-	s := strings.TrimPrefix(gp, "/dev/pts/")
+func (g *dguest) ptsVisible(s string) (int, bool) {
 	if s == "" || len(s) > 6 || (len(s) > 1 && s[0] == '0') {
 		return 0, false
 	}
@@ -98,16 +100,27 @@ func (g *dguest) ptsVisible(gp string) (int, bool) {
 		}
 		n = n*10 + int(c-'0')
 	}
-	g.term.mu.Lock()
-	_, mine := g.term.ptmx[n]
-	g.term.mu.Unlock()
-	if mine {
-		return n, true
-	}
-	if m, ok := hostPtsNum(g.cttyPath()); ok && m == n {
-		return n, true
+	for _, m := range g.ptsNums() {
+		if m == n {
+			return n, true
+		}
 	}
 	return 0, false
+}
+
+// ptsNums are the pty slaves the guest may see, in order.
+func (g *dguest) ptsNums() []int {
+	g.term.mu.Lock()
+	ns := make([]int, 0, len(g.term.ptmx)+1)
+	for n := range g.term.ptmx {
+		ns = append(ns, n)
+	}
+	g.term.mu.Unlock()
+	if m, ok := hostPtsNum(g.cttyPath()); ok && !slices.Contains(ns, m) {
+		ns = append(ns, m)
+	}
+	slices.Sort(ns)
+	return ns
 }
 
 // cttyPath is the host path of the guest's controlling terminal: the run's
@@ -124,24 +137,17 @@ func (g *dguest) cttyPath() string {
 	return ""
 }
 
-// ttyLstat stats a guest terminal path on the host.
+// ttyLstat stats a guest terminal device on the host, so stat of its path and
+// fstat of an fd open on it agree (ttyname compares them).
 func (g *dguest) ttyLstat(gp string) (os.FileInfo, lxErrno, bool) {
-	var host string
-	switch {
-	case gp == "/dev/ptmx", gp == "/dev/tty":
-		host = gp
-	case gp == "/dev/pts":
-		host = "/dev"
-	case strings.HasPrefix(gp, "/dev/pts/"):
-		n, ok := g.ptsVisible(gp)
-		if !ok {
-			return nil, lxENOENT, true
-		}
-		host = hostPtsPath(n)
-	default:
+	n, e, ok := g.pseudo(gp)
+	if !ok || e != 0 || n.kind != pDev {
 		return nil, 0, false
 	}
-	fi, err := os.Stat(host)
+	if major, minor := lxMajor(n.rdev), lxMinor(n.rdev); major != 136 && !(major == 5 && (minor == 0 || minor == 2)) {
+		return nil, 0, false
+	}
+	fi, err := os.Stat(n.host)
 	if err != nil {
 		return nil, osErrno(err), true
 	}
@@ -262,7 +268,29 @@ func (g *dguest) termRead(d *dfile, bufAddr uint64, n int64) (int64, bool) { ret
 
 func (g *dguest) termWrite(d *dfile, bufAddr uint64, n int64) (int64, bool) { return 0, false }
 
-// ptsDir is /dev/pts as a synthetic directory; ttyLstat serves its entries.
+// ptsDir is a devpts instance: ptmx and the pty slaves the guest may see, each
+// backed by its host terminal.
 func (g *dguest) ptsDir() *pnode {
-	return &pnode{kind: pDir, perm: 0o755, kids: func() []pchild { return nil }}
+	slave := func(n int) *pnode {
+		return &pnode{kind: pDev, perm: 0o620, host: hostPtsPath(n), rdev: lxMakedev(136, uint64(n))}
+	}
+	return &pnode{
+		kind: pDir, perm: 0o755,
+		kids: func() []pchild {
+			out := []pchild{{"ptmx", devNode("ptmx")}}
+			for _, n := range g.ptsNums() {
+				out = append(out, pchild{strconv.Itoa(n), slave(n)})
+			}
+			return out
+		},
+		look: func(name string) *pnode {
+			if name == "ptmx" {
+				return devNode("ptmx")
+			}
+			if n, ok := g.ptsVisible(name); ok {
+				return slave(n)
+			}
+			return nil
+		},
+	}
 }

@@ -34,6 +34,7 @@ const (
 	sysfsMagic  = 0x62656572
 	cgroupMagic = 0x63677270
 	tmpfsMagic  = 0x01021994
+	devptsMagic = 0x1cd1
 )
 
 func (f *pnodeFS) fsType() uint64 { return f.magic }

@@ -457,7 +457,7 @@ func (g *dguest) pseudoStat(gp string) (os.FileInfo, lxErrno, bool) {
 // (procfs files are size 0, devices are character devices), anything else the
 // host file.
 func (g *dguest) fileInfo(d *dfile) (os.FileInfo, error) {
-	if g.pseudoMount(d.gp) {
+	if !d.tty && g.pseudoMount(d.gp) {
 		if fi, e, ok := g.pseudoStat(d.gp); ok && e == 0 {
 			return fi, nil
 		}

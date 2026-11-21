@@ -118,10 +118,12 @@ func (g *dguest) mount(srcAddr, tgtAddr, fsAddr, flags, dataAddr uint64) int64 {
 		// fd for MAP_SHARED; a file mmapped MAP_SHARED on this tmpfs gets ENODEV.
 		data, _ := g.readCStr(dataAddr)
 		return g.mountMem(target, data)
-	case "mqueue", "devpts":
-		// These need only a writable mount point here; the container workloads this
-		// serves do not exercise their object semantics.
+	case "mqueue":
+		// It needs only a writable mount point here; the container workloads this
+		// serves do not exercise its object semantics.
 		return g.mountFS(target)
+	case "devpts":
+		return g.mountPseudo(target, newPnodeFS(g.ptsDir(), devDevtmp, devptsMagic, target))
 	case "proc":
 		return g.mountPseudo(target, newPnodeFS(g.procRoot(), devProc, procMagic, target))
 	case "sysfs":
