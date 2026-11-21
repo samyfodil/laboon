@@ -350,6 +350,7 @@ fn buildRestorer() void {
     if (stub.allocRWX(&b, &s)) |p| {
         const code = A.restorer_code;
         @memcpy(@as([*]u8, @ptrFromInt(p))[0..code.len], &code);
+        if (!stub.mem.ownTrap(p + A.restorer_trap)) stub.die(0xE0000009);
         g_restorer = p;
     }
 }

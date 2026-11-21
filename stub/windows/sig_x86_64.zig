@@ -28,6 +28,7 @@ pub const RED_ZONE: u64 = 128;
 // The restorer for a handler without SA_RESTORER: `mov $15,%eax; ud2`, the ud2
 // trapping rt_sigreturn.
 pub const restorer_code = [_]u8{ 0xb8, 0x0f, 0x00, 0x00, 0x00, 0x0f, 0x0b };
+pub const restorer_trap = 5;
 
 // Ctx is a guest thread's user state in sigcontext order, the currency between
 // the trap frame, the Windows CONTEXT and the Linux sigcontext.

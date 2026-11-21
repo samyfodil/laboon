@@ -30,6 +30,7 @@ pub const RED_ZONE: u64 = 0;
 // The restorer for a handler without SA_RESTORER (Go's): `mov x8, #139;
 // udf #0`, the udf trapping rt_sigreturn.
 pub const restorer_code = [_]u8{ 0x68, 0x11, 0x80, 0xd2, 0, 0, 0, 0 };
+pub const restorer_trap = 4;
 
 // Ctx is a guest thread's user state: the sigcontext registers, the FP/SIMD
 // state, and the fault's address and syndrome.

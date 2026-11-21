@@ -13,7 +13,8 @@ import (
 // loaded image, the trap fallback where the platform has one for it, and a
 // syscall in code the guest made executable at run time.
 func TestSyscallPreservesRegisters(t *testing.T) {
-	regs, threads, belowsp := guestPath(t, "regs_arm64"), guestPath(t, "threads"), guestPath(t, "belowsp_arm64")
+	regs, threads := guestPath(t, "regs_arm64"), guestPath(t, "threads")
+	root, belowsp := guestRoot(t, "belowsp_arm64")
 	for _, trap := range trapModes {
 		restore := useTraps(trap)
 		for _, jit := range []string{"", "jit"} {
@@ -32,7 +33,7 @@ func TestSyscallPreservesRegisters(t *testing.T) {
 				t.Fatalf("trap=%v: trace %q", trap, strings.SplitN(trace.String(), "\n", 2)[0])
 			}
 			o.Reset()
-			code, err = Run(context.Background(), belowsp, Config{Args: args(belowsp), Stdout: &o, Stderr: &o})
+			code, err = Run(context.Background(), belowsp, Config{Args: args(belowsp), Stdout: &o, Stderr: &o, RootFS: HostRoot(root)})
 			if err != nil || code != 0 || o.String() != "first: below sp preserved\nsecond: below sp preserved\n" {
 				t.Fatalf("trap=%v %s belowsp: code=%d err=%v out=%q", trap, jit, code, err, o.String())
 			}

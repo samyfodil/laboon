@@ -1535,7 +1535,7 @@ fn heat(i: usize, page: u64, pc: u64) bool {
     const sc: [*]const u32 = @ptrFromInt(@intFromPtr(root.scratch()));
     var nt: usize = 0;
     for (sc[0..nsites]) |off| {
-        if (!trapAside(aside, off)) continue;
+        if (!trapAside(aside, page, off)) continue;
         heat_traps[nt] = off;
         nt += 1;
     }
@@ -1568,15 +1568,16 @@ fn heat(i: usize, page: u64, pc: u64) bool {
     return true;
 }
 
-// trapAside turns the syscall at off in a page held aside into the trap the
-// stub serves, if it is one, and reports whether it did.
-fn trapAside(aside: u64, off: u32) bool {
+// trapAside turns the syscall at off in a page held aside, to run at page,
+// into the stub's way in (on arm64 its island, see jitSiteWord), if it is one,
+// and reports whether it did.
+fn trapAside(aside: u64, page: u64, off: u32) bool {
     switch (@import("builtin").cpu.arch) {
         .aarch64 => {
             if (off % 4 != 0 or off + 4 > PAGE) return false;
-            const w: *u32 = @ptrFromInt(aside + off);
-            if (w.* != 0xd4000001) return false;
-            w.* = 0;
+            const w: [*]u32 = @ptrFromInt(aside + off);
+            if (w[0] != 0xd4000001) return false;
+            w[0] = root.arch.jitSiteWord(page + off, if (off >= 4) (w - 1)[0] else null);
         },
         else => {
             if (off + 2 > PAGE) return false;
@@ -2034,6 +2035,13 @@ fn forgetTraps(lo: u64, hi: u64) void {
     }
 }
 
+// ownTrap records a trap the stub placed outside the guest's memory.
+pub fn ownTrap(pc: u64) bool {
+    acquire();
+    defer releaseLock();
+    return addOwn(pc);
+}
+
 // addOwn records a trap the stub placed. The lock is held.
 fn addOwn(pc: u64) bool {
     if (nown == capown) {
@@ -2081,7 +2089,9 @@ fn untrapSite(page: u64, off: u32) void {
     switch (@import("builtin").cpu.arch) {
         .aarch64 => {
             if (off % 4 != 0 or off + 4 > PAGE) return;
-            _ = @cmpxchgStrong(u32, @as(*u32, @ptrFromInt(page + off)), 0, 0xd4000001, .seq_cst, .seq_cst);
+            const w: *u32 = @ptrFromInt(page + off);
+            const cur = @atomicLoad(u32, w, .seq_cst);
+            if (cur == 0 or root.arch.isJitBranch(page + off, cur)) _ = @cmpxchgStrong(u32, w, cur, 0xd4000001, .seq_cst, .seq_cst);
         },
         else => {
             if (off + 2 > PAGE) return;
@@ -2170,20 +2180,21 @@ fn rewritePage(page: u64, pc: u64) bool {
     }
 }
 
-// trapSite turns the syscall at off in page into the trap the stub serves, if
-// it is still the syscall, makes img what the page then holds, and reports
-// whether it did.
+// trapSite turns the syscall at off in page into the stub's way in (on arm64
+// its island, see jitSiteWord; a trap otherwise), if it is still the syscall,
+// makes img what the page then holds, and reports whether it did.
 fn trapSite(page: u64, off: u32, img: *[PAGE]u8) bool {
     switch (@import("builtin").cpu.arch) {
         .aarch64 => {
             if (off % 4 != 0 or off + 4 > PAGE) return false;
             const w: *u32 = @ptrFromInt(page + off);
+            const to = root.arch.jitSiteWord(page + off, if (off >= 4) std.mem.readInt(u32, img[off - 4 ..][0..4], .little) else null);
             if (!addOwn(page + off)) return false;
-            if (@cmpxchgStrong(u32, w, 0xd4000001, 0, .seq_cst, .seq_cst) != null) {
+            if (@cmpxchgStrong(u32, w, 0xd4000001, to, .seq_cst, .seq_cst) != null) {
                 nown -= 1;
                 return false;
             }
-            std.mem.writeInt(u32, img[off..][0..4], 0, .little);
+            std.mem.writeInt(u32, img[off..][0..4], to, .little);
         },
         else => {
             if (off + 2 > PAGE) return false; // a syscall across the page's end is left for the next page to own

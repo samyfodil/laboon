@@ -163,6 +163,89 @@ fn hookDispatcher() void {
     _ = NtFlushInstructionCache(SELF, kiued, 4);
 }
 
+// ---- islands for code made executable at run time --------------------------
+//
+// A syscall in code the guest made executable at run time branches to an
+// island, as one in file code does, rather than trapping: Windows dispatches
+// an exception on the guest's own stack, below its sp, which Linux leaves
+// alone across svc. The island is the rewriter's (rewrite/a64tramp.go, with
+// OwnStack), whose bytes depend only on the site, so a site keeps its island
+// for good. The callers hold the memory lock.
+
+const ISLAND = 64;
+const NOP: u32 = 0xd503201f;
+const JitIsl = struct { pc: u64 = 0, at: u64 = 0 };
+var jit_isl = [_]JitIsl{.{}} ** 4096;
+const IslPage = struct { base: u64 = 0, used: u64 = 0 };
+var isl_pages = [_]IslPage{.{}} ** 64;
+
+// jitSiteWord is what the svc at pc becomes: a branch to its island, or the
+// trap (udf #0) for an exit, whose stack may be gone already (Go's
+// exitThread), when the instruction before it, prev, is unknown, or when no
+// island is in reach.
+pub fn jitSiteWord(pc: u64, prev: ?u32) u32 {
+    const p = prev orelse return 0;
+    if (p == 0xd2800ba8 or p == 0x52800ba8) return 0; // mov x8|w8, #93
+    const at = jitIsland(pc) orelse return 0;
+    return encB(pc, at) orelse 0;
+}
+
+// isJitBranch reports whether w, at pc, is the branch to pc's island.
+pub fn isJitBranch(pc: u64, w: u32) bool {
+    const e = &jit_isl[islFind(pc)];
+    return e.pc == pc and encB(pc, e.at) == w;
+}
+
+fn islFind(pc: u64) usize {
+    var h: usize = @intCast((pc *% 0x9e3779b97f4a7c15) >> 52);
+    var n: usize = 0;
+    while (n < jit_isl.len and jit_isl[h].pc != pc and jit_isl[h].pc != 0) : (n += 1) h = (h + 1) % jit_isl.len;
+    return h;
+}
+
+fn jitIsland(pc: u64) ?u64 {
+    const h = islFind(pc);
+    if (jit_isl[h].pc == pc) return jit_isl[h].at;
+    if (jit_isl[h].pc != 0) return null; // the table is full
+    const at = islSlot(pc) orelse return null;
+    writeIsland(at, pc + 4);
+    jit_isl[h] = .{ .pc = pc, .at = at };
+    return at;
+}
+
+fn islSlot(pc: u64) ?u64 {
+    for (&isl_pages) |*p| {
+        if (p.base == 0) p.base = allocNear(pc, PAGE_EXECUTE_READWRITE) orelse return null;
+        const at = p.base + p.used;
+        if (p.used + ISLAND > 0x1000 or encB(pc, at) == null or encB(at + 40, pc + 4) == null) continue;
+        p.used += ISLAND;
+        return at;
+    }
+    return null;
+}
+
+fn writeIsland(at: u64, back: u64) void {
+    const w: [*]u32 = @ptrFromInt(at);
+    const adr: u32 = @truncate(at + 28 - (at + 4));
+    const page: u32 = @truncate((back >> 12) -% ((at + 12) >> 12));
+    w[0] = 0xa9b747f0; // stp x16, x17, [sp, #-144]!
+    w[1] = 0x10000000 | (adr & 3) << 29 | (adr >> 2 & 0x7ffff) << 5 | 16; // adr x16, epilogue
+    w[2] = 0xf81f0ff0; // str x16, [sp, #-16]!
+    w[3] = 0x90000000 | (page & 3) << 29 | (page >> 2 & 0x7ffff) << 5 | 17; // adrp x17, back
+    w[4] = 0x91000000 | @as(u32, @truncate(back & 0xfff)) << 10 | 17 << 5 | 17; // add x17, x17, :lo12:back
+    w[5] = 0x58000000 | ((56 - 20) >> 2) << 5 | 16; // ldr x16, entry
+    w[6] = 0xd61f0200; // br x16
+    w[7] = 0xa94147f0; // ldp x16, x17, [sp, #16]
+    w[8] = 0x910283ff; // add sp, sp, #160
+    w[9] = NOP;
+    w[10] = encB(at + 40, back).?;
+    w[11] = NOP;
+    w[12] = NOP;
+    w[13] = NOP;
+    @as(*u64, @ptrFromInt(at + 56)).* = @intFromPtr(&lc_syscall_entry);
+    _ = NtFlushInstructionCache(SELF, at, ISLAND);
+}
+
 // ---- resume slots ----------------------------------------------------------
 //
 // One 16-byte slot per channel slot in each resume page; a page is allocated
