@@ -36,8 +36,6 @@ import (
 // never reaches the host network. Global IPv6, multiple named networks and
 // cross-run networks are not modelled.
 
-const vnetGlobal = int32(-1) // the registry scope for the shared network (never a real netns id)
-
 // vkey identifies a reserved endpoint: scope is a namespace id for loopback or
 // vnetGlobal for the shared network; ip is the address within that scope (0 for
 // the namespace's wildcard). v6 marks IPv6's own address, :: or ::1 (ip 0 or
@@ -137,31 +135,6 @@ func vnetStream(d *dfile) bool {
 	return d.sk != nil && d.sk.virt && (d.sk.family == lxAFInet || d.sk.family == lxAFInet6) && d.sk.typ == lxSockStream
 }
 
-// onVirtualNet reports whether ip is an address on the run's virtual network as
-// the model describes it: an address assigned to some namespace, or one on-link
-// with an interface of the connecting namespace. This replaces a hard-coded
-// subnet, so any addressing a guest configures through routing netlink works.
-// The caller holds n.mu.
-func (n *dnet) onVirtualNet(netns int32, ip uint32) bool {
-	if _, ok := n.ipNetns[ip]; ok {
-		return true
-	}
-	m := n.nets[netns]
-	if m == nil {
-		return false
-	}
-	for _, l := range m.links {
-		for _, a := range l.addrs {
-			if a.family == lxAFInet && len(a.ip) == 4 && !net.IP(a.ip).IsLoopback() {
-				if mask := prefixMask(a.prefix); mask != 0 && beIP(a.ip)&mask == ip&mask {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
 // vsource is the address a socket of namespace netns, bound to none, sends to
 // dst (IPv6's own when v6) from, as Linux's route lookup picks it: the
 // loopback's for a loopback dst, the address itself for one the namespace
@@ -183,27 +156,6 @@ func (n *dnet) vsource(netns int32, dst uint32, v6 bool) (uint32, bool) {
 // vconn is what a connecting vnet stream records for its accept: the address
 // it connects from and the one it connects to.
 type vconn struct{ src, dst vkey }
-
-// netnsAddr returns a namespace's own virtual-network IPv4 address (the first
-// the model carries), used as the local address when auto-binding a client so
-// its peer learns a real source address. The caller holds n.mu.
-func (n *dnet) netnsAddr(netns int32) (uint32, bool) {
-	if m := n.nets[netns]; m != nil {
-		for _, l := range m.links {
-			for _, a := range l.addrs {
-				if a.family == lxAFInet && len(a.ip) == 4 && !net.IP(a.ip).IsLoopback() {
-					return beIP(a.ip), true
-				}
-			}
-		}
-	}
-	for ip, ns := range n.ipNetns {
-		if ns == netns {
-			return ip, true
-		}
-	}
-	return 0, false
-}
 
 // scopeOf maps a bind/connect address to its registry scope and key-ip, or
 // ok=false if the address is off both loopback and the virtual network.

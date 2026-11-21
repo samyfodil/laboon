@@ -161,26 +161,6 @@ type dnet struct {
 	nftns map[int32]*nftState // per-netns nftables ruleset (netfilter netlink)
 }
 
-// syncIPNetns feeds the vnet delivery map from a namespace's modelled addresses,
-// so inter-container connectivity follows the interfaces the guest configures
-// with routing netlink rather than the netavark shim: each non-loopback IPv4
-// address maps to its namespace, exactly what the shim used to record from
-// podman's allocation. Caller holds n.mu.
-func (n *dnet) syncIPNetns(netns int32, m *netModel) {
-	for ip, ns := range n.ipNetns {
-		if ns == netns {
-			delete(n.ipNetns, ip)
-		}
-	}
-	for _, l := range m.links {
-		for _, a := range l.addrs {
-			if a.family == lxAFInet && len(a.ip) == 4 && !net.IP(a.ip).IsLoopback() {
-				n.ipNetns[uint32(a.ip[0])<<24|uint32(a.ip[1])<<16|uint32(a.ip[2])<<8|uint32(a.ip[3])] = netns
-			}
-		}
-	}
-}
-
 func (g *dguest) netState() *dnet {
 	g.dfs.netOnce.Do(func() {
 		n := &dnet{eg: newEgress(g.cfg), names: map[string][]byte{}, conns: map[string]*credLink{}, dnsFrom: map[string]int{}, dnsPort: map[[2]int][]byte{}, lent: map[[2]uint64]lent{}, vports: map[vkey]*vport{}, vudps: map[vkey]*vport{}, vconns: map[string]vconn{}, vEphem: 32768, ipNetns: map[uint32]int32{}}

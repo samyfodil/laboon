@@ -17,6 +17,12 @@ import "net/netip"
 // datagram to a port no one bound is dropped, as one the kernel answers with
 // an ICMP unreachable.
 
+// The virtual network is served the same way: an address a network namespace
+// configured through routing netlink (vnetaddr.go) is reached from every
+// namespace of the run, so a socket bound to one is named in a run-wide table
+// (scope vnetGlobal) while loopback and wildcard binds stay per namespace. A
+// wildcard bind also receives on its namespace's virtual-network addresses.
+
 // loopPort is a bucket of the loopback name table.
 type loopPort struct {
 	netns int32
@@ -96,6 +102,57 @@ func loopAs(ap netip.AddrPort, family int) []byte {
 	return linuxAddr(netip.AddrPortFrom(a, ap.Port()), family)
 }
 
+// vnetOwner is the namespace holding a, an address of the run's virtual
+// network. n.mu is held.
+func (n *dnet) vnetOwner(a netip.Addr) (int32, bool) {
+	a = a.Unmap()
+	if !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
+		return 0, false
+	}
+	b := a.As4()
+	ns, ok := n.ipNetns[beIP(b[:])]
+	return ns, ok
+}
+
+// vnetDest reports whether a socket of netns reaches a on the virtual network.
+// n.mu is held.
+func (n *dnet) vnetDest(netns int32, a netip.Addr) bool {
+	a = a.Unmap()
+	if netns == 0 || !a.Is4() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
+		return false
+	}
+	b := a.As4()
+	return n.onVirtualNet(netns, beIP(b[:]))
+}
+
+// loopKey is the bucket s is named in.
+func loopKey(s *dsock) loopPort {
+	if s.vscope {
+		return loopPort{vnetGlobal, s.typ, s.laddr.Port()}
+	}
+	return loopPort{s.netns, s.typ, s.laddr.Port()}
+}
+
+// loopRivals are the sockets a bind of s covering c at port may collide with:
+// those of its own bucket, and those of the other scope sharing addresses with
+// it (a virtual-network address's holder's wildcards, or a namespace's own
+// virtual-network addresses). n.mu is held.
+func (n *dnet) loopRivals(s *dsock, c loopCover, port uint16) []*dsock {
+	if c.ip.IsValid() {
+		if ns, ok := n.vnetOwner(c.ip); ok {
+			out := append([]*dsock(nil), n.loops[loopPort{vnetGlobal, s.typ, port}]...)
+			return append(out, n.loops[loopPort{ns, s.typ, port}]...)
+		}
+	}
+	out := append([]*dsock(nil), n.loops[loopPort{s.netns, s.typ, port}]...)
+	for _, o := range n.loops[loopPort{vnetGlobal, s.typ, port}] {
+		if ns, ok := n.vnetOwner(o.laddr.Addr()); ok && ns == s.netns {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
 // loopBindLocked binds s to ap, choosing an ephemeral port for port 0. n.mu
 // is held.
 func (n *dnet) loopBindLocked(s *dsock, ap netip.AddrPort) lxErrno {
@@ -121,10 +178,11 @@ func (n *dnet) loopBindLocked(s *dsock, ap netip.AddrPort) lxErrno {
 	if n.loops == nil {
 		n.loops = map[loopPort][]*dsock{}
 	}
-	k := loopPort{s.netns, s.typ, port}
-	n.loops[k] = append(n.loops[k], s)
+	_, s.vscope = n.vnetOwner(ap.Addr())
 	s.laddr = netip.AddrPortFrom(ap.Addr(), port)
 	s.name = loopAs(s.laddr, s.family)
+	k := loopKey(s)
+	n.loops[k] = append(n.loops[k], s)
 	return 0
 }
 
@@ -132,7 +190,7 @@ func (n *dnet) loopBindLocked(s *dsock, ap netip.AddrPort) lxErrno {
 // there covers an address it does, and (with share) does not let it share
 // (loopShares). A free port is chosen without sharing. n.mu is held.
 func (n *dnet) loopTaken(s *dsock, c loopCover, port uint16, share bool) bool {
-	for _, o := range n.loops[loopPort{s.netns, s.typ, port}] {
+	for _, o := range n.loopRivals(s, c, port) {
 		if !o.closed && o != s && coverOf(o, o.laddr.Addr()).overlaps(c) && !(share && loopShares(s, o)) {
 			return true
 		}
@@ -156,7 +214,7 @@ func loopShares(s, o *dsock) bool {
 // which Linux checks for again at listen. n.mu is held.
 func (n *dnet) loopListenTaken(s *dsock) bool {
 	c := coverOf(s, s.laddr.Addr())
-	for _, o := range n.loops[loopPort{s.netns, s.typ, s.laddr.Port()}] {
+	for _, o := range n.loopRivals(s, c, s.laddr.Port()) {
 		if o == s || o.closed || o.state != skListening || !coverOf(o, o.laddr.Addr()).overlaps(c) {
 			continue
 		}
@@ -172,7 +230,7 @@ func (n *dnet) loopUnbind(s *dsock) {
 	if !s.laddr.IsValid() {
 		return
 	}
-	k := loopPort{s.netns, s.typ, s.laddr.Port()}
+	k := loopKey(s)
 	l := n.loops[k]
 	for i, o := range l {
 		if o == s {
@@ -198,7 +256,7 @@ func (n *dnet) loopClaim(s *dsock) lxErrno {
 	if n.loops == nil {
 		n.loops = map[loopPort][]*dsock{}
 	}
-	k := loopPort{s.netns, s.typ, s.laddr.Port()}
+	k := loopKey(s)
 	n.loops[k] = append(n.loops[k], s)
 	s.lo = true
 	return 0
@@ -231,17 +289,25 @@ func (n *dnet) toLoop(s *dsock, netns int32, dest netip.Addr) lxErrno {
 func (n *dnet) loopTarget(netns int32, typ int, dest, from netip.AddrPort) *dsock {
 	a := loopDst(dest.Addr())
 	var exact, wild []*dsock
-	l := n.loops[loopPort{netns, typ, dest.Port()}]
-	for i := len(l) - 1; i >= 0; i-- {
-		o := l[i]
-		if o.closed {
-			continue
-		}
-		switch c := coverOf(o, o.laddr.Addr()); {
-		case c.ip.IsValid() && c.ip == a:
-			exact = append(exact, o)
-		case c.has(a):
-			wild = append(wild, o)
+	ks := []loopPort{{netns, typ, dest.Port()}}
+	if ns, ok := n.vnetOwner(a); ok {
+		// A virtual-network address: bound by name run-wide, or by a wildcard
+		// of the namespace holding it.
+		ks = []loopPort{{vnetGlobal, typ, dest.Port()}, {ns, typ, dest.Port()}}
+	}
+	for _, k := range ks {
+		l := n.loops[k]
+		for i := len(l) - 1; i >= 0; i-- {
+			o := l[i]
+			if o.closed {
+				continue
+			}
+			switch c := coverOf(o, o.laddr.Addr()); {
+			case c.ip.IsValid() && c.ip == a:
+				exact = append(exact, o)
+			case c.has(a):
+				wild = append(wild, o)
+			}
 		}
 	}
 	if o := loopPick(exact, typ, from); o != nil {
@@ -310,12 +376,14 @@ func (g *dguest) loopBind(s *dsock, raw []byte) int64 {
 	if a := ap.Addr(); a.Is6() && !a.Is4In6() && a.IsMulticast() {
 		return g.loopBindGroup6(s, raw)
 	}
-	if a := ap.Addr().Unmap(); !a.IsLoopback() && !a.IsUnspecified() && !(a.Is4() && a.IsMulticast()) {
-		return sErr(lxEADDRNOTAVAIL) // no interface has it, and it is no group
-	}
 	n := s.n
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if a := ap.Addr().Unmap(); !a.IsLoopback() && !a.IsUnspecified() && !(a.Is4() && a.IsMulticast()) {
+		if ns, ok := n.vnetOwner(a); !ok || ns != s.netns {
+			return sErr(lxEADDRNOTAVAIL) // no interface of its namespace has it, and it is no group
+		}
+	}
 	if s.laddr.IsValid() {
 		return sErr(lxEINVAL)
 	}
@@ -332,7 +400,7 @@ func (n *dnet) loopAutobind(s *dsock, dest netip.Addr) lxErrno {
 	if s.laddr.IsValid() {
 		return 0
 	}
-	at := loopSelf(s.family, dest)
+	at := n.loopSrc(s, dest)
 	if s.typ == lxSockDgram {
 		at = wildcard(s.family)
 	}
@@ -353,24 +421,48 @@ func (n *dnet) loopNarrow(s *dsock, src netip.Addr) {
 	s.name = loopAs(s.laddr, s.family)
 }
 
+// loopSrc is the address a socket s bound to none reaches dest from, as
+// Linux's route lookup picks it: its namespace's own address on the virtual
+// network for an address there, else the loopback's. n.mu is held.
+func (n *dnet) loopSrc(s *dsock, dest netip.Addr) netip.Addr {
+	if n.vnetDest(s.netns, dest) {
+		if ip, ok := n.netnsAddr(s.netns); ok {
+			a := netip.AddrFrom4([4]byte{byte(ip >> 24), byte(ip >> 16), byte(ip >> 8), byte(ip)})
+			if s.family == lxAFInet6 {
+				a = netip.AddrFrom16(a.As16())
+			}
+			return a
+		}
+	}
+	return loopSelf(s.family, dest)
+}
+
 // loopFrom is the address a datagram from s to dest comes from: its own, or,
-// bound to a wildcard or a group, the loopback address it reaches dest from.
-func loopFrom(s *dsock, dest netip.Addr) netip.AddrPort {
+// bound to a wildcard or a group, the address it reaches dest from. n.mu is
+// held.
+func (n *dnet) loopFrom(s *dsock, dest netip.Addr) netip.AddrPort {
 	src := s.laddr.Addr()
 	if a := src.Unmap(); a.IsUnspecified() || a.IsMulticast() {
-		src = loopSelf(lxAFInet, dest)
+		src = n.loopSrc(s, dest).Unmap()
 	}
 	return netip.AddrPortFrom(src, s.laddr.Port())
 }
 
 // loopDest reads a datagram or connection destination for s, which must be on
-// the loopback interface.
+// the loopback interface or, from a namespace of its own, the virtual network.
 func loopDest(s *dsock, raw []byte) (netip.AddrPort, lxErrno) {
 	ap, e := inetAddr(raw, s.family, s.typ == lxSockDgram)
 	if e != 0 {
 		return ap, e
 	}
-	if !loopLocal(ap.Addr()) {
+	if loopLocal(ap.Addr()) {
+		return ap, 0
+	}
+	n := s.n
+	n.mu.Lock()
+	on := n.vnetDest(s.netns, ap.Addr())
+	n.mu.Unlock()
+	if !on {
 		return ap, lxENETUNREACH
 	}
 	return ap, 0
@@ -426,7 +518,7 @@ func (g *dguest) loopConnect(d *dfile, raw []byte) int64 {
 		if e := n.loopAutobind(s, ap.Addr()); e != 0 {
 			return sErr(e)
 		}
-		n.loopNarrow(s, loopSelf(s.family, ap.Addr()))
+		n.loopNarrow(s, n.loopSrc(s, ap.Addr()))
 		s.raddr, s.peer = ap, loopAs(ap, s.family)
 		return 0
 	}
@@ -439,7 +531,7 @@ func (g *dguest) loopConnect(d *dfile, raw []byte) int64 {
 	if e := n.loopAutobind(s, ap.Addr()); e != 0 {
 		return sErr(e)
 	}
-	n.loopNarrow(s, loopSelf(s.family, ap.Addr()))
+	n.loopNarrow(s, n.loopSrc(s, ap.Addr()))
 	l := n.loopTarget(s.netns, s.typ, ap, s.laddr)
 	if l == nil || l.state != skListening {
 		return sErr(lxECONNREFUSED)
@@ -457,7 +549,7 @@ func (g *dguest) loopConnect(d *dfile, raw []byte) int64 {
 		}
 	}
 	n.ino++
-	srv := &dsock{family: l.family, typ: s.typ, proto: s.proto, n: n, ino: n.ino, cred: l.cred, maxBack: 128, loop: true, netns: s.netns}
+	srv := &dsock{family: l.family, typ: s.typ, proto: s.proto, n: n, ino: n.ino, cred: l.cred, maxBack: 128, loop: true, netns: l.netns}
 	srv.laddr = netip.AddrPortFrom(loopDst(ap.Addr()), ap.Port())
 	srv.name, srv.peer = loopAs(srv.laddr, l.family), loopAs(s.laddr, l.family)
 	srv.pair, s.pair = s, srv
@@ -512,7 +604,7 @@ func (g *dguest) loopSend(s *dsock, iovs [][2]uint64, total int, dest []byte) in
 	if e := n.loopAutobind(s, ap.Addr()); e != 0 {
 		return sErr(e)
 	}
-	from := loopFrom(s, ap.Addr())
+	from := n.loopFrom(s, ap.Addr())
 	to := n.loopTarget(s.netns, s.typ, ap, from)
 	if to == nil || to.shutRd || to.rx.n+len(buf) > sockRcvBuf {
 		return int64(total)

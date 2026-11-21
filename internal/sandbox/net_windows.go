@@ -100,8 +100,9 @@ type dsock struct {
 
 	state    int
 	closed   bool
-	virt     bool   // always false: the virtual network (vnet) is not realized on windows
+	virt     bool   // always false: the virtual network is served by loop sockets here (vscope)
 	loop     bool   // an INET socket of a run without networking, or of a run's own loopback (loopnet_windows.go)
+	vscope   bool   // a loop socket bound to an address of the run's virtual network, in its run-wide table
 	lo       bool   // a host INET socket bound to a wildcard, its port held on the run's own loopback too (loopClaim)
 	netns    int32  // a loop socket's network namespace
 	name     []byte // guest sockaddr it is bound to (AF_UNIX), nil if none
@@ -181,9 +182,10 @@ type dnet struct {
 	loops map[loopPort][]*dsock // bound loopback sockets of a run without networking
 	ephem uint16                // the last ephemeral port given out
 
-	nets  map[int32]*netModel // per-netns interface/address/route model (routing netlink)
-	mcDev map[mcDevKey]int    // the multicast groups each interface took in, with how many loop sockets joined each there
-	nftns map[int32]*nftState // per-netns nftables ruleset (netfilter netlink)
+	nets    map[int32]*netModel // per-netns interface/address/route model (routing netlink)
+	ipNetns map[uint32]int32    // the virtual network: an address -> the namespace it is assigned to
+	mcDev   map[mcDevKey]int    // the multicast groups each interface took in, with how many loop sockets joined each there
+	nftns   map[int32]*nftState // per-netns nftables ruleset (netfilter netlink)
 }
 
 func (g *dguest) netState() *dnet {
@@ -197,9 +199,6 @@ func (g *dguest) netState() *dnet {
 
 // close ends the run's networking; each socket closes with its description.
 func (n *dnet) close() {}
-
-// syncIPNetns is a no-op on Windows, which has no virtual network.
-func (n *dnet) syncIPNetns(netns int32, m *netModel) {}
 
 // reconcilePublish is a no-op on Windows, which has no virtual network to
 // publish into.
