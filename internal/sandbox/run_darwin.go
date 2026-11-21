@@ -200,6 +200,9 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	}
 	defer unix.Munmap(mem)
 	setMemCap(mem, cfg.MaxBytes) // before a stub maps anything
+	if err := publishVdso(mem, cfg.Cache); err != nil {
+		return 0, err
+	}
 
 	done := make(chan struct{})
 

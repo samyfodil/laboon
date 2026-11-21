@@ -9,8 +9,17 @@ import (
 	"os"
 	"unsafe"
 
+	"github.com/samyfodil/laboon/stub/vdso"
 	"golang.org/x/sys/windows"
 )
+
+// vdsoImage is the vDSO (stub/vdso) of the guest's architecture.
+func vdsoImage() []byte {
+	if elfMachine == elf.EM_AARCH64 {
+		return vdso.ARM64
+	}
+	return vdso.AMD64
+}
 
 // The stub owns guest memory (stub/windows/mem.zig) and asks the supervisor
 // only for file contents: lcMapFill fills private anonymous memory from a
@@ -26,6 +35,10 @@ const (
 	lcCodeSize    = 0x4c430023 // (fd, off, len, addr) -> trampoline bytes
 	lcMapCode     = 0x4c430024 // (fd, off, len, addr, n) -> 0, the n trampoline areas (base, size) in the slot scratch
 	lcIdregs      = 0x4c430035 // () -> the guest's ID_AA64ISAR0/1/2 in args[0..2] (arm64)
+	// vdsoFD is the file a code mapping of the guest's vDSO names: the stub
+	// maps it at start (stub/windows/mem.zig mapVdso), and a guest fd, an
+	// int, never is.
+	vdsoFD = 1 << 32
 
 	brkMax = 1 << 30 // the brk reservation after the image
 	// brkGap is left free between the image and its brk area: the arm64 stub
@@ -374,22 +387,35 @@ func (g *wguest) codeImage(d *dfile) (imageSrc, error) {
 // (d.readAt), so a non-host file's code is rewritten and mapped like a host
 // file's without the stub ever touching the backing.
 func (g *wguest) codeFill(dg *dguest, fd, off, n, addr uint64, areas []trampArea) ([]byte, [][]byte, []uint64, lxErrno) {
-	d, e := g.mapFile(dg, fd)
-	if e != 0 {
-		return nil, nil, nil, e
-	}
 	buf := make([]byte, n)
-	k, err := d.readAt(buf, int64(off))
-	if err != nil && err != io.EOF {
-		return nil, nil, nil, osErrno(err)
+	var d *dfile
+	var img []byte
+	if fd == vdsoFD {
+		img = vdsoImage()
+		if off != 0 || uint64(len(img)) > n {
+			return nil, nil, nil, lxEINVAL
+		}
+		copy(buf, img)
+	} else {
+		var e lxErrno
+		if d, e = g.mapFile(dg, fd); e != 0 {
+			return nil, nil, nil, e
+		}
+		k, err := d.readAt(buf, int64(off))
+		if err != nil && err != io.EOF {
+			return nil, nil, nil, osErrno(err)
+		}
+		clear(buf[k:])
 	}
-	clear(buf[k:])
 	if g.cfg.NoRewrite {
 		return buf, nil, nil, 0
 	}
-	src, serr := g.codeImage(d)
-	if serr != nil {
-		return nil, nil, nil, osErrno(serr)
+	src := imageSrc{data: img}
+	if d != nil {
+		var serr error
+		if src, serr = g.codeImage(d); serr != nil {
+			return nil, nil, nil, osErrno(serr)
+		}
 	}
 	f, err := elf.NewFile(src.reader())
 	if err != nil || f.Machine != elfMachine {

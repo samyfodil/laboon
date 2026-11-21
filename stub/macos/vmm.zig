@@ -127,6 +127,7 @@ const MADV_REMOVE: u64 = 9;
 const MADV_DONTNEED_LOCKED: u64 = 24;
 const MAP_ANON: u64 = 0x20;
 const MAP_FIXED: u64 = 0x10;
+const MAP_FIXED_NOREPLACE: u64 = 0x100000;
 const MAP_SHARED: u64 = 0x1;
 const MAP_TYPE: u64 = 0xf;
 const PROT_WRITE: u64 = 2;
@@ -145,6 +146,7 @@ const MREMAP_DONTUNMAP: u64 = 4;
 const EPERM: u64 = 1;
 const ENOMEM: u64 = 12;
 const EINVAL: u64 = 22;
+const EEXIST: u64 = 17;
 const EFAULT: u64 = 14;
 
 // Linux/arm64 clock, sleep and randomness syscalls the VM serves locally against
@@ -639,16 +641,20 @@ pub const Vmm = struct {
             NR_MMAP => {
                 const len = (sc.args[1] + 0xfff) & ~@as(u64, 0xfff);
                 if (len == 0) return neg(ENOMEM);
-                if (sc.args[3] & MAP_FIXED != 0) {
+                if (sc.args[3] & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0) {
                     // The guest demands a specific address -- a Go/Rust runtime
                     // committing a range it reserved earlier (that reservation came
                     // from our bump allocator, so it already lies in the window).
                     // The whole [0, 32 GiB) is mapped and zeroed, so committing is
                     // just handing the address back; mmap(MAP_FIXED) requires
                     // p == addr, which a bump allocation would violate.
-                    const addr = sc.args[0] & ~@as(u64, 0xfff);
+                    // MAP_FIXED_NOREPLACE takes the address only while nothing
+                    // there is mapped.
+                    const addr = sc.args[0];
+                    if (addr & 0xfff != 0) return neg(EINVAL);
                     if (addr < MMAP_MIN) return neg(EPERM);
                     if (addr + len > EXT_TOP) return neg(ENOMEM);
+                    if (sc.args[3] & MAP_FIXED == 0 and anyMapped(addr, addr + len)) return neg(EEXIST);
                     if (sc.args[3] & MAP_ANON == 0) {
                         // Recorded before the fill: the supervisor's writes reach
                         // only mapped guest memory (guestMapped).
@@ -1364,6 +1370,11 @@ const NR_FORKED: u64 = 0x1_0000_0003; // the child's host pid, right after a for
 const NR_CHILD_STOP: u64 = 0x1_0000_0004; // a traced new thread, before its first instruction
 const FUTEX_WAIT: u64 = 0;
 const FUTEX_WAKE: u64 = 1;
+const FUTEX_REQUEUE: u64 = 3;
+const FUTEX_CMP_REQUEUE: u64 = 4;
+const FUTEX_WAKE_OP: u64 = 5;
+const FUTEX_WAIT_BITSET: u64 = 9;
+const FUTEX_WAKE_BITSET: u64 = 10;
 const FUTEX_PRIVATE: u64 = 128;
 const FUTEX_CLOCK_REALTIME: u64 = 256;
 const CLONE_VFORK: u64 = 0x4000;
@@ -1387,6 +1398,8 @@ const TRACE_SIG_STRIDE: usize = 0x4000; // = supervisor sigStride
 const TRACE_REGS_OFF: usize = 256;
 const EAGAIN: u64 = 11;
 const ENOSYS: u64 = 38;
+const ETIMEDOUT: u64 = 110;
+const DARWIN_ETIMEDOUT: c_int = 60;
 
 // Signal state and the Linux arm64 rt_sigframe layout (matches sig.zig). Handlers
 // are recorded per signal; a fault delivers SIGSEGV onto the guest stack.
@@ -1609,6 +1622,29 @@ pub fn setMmapTops(first: u64, ext: u64) void {
     g_mmap_cur = first;
     g_ext_cur = ext;
 }
+
+// placeVdso copies the guest's vDSO, from the run's shared region in the
+// channel at base (sandbox/vdso_darwin.go; the arm64 record comes first),
+// into the mmap area and lists it as [vdso]. The VM traps its svc as any, so
+// it needs no rewriting. It returns where it went, 0 for nowhere.
+pub fn placeVdso(ram: [*]u8, base: [*]const u8) u64 {
+    const r = base + TRACE_AREA_OFF + 0x2000 + 0x100;
+    const n = std.mem.readInt(u32, r[0..4], .little);
+    const at_img = 8 + 4 * 16;
+    if (n == 0 or at_img + n > 0xf00) return 0;
+    const len = (@as(u64, n) + 0xfff) & ~@as(u64, 0xfff);
+    heapLock();
+    if (len > g_mmap_cur - g_brk_cur) {
+        heapUnlock();
+        return 0;
+    }
+    g_mmap_cur -= len;
+    const at = g_mmap_cur;
+    heapUnlock();
+    @memcpy(ram[@intCast(at)..][0..n], r[at_img..][0..n]);
+    addMap(at, at + len, 5, M_VDSO, false, 0, 0);
+    return at;
+}
 var g_heap_lock: u32 = 0;
 var g_chan_base: [*]u8 = undefined; // channel region base, for sibling thread slots
 
@@ -1662,11 +1698,27 @@ pub const M_HEAP: u64 = 4;
 pub const M_MAIN: u64 = 5;
 pub const M_INTERP: u64 = 6;
 pub const M_STACK: u64 = 7;
+pub const M_VDSO: u64 = 8;
 var g_maps: std.ArrayListUnmanaged(MapEnt) = .{};
 var g_maps_lock: std.Thread.Mutex = .{};
 
 fn fileOff(e: MapEnt, at: u64) u64 {
     return if (e.attr >> 8 == M_FILE) e.off + (at - e.lo) else 0;
+}
+
+// anyMapped reports whether any of [lo, hi) is in a mapping or the heap.
+fn anyMapped(lo: u64, hi: u64) bool {
+    heapLock();
+    const hlo = g_brk_start;
+    const hhi = g_brk_cur;
+    heapUnlock();
+    if (lo < hhi and hlo < hi) return true;
+    g_maps_lock.lock();
+    defer g_maps_lock.unlock();
+    for (g_maps.items) |e| {
+        if (lo < e.hi and e.lo < hi) return true;
+    }
+    return false;
 }
 
 // guestMapped reports whether every byte of [addr, addr+n) is guest memory:
@@ -2216,6 +2268,7 @@ extern "c" fn pthread_mutex_lock(m: *PthreadMutex) c_int;
 extern "c" fn pthread_mutex_unlock(m: *PthreadMutex) c_int;
 extern "c" fn pthread_cond_init(c: *PthreadCond, a: ?*anyopaque) c_int;
 extern "c" fn pthread_cond_wait(c: *PthreadCond, m: *PthreadMutex) c_int;
+extern "c" fn pthread_cond_timedwait(c: *PthreadCond, m: *PthreadMutex, abstime: *const Timespec) c_int;
 extern "c" fn pthread_cond_broadcast(c: *PthreadCond) c_int;
 
 const FUTEX_BUCKETS = 64;
@@ -2228,15 +2281,19 @@ fn futexBucket(host_addr: usize) *FutexBucket {
 }
 
 // futexWait blocks while the guest word at ram+addr still equals val.
-fn futexWait(ram: [*]u8, addr: u64, val: u32) void {
+fn futexWait(ram: [*]u8, addr: u64, val: u32, deadline: ?*const Timespec) u64 {
     const ua: *const u32 = @ptrFromInt(@intFromPtr(ram) + addr);
     const bk = futexBucket(@intFromPtr(ua));
     _ = pthread_mutex_lock(&bk.mu);
-    if (@atomicLoad(u32, ua, .acquire) == val) {
-        const g = bk.gen;
-        while (bk.gen == g) _ = pthread_cond_wait(&bk.cv, &bk.mu);
+    defer _ = pthread_mutex_unlock(&bk.mu);
+    if (@atomicLoad(u32, ua, .acquire) != val) return neg(EAGAIN);
+    const g = bk.gen;
+    while (bk.gen == g) {
+        if (deadline) |d| {
+            if (pthread_cond_timedwait(&bk.cv, &bk.mu, d) == DARWIN_ETIMEDOUT and bk.gen == g) return neg(ETIMEDOUT);
+        } else _ = pthread_cond_wait(&bk.cv, &bk.mu);
     }
-    _ = pthread_mutex_unlock(&bk.mu);
+    return 0;
 }
 
 // futexWake wakes everything in the word's bucket; woken guests re-check.
@@ -2260,21 +2317,111 @@ pub fn initThreads(chan_base: [*]u8) bool {
     return true;
 }
 
-// futexOp serves FUTEX_WAIT/WAKE on a guest futex word (at v.ram + addr) via the
-// stub-side bucket lock (see futexWait/futexWake).
+// futexOp serves the futex operations on guest words (at v.ram + addr) through
+// the stub-side buckets (see futexWait/futexWake). A wake reaches every waiter
+// in the word's bucket, which re-checks its word; a bitset narrows nothing, and
+// a requeue wakes the waiters it would move, each to wait again on its own.
 fn futexOp(v: *Vmm, sc: Syscall) u64 {
     const op = sc.args[1] & ~@as(u64, FUTEX_PRIVATE | FUTEX_CLOCK_REALTIME);
+    const uaddr = sc.args[0];
+    const val: u32 = @truncate(sc.args[2]);
+    if (!wordOk(v, uaddr)) return neg(EFAULT);
     switch (op) {
-        FUTEX_WAIT => {
-            futexWait(v.ram, sc.args[0], @truncate(sc.args[2]));
-            return 0; // the caller re-checks (spurious wakes allowed)
+        FUTEX_WAIT, FUTEX_WAIT_BITSET => {
+            if (op == FUTEX_WAIT_BITSET and @as(u32, @truncate(sc.args[5])) == 0) return neg(EINVAL);
+            if (sc.args[3] == 0) return futexWait(v.ram, uaddr, val, null);
+            if (sc.args[3] > v.ram_len -| 16) return neg(EFAULT);
+            const d = futexDeadline(readTs(v.ram, sc.args[3]), op == FUTEX_WAIT_BITSET, sc.args[1] & FUTEX_CLOCK_REALTIME != 0) orelse return neg(EINVAL);
+            return futexWait(v.ram, uaddr, val, &d);
         },
-        FUTEX_WAKE => {
-            futexWake(v.ram, sc.args[0]);
-            return sc.args[2];
+        FUTEX_WAKE, FUTEX_WAKE_BITSET => {
+            if (op == FUTEX_WAKE_BITSET and @as(u32, @truncate(sc.args[5])) == 0) return neg(EINVAL);
+            futexWake(v.ram, uaddr);
+            return val;
+        },
+        FUTEX_REQUEUE, FUTEX_CMP_REQUEUE => {
+            const uaddr2 = sc.args[4];
+            if (!wordOk(v, uaddr2)) return neg(EFAULT);
+            if (op == FUTEX_CMP_REQUEUE and @atomicLoad(u32, guestWord(v, uaddr), .acquire) != @as(u32, @truncate(sc.args[5]))) return neg(EAGAIN);
+            futexWake(v.ram, uaddr);
+            futexWake(v.ram, uaddr2);
+            return val;
+        },
+        FUTEX_WAKE_OP => {
+            const uaddr2 = sc.args[4];
+            if (!wordOk(v, uaddr2)) return neg(EFAULT);
+            const enc: u32 = @truncate(sc.args[5]);
+            const old = wakeOpApply(guestWord(v, uaddr2), enc) orelse return neg(ENOSYS);
+            futexWake(v.ram, uaddr);
+            if (!wakeOpCmp(old, enc)) return val;
+            futexWake(v.ram, uaddr2);
+            return val + @as(u32, @truncate(sc.args[3]));
         },
         else => return neg(ENOSYS),
     }
+}
+
+// wordOk reports whether a futex word at guest address a is aligned and in RAM.
+fn wordOk(v: *Vmm, a: u64) bool {
+    return a & 3 == 0 and a <= v.ram_len -| 4;
+}
+
+fn guestWord(v: *Vmm, a: u64) *u32 {
+    return @ptrFromInt(@intFromPtr(v.ram) + a);
+}
+
+// futexDeadline is the realtime moment a futex timeout t ends: relative for
+// FUTEX_WAIT, absolute for FUTEX_WAIT_BITSET on the monotonic clock, or the
+// realtime one with FUTEX_CLOCK_REALTIME. Null for a malformed timespec.
+fn futexDeadline(t: Timespec, absolute: bool, realtime: bool) ?Timespec {
+    if (t.sec < 0 or t.nsec < 0 or t.nsec >= 1_000_000_000) return null;
+    var rt: Timespec = undefined;
+    _ = clock_gettime(DW_CLOCK_REALTIME, &rt);
+    const tn = t.sec *| 1_000_000_000 +| t.nsec;
+    const rtn = rt.sec *| 1_000_000_000 +| rt.nsec;
+    var at: i64 = undefined;
+    if (!absolute) {
+        at = rtn +| tn;
+    } else if (realtime) {
+        at = tn;
+    } else {
+        at = rtn +| (tn - monoNs());
+    }
+    return .{ .sec = @divFloor(at, 1_000_000_000), .nsec = @mod(at, 1_000_000_000) };
+}
+
+// wakeOpApply applies FUTEX_WAKE_OP's operation to w atomically and returns the
+// word's old value, null for an unknown operation.
+fn wakeOpApply(w: *u32, enc: u32) ?u32 {
+    var oparg: u32 = @bitCast(@as(i32, @bitCast(enc << 8)) >> 20);
+    if (enc & (8 << 28) != 0) oparg = @as(u32, 1) << @intCast(oparg & 31);
+    var old = @atomicLoad(u32, w, .monotonic);
+    while (true) {
+        const new = switch ((enc >> 28) & 7) {
+            0 => oparg, // FUTEX_OP_SET
+            1 => old +% oparg, // FUTEX_OP_ADD
+            2 => old | oparg, // FUTEX_OP_OR
+            3 => old & ~oparg, // FUTEX_OP_ANDN
+            4 => old ^ oparg, // FUTEX_OP_XOR
+            else => return null,
+        };
+        old = @cmpxchgWeak(u32, w, old, new, .seq_cst, .monotonic) orelse return old;
+    }
+}
+
+// wakeOpCmp is FUTEX_WAKE_OP's comparison of the old value.
+fn wakeOpCmp(old: u32, enc: u32) bool {
+    const o: i32 = @bitCast(old);
+    const arg: i32 = @as(i32, @bitCast(enc << 20)) >> 20;
+    return switch ((enc >> 24) & 15) {
+        0 => o == arg,
+        1 => o != arg,
+        2 => o < arg,
+        3 => o <= arg,
+        4 => o > arg,
+        5 => o >= arg,
+        else => false,
+    };
 }
 
 // ThreadArg bootstraps a new guest thread's OS thread.

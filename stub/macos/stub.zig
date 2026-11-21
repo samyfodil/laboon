@@ -1728,7 +1728,9 @@ const AT_EGID = 14;
 const AT_PLATFORM = 15;
 const AT_HWCAP = 16;
 const AT_CLKTCK = 17;
+const AT_IGNORE = 1;
 const AT_SECURE = 23;
+const AT_SYSINFO_EHDR = 33;
 const AT_RANDOM = 25;
 const AT_HWCAP2 = 26;
 const AT_EXECFN = 31;
@@ -1743,7 +1745,7 @@ const AT_EXECFN = 31;
 // static executable, the dynamic linker's load base when one is present, so the
 // interpreter can find itself. phdrAddr/phent/phnum are the MAIN program's
 // headers and entry is its entry point (where the interpreter hands off).
-fn buildInitStack(stkBase: u64, stkSize: u64, argv: []const [*:0]const u8, envp: []const [*:0]const u8, phdrAddr: u64, phent: u64, phnum: u64, entry: u64, atBase: u64) u64 {
+fn buildInitStack(stkBase: u64, stkSize: u64, argv: []const [*:0]const u8, envp: []const [*:0]const u8, phdrAddr: u64, phent: u64, phnum: u64, entry: u64, atBase: u64, vdso: u64) u64 {
     var top = stkBase + stkSize;
 
     // String area at the top, laid out as Linux does: argv strings ascending
@@ -1783,6 +1785,7 @@ fn buildInitStack(stkBase: u64, stkSize: u64, argv: []const [*:0]const u8, envp:
     const execfn = if (nargv > 0) argvAddr[0] else randAddr;
 
     const aux = [_][2]u64{
+        .{ if (vdso != 0) AT_SYSINFO_EHDR else AT_IGNORE, vdso },
         .{ AT_PHDR, phdrAddr },
         .{ AT_PHENT, phent },
         .{ AT_PHNUM, phnum },
@@ -1855,6 +1858,24 @@ const Image = struct {
     hi: u64 = 0,
 };
 
+// ElfSrc is where mapElf reads an image from: a file, or memory (the vDSO).
+const ElfSrc = union(enum) {
+    file: std.fs.File,
+    mem: []const u8,
+
+    fn read(s: ElfSrc, buf: []u8, off: u64) usize {
+        switch (s) {
+            .file => |f| return f.preadAll(buf, off) catch _exit(3),
+            .mem => |m| {
+                if (off >= m.len) return 0;
+                const n = @min(buf.len, m.len - off);
+                @memcpy(buf[0..n], m[@intCast(off)..][0..n]);
+                return n;
+            },
+        }
+    }
+};
+
 // mapElf maps one ELF (static exe, PIE, or dynamic linker) into its own region
 // (image + island area), maps PT_LOAD segments from the file copy-on-write (a
 // segment whose file offset is not congruent with its address is read in
@@ -1864,14 +1885,14 @@ const Image = struct {
 // equals the kernel-picked base. Each site is an offset (vaddr - minbase) found
 // by the Go recursive-descent rewriter, so a 0xd4000001 data word is never
 // patched; only words that really are svc #0 are rewritten (guarded below).
-fn mapElf(f: std.fs.File, sites: []const u32, hint: u64) Image {
+fn mapElf(src: ElfSrc, sites: []const u32, hint: u64) Image {
     // Read the headers only; segments are read straight into place below.
     var eh: [64]u8 = undefined;
-    if ((f.preadAll(&eh, 0) catch _exit(3)) != eh.len) _exit(3);
+    if (src.read(&eh, 0) != eh.len) _exit(3);
     const hdrLen: usize = @intCast(rd64(&eh, 32) + @as(u64, rd16(&eh, 54)) * rd16(&eh, 56));
     const d = std.heap.page_allocator.alloc(u8, @max(hdrLen, eh.len)) catch _exit(3);
     defer std.heap.page_allocator.free(d);
-    if ((f.preadAll(d, 0) catch _exit(3)) != d.len) _exit(3);
+    if (src.read(d, 0) != d.len) _exit(3);
     const e_entry = rd64(d, 24);
     const e_phoff = rd64(d, 32);
     const e_phentsize = rd16(d, 54);
@@ -1906,10 +1927,10 @@ fn mapElf(f: std.fs.File, sites: []const u32, hint: u64) Image {
         const p_filesz = rd64(d, @intCast(ph + 32));
         const dst = bias + p_vaddr;
         if (p_filesz == 0) continue;
-        if (p_vaddr % PAGE == p_off % PAGE) {
+        if (src == .file and p_vaddr % PAGE == p_off % PAGE) {
             const lo = rdDown(dst);
             const end = dst + p_filesz;
-            const m = mmap(@ptrFromInt(lo), rdUp(end) - lo, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, f.handle, @intCast(rdDown(p_off)));
+            const m = mmap(@ptrFromInt(lo), rdUp(end) - lo, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, src.file.handle, @intCast(rdDown(p_off)));
             if (m == MAP_FAILED or m == null) _exit(3);
             const p_memsz = rd64(d, @intCast(ph + 40));
             if (p_memsz > p_filesz and end % PAGE != 0) @memset(region[end - rb ..][0..@intCast(rdUp(end) - end)], 0);
@@ -1925,7 +1946,7 @@ fn mapElf(f: std.fs.File, sites: []const u32, hint: u64) Image {
         // serviced normally (the read lock is already released).
         const seg = region[dst - rb ..][0..@intCast(p_filesz)];
         const tmp = std.heap.page_allocator.alloc(u8, seg.len) catch _exit(3);
-        if ((f.preadAll(tmp, p_off) catch _exit(3)) != tmp.len) _exit(3);
+        if (src.read(tmp, p_off) != tmp.len) _exit(3);
         @memcpy(seg, tmp);
         std.heap.page_allocator.free(tmp);
         if (rd32(d, @intCast(ph + 4)) & 1 != 0) syncCode(dst, p_filesz);
@@ -2027,7 +2048,7 @@ fn loadAndEnter(path: [*:0]const u8, interpPath: ?[*:0]const u8, mainSites: [*:0
     procinfo.publish(g_chan);
     mem.drawLayout(g_chan.flags & chan.LAYOUT_NORAND != 0);
     const mf = std.fs.cwd().openFileZ(path, .{}) catch _exit(3);
-    const main_img = mapElf(mf, readSites(mainSites), mem.hint_exe);
+    const main_img = mapElf(.{ .file = mf }, readSites(mainSites), mem.hint_exe);
     mf.close();
     mem.placeBreak(main_img.hi + ISLAND_CAP);
 
@@ -2036,7 +2057,7 @@ fn loadAndEnter(path: [*:0]const u8, interpPath: ?[*:0]const u8, mainSites: [*:0
     procinfo.info = .{ .sp = 0, .main_lo = main_img.lo, .main_hi = main_img.hi, .interp_lo = 0, .interp_hi = 0, .stack_lo = 0, .stack_hi = 0 };
     if (interpPath) |ip| {
         const fi = std.fs.cwd().openFileZ(ip, .{}) catch _exit(8);
-        const interp = mapElf(fi, readSites(interpSites), mem.hint_mmap);
+        const interp = mapElf(.{ .file = fi }, readSites(interpSites), mem.hint_mmap);
         fi.close();
         enter = interp.entry;
         atBase = interp.base;
@@ -2044,8 +2065,15 @@ fn loadAndEnter(path: [*:0]const u8, interpPath: ?[*:0]const u8, mainSites: [*:0
         procinfo.info.interp_hi = interp.hi;
     }
 
+    var vdso: u64 = 0;
+    if (vdsoImage()) |v| {
+        const img = mapElf(.{ .mem = v.img }, v.sites, mem.hint_mmap);
+        mem.noteVdso(img.lo, img.hi);
+        vdso = img.lo;
+    }
+
     const stk = mmap(@ptrFromInt(mem.hint_stack), GUEST_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0) orelse _exit(7);
-    const sp = buildInitStack(@intFromPtr(stk), GUEST_STACK, argv, envp, main_img.phdr, main_img.phent, main_img.phnum, main_img.entry, atBase);
+    const sp = buildInitStack(@intFromPtr(stk), GUEST_STACK, argv, envp, main_img.phdr, main_img.phent, main_img.phnum, main_img.entry, atBase, vdso);
     procinfo.info.sp = sp;
     procinfo.info.stack_lo = @intFromPtr(stk);
     procinfo.info.stack_hi = @intFromPtr(stk) + GUEST_STACK;
@@ -2063,6 +2091,23 @@ fn loadAndEnter(path: [*:0]const u8, interpPath: ?[*:0]const u8, mainSites: [*:0
 }
 
 const LC_EXEC_STOP: u64 = 0x4c430018; // sandbox/lx_signal.go lxExecStop
+
+// vdsoImage is this guest architecture's vDSO and the syscall sites the
+// rewriter found in it, which the supervisor publishes in the run's shared
+// region (sandbox/vdso_darwin.go): a record of the image's length, the site
+// count, up to VDSO_SITES sites, then the image.
+const VDSO_REC: usize = 0xf00;
+const VDSO_SITES: usize = 16;
+
+fn vdsoImage() ?struct { img: []const u8, sites: []const u32 } {
+    const r: [*]const u8 = sig.runRegion() + 0x100 + (if (tstate.arm64) 0 else VDSO_REC);
+    const n = std.mem.readInt(u32, r[0..4], .little);
+    const ns = std.mem.readInt(u32, r[4..8], .little);
+    const at = 8 + 4 * VDSO_SITES;
+    if (n == 0 or ns > VDSO_SITES or at + n > VDSO_REC) return null;
+    const sites: [*]const u32 = @ptrCast(@alignCast(r + 8));
+    return .{ .img = r[at..][0..n], .sites = sites[0..ns] };
+}
 
 // enterGuest jumps to the guest entry on the guest stack, leaving no stub frame.
 // It enters exactly as the kernel does at exec: x0, fp and lr are zero. x0 is the

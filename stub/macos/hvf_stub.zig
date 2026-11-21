@@ -157,7 +157,9 @@ fn readAll(fd: c_int, buf: []u8) void {
 
 // Linux auxv types the guest's libc start reads.
 const AT_NULL: u64 = 0;
+const AT_IGNORE: u64 = 1;
 const AT_PHDR: u64 = 3;
+const AT_SYSINFO_EHDR: u64 = 33;
 const AT_PHENT: u64 = 4;
 const AT_PHNUM: u64 = 5;
 const AT_PAGESZ: u64 = 6;
@@ -182,7 +184,7 @@ fn pushStr(ram: []u8, top: *u64, s: [*:0]u8) u64 {
 // random bytes grow down from stack_top, then the vector
 // (argc, argv.., NULL, envp.., NULL, auxv) sits below them, 16-aligned, with the
 // returned sp at argc -- exactly what a libc _start expects.
-fn buildStack(ram: []u8, stack_top: u64, argv: [][*:0]u8, envp: [][*:0]u8, ld: Loaded, at_base: u64) u64 {
+fn buildStack(ram: []u8, stack_top: u64, argv: [][*:0]u8, envp: [][*:0]u8, ld: Loaded, at_base: u64, vdso: u64) u64 {
     var top: u64 = stack_top;
     top -= 16; // 16 random bytes for AT_RANDOM
     const rnd = top;
@@ -198,7 +200,7 @@ fn buildStack(ram: []u8, stack_top: u64, argv: [][*:0]u8, envp: [][*:0]u8, ld: L
     // TLS overlapping the pthread tsd[] (thread-local destructors then corrupt
     // it). BASE is the interpreter load base (0 when the guest is static), which
     // a dynamic ld.so reads to relocate itself.
-    const nslots = 1 + argv.len + 1 + envp.len + 1 + 16;
+    const nslots = 1 + argv.len + 1 + envp.len + 1 + 18;
     const sp = (top - @as(u64, nslots) * 8) & ~@as(u64, 0xf);
     var w = sp;
     put64(ram, w, argv.len);
@@ -216,6 +218,7 @@ fn buildStack(ram: []u8, stack_top: u64, argv: [][*:0]u8, envp: [][*:0]u8, ld: L
     put64(ram, w, 0);
     w += 8; // envp NULL
     const aux = [_][2]u64{
+        .{ if (vdso != 0) AT_SYSINFO_EHDR else AT_IGNORE, vdso },
         .{ AT_PHDR, ld.phdr },
         .{ AT_PHENT, ld.phent },
         .{ AT_PHNUM, ld.phnum },
@@ -377,7 +380,8 @@ pub fn main() void {
         for (0..nenv) |i| e[i] = environ[i].?;
         break :blk e;
     };
-    const sp = buildStack(ram, lay.stack_top, gargv, genv, ld, at_base);
+    const vdso = vmm.placeVdso(ram.ptr, base);
+    const sp = buildStack(ram, lay.stack_top, gargv, genv, ld, at_base, vdso);
     vmm.addMap(lay.stack_top - STACK_LEN, lay.stack_top, 3, vmm.M_STACK, false, 0, 0);
     vm.start(enter, sp);
 

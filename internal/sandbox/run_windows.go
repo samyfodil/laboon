@@ -350,6 +350,7 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 	var random [16]byte
 	rand.Read(random[:])
 	auxv := []uint64{
+		33, 0, // AT_SYSINFO_EHDR, which the stub sets once it maps the vDSO
 		3, img.phdr, // AT_PHDR
 		4, 56, // AT_PHENT
 		5, img.phnum, // AT_PHNUM

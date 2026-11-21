@@ -352,7 +352,7 @@ fn usedIn(lo: u64, hi: u64) u64 {
         n += 1;
     }
     for (vmas.items) |e| {
-        if (e.kind != .file) continue;
+        if (e.kind == .nofork) continue;
         all[n] = .{ .lo = e.lo, .hi = e.hi };
         n += 1;
     }
@@ -495,7 +495,7 @@ fn writablePrefix(addr: u64, n: u64) u64 {
 // holds a reference on its fdlink entry, so the file outlives a guest close as
 // on Linux. shm names the SysV attachment the range belongs to. A nofork entry
 // is a shared range that MADV_DONTFORK took out of fork inheritance.
-const Kind = enum(u8) { file, nofork };
+const Kind = enum(u8) { file, nofork, vdso };
 const Vma = struct {
     lo: u64,
     hi: u64,
@@ -689,6 +689,7 @@ const M_HEAP: u64 = 4;
 const M_MAIN: u64 = 5;
 const M_INTERP: u64 = 6;
 const M_STACK: u64 = 7;
+const M_VDSO: u64 = 8;
 
 // entLess orders by address; the heap goes first among equals, as it is
 // labelled over the guest's own mappings inside it (malloc's guard page).
@@ -715,8 +716,11 @@ pub fn maps(out: [*]MapEnt, cap: usize, from: u64, next: *u64) u64 {
         n += 1;
     }
     for (vmas.items) |e| {
-        if (e.kind != .file) continue;
-        const k = if (e.shm != 0) M_SHM else M_FILE;
+        const k = switch (e.kind) {
+            .file => if (e.shm != 0) M_SHM else M_FILE,
+            .vdso => M_VDSO,
+            .nofork => continue,
+        };
         all[n] = .{ .lo = e.lo, .hi = e.hi, .off = e.off, .aux = if (e.shm != 0) e.shm else e.id, .attr = k << 8 | @as(u64, @intFromBool(e.shared)) << 3 };
         n += 1;
     }
@@ -790,6 +794,15 @@ fn flushGone() void {
         lock.unlock();
         _ = root.hostCall(LC_SHMGONE, .{ c orelse return, 0, 0, 0, 0, 0 });
     }
+}
+
+// noteVdso records the vDSO the stub mapped at [lo, hi): /proc/<pid>/maps
+// names it [vdso], and unmapping, mapping over or moving it takes it along as
+// it does any mapping.
+pub fn noteVdso(lo: u64, hi: u64) void {
+    lock.lock();
+    defer lock.unlock();
+    _ = vmaAdd(.{ .lo = lo, .hi = hi, .kind = .vdso, .exec = true });
 }
 
 // reset forgets the old image's mappings at exec; its SysV attachments are

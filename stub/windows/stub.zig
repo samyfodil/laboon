@@ -73,6 +73,8 @@ pub const WIN_TRACED: u32 = 1 << 31;
 pub const WIN_SECCOMP: u32 = 1 << 30;
 const REP_RESULT: u64 = 1;
 const REP_START: u64 = 3;
+const AT_IGNORE: u64 = 1;
+const AT_SYSINFO_EHDR: u64 = 33;
 const REP_PEEK: u64 = 7; // copy guest memory into the slot window, reply MSG_HOSTRET
 const REP_POKE: u64 = 8; // copy the slot window into guest memory, reply MSG_HOSTRET
 const REP_THREAD_END: u64 = 11;
@@ -523,6 +525,7 @@ pub export fn wWinMainCRTStartup() callconv(win.WINAPI) noreturn {
     mem.init(ch.args[4], ch.args[5]);
     const entry = ch.args[0];
     const sp = ch.args[1];
+    setVdso(sp, mem.mapVdso());
     if (@hasDecl(arch, "setIdregs")) {
         _ = request(LC_IDREGS, .{ 0, 0, 0, 0, 0, 0 });
         const ia = slot().args;
@@ -531,4 +534,15 @@ pub export fn wWinMainCRTStartup() callconv(win.WINAPI) noreturn {
     instrcb.install(); // syscall backstop on, just before guest code runs
     arch.start(entry, si);
     arch.enter(entry, sp);
+}
+
+// setVdso puts the vDSO's address in the AT_SYSINFO_EHDR entry the supervisor
+// leaves first in the auxv of the initial stack at sp.
+fn setVdso(sp: u64, at: u64) void {
+    if (at == 0) die(0xE0000008);
+    const v: [*]u64 = @ptrFromInt(sp);
+    var i: usize = v[0] + 2;
+    while (v[i] != 0) : (i += 1) {}
+    i += 1;
+    if (v[i] == AT_SYSINFO_EHDR) v[i + 1] = at;
 }

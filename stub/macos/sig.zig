@@ -328,6 +328,12 @@ fn neg(e: i64) u64 {
     return @bitCast(-e);
 }
 
+// runRegion is what every stub reads of the run as a whole (sandbox/
+// lx_signal.go's sigRunOff, in slot 0's stride).
+pub fn runRegion() [*]u8 {
+    return g_area + 0x2000;
+}
+
 // runProcs is how many processes the run has (sandbox/lx_signal.go's
 // sigRunOff, in slot 0's stride).
 pub fn runProcs() u32 {

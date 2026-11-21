@@ -152,6 +152,7 @@ const Region = struct {
     file: bool = false, // a view of a file, not of shared anonymous memory
     shm: u64 = 0, // a SysV attachment cookie, for shmdt and exit accounting
     hot: bool = false, // a shadow of a view's page (anon, its view's fields kept): see "code in shared memory"
+    vdso: bool = false, // the guest's vDSO (mapVdso)
 };
 
 var regs: [MAXREG]Region = undefined;
@@ -832,6 +833,7 @@ fn mremap(old: u64, oldlen0: u64, newlen0: u64, flags: u64, newaddr: u64) u64 {
     coolIn(old, old + oldlen);
     const i = find(old);
     if (i == nreg or regs[i].kind != .anon or regs[i].hi < old + oldlen) return neg(EINVAL);
+    if (regs[i].vdso) return moveVdso(i, old, oldlen, newlen, flags, newaddr);
     if (regs[i].code or regs[i].is_tramp or regs[i].pinned) return neg(EINVAL); // its sites branch to fixed trampolines
     const prot = regs[i].prot;
     if (flags & MREMAP_FIXED == 0) {
@@ -860,6 +862,40 @@ fn mremap(old: u64, oldlen0: u64, newlen0: u64, flags: u64, newaddr: u64) u64 {
     _ = unmapRange(old, old + oldlen);
     if (prot != PROT_READ | PROT_WRITE) _ = protect(dst, dst + newlen, prot);
     return dst;
+}
+
+// moveVdso moves the vDSO, as Linux lets CRIU do, whole and to its own size:
+// a fresh copy at newaddr, rewritten for where it is, so it still runs.
+fn moveVdso(i: usize, old: u64, oldlen: u64, newlen: u64, flags: u64, newaddr: u64) u64 {
+    if (regs[i].lo != old or regs[i].hi != old + oldlen or newlen != oldlen) return neg(EINVAL);
+    if (flags & MREMAP_FIXED == 0) return old;
+    if (flags & MREMAP_MAYMOVE == 0 or newaddr & (PAGE - 1) != 0) return neg(EINVAL);
+    if (newaddr < old + oldlen and old < newaddr + newlen) return neg(EINVAL);
+    const dst = mmap(newaddr, newlen, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_FIXED, VDSO_FD, 0);
+    if (@as(i64, @bitCast(dst)) < 0) return dst;
+    markVdso(dst, dst + newlen);
+    _ = unmapRange(old, old + oldlen);
+    return dst;
+}
+
+// VDSO_FD names the vDSO to the supervisor's code mapping (sandbox vdsoFD),
+// which fills it from its image; a guest fd, an int, never is.
+const VDSO_FD: u64 = 1 << 32;
+
+// mapVdso maps the guest's vDSO, which fits a page, and returns where, or 0.
+pub fn mapVdso() u64 {
+    acquire();
+    defer releaseLock();
+    const lo = mmap(0, PAGE, PROT_READ | PROT_EXEC, MAP_PRIVATE, VDSO_FD, 0);
+    if (@as(i64, @bitCast(lo)) < 0) return 0;
+    markVdso(lo, lo + PAGE);
+    return lo;
+}
+
+fn markVdso(lo: u64, hi: u64) void {
+    if (!splitAt(lo) or !splitAt(hi)) return;
+    var i = find(lo);
+    while (i < nreg and regs[i].lo < hi) : (i += 1) regs[i].vdso = true;
 }
 
 // aliasView maps the shared memory at old a second time, newlen bytes of it
@@ -1038,7 +1074,7 @@ pub fn maps(out: [*]MapEnt, cap: usize, from: u64, next: *u64) u64 {
         }
         const view = r.kind == .view or r.kind == .eof or r.hot;
         const shared: u64 = if (view and (r.prot & PROT_WRITE != 0 or !r.file)) 8 else 0;
-        const kind: u64 = if (r.file) 2 else 1;
+        const kind: u64 = if (r.vdso) 8 else if (r.file) 2 else 1;
         out[n] = .{ .lo = r.lo, .hi = r.hi, .off = if (view) r.off else 0, .aux = 0, .attr = kind << 8 | shared | (r.prot & 7) };
         n += 1;
     }
@@ -2420,7 +2456,7 @@ pub fn serve(nr: u64, a: [6]u64) ?u64 {
         else => {},
     };
     return switch (nr) {
-        NR.mmap => mmap(a[0], a[1], a[2], a[3], a[4], a[5]),
+        NR.mmap => mmap(a[0], a[1], a[2], a[3], a[4] & 0xffffffff, a[5]),
         NR.mprotect => mprotect(a[0], a[1], a[2]),
         NR.munmap => munmap(a[0], a[1]),
         NR.brk => brk(a[0]),
