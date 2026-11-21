@@ -135,6 +135,10 @@ int main(int argc, char **argv) {
 	CHECK(sm[pg + 50] == 1 && touch(sm + pg + 99) == 0 && touch(sm + 2 * pg + 8) == SIGBUS);
 	CHECK(mprotect(sm + 2 * pg, pg, PROT_READ) == 0 && peek(sm + 2 * pg) == SIGBUS && touch(sm + 2 * pg) == SIGSEGV);
 	CHECK(pread(fd, &c, 1, pg + 50) == 1 && c == 1);
+	// the file grown over a page past its end makes it readable; cut short
+	// under the mapping, its pages past the new end raise SIGBUS
+	CHECK(ftruncate(fd, 2 * pg + 10) == 0 && peek(sm + 2 * pg + 8) == 0 && sm[2 * pg + 20] == 0);
+	CHECK(ftruncate(fd, pg) == 0 && peek(sm + pg + 50) == SIGBUS && touch(sm + pg + 50) == SIGBUS);
 	CHECK(munmap(sm + pg, 2 * pg) == 0);
 	int ef = open(q, O_RDWR | O_CREAT | O_TRUNC, 0600);
 	char *em = mmap(0, pg, PROT_READ | PROT_WRITE, MAP_SHARED, ef, 0);

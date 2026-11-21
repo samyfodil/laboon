@@ -552,6 +552,7 @@ const Vma = struct {
     copy: bool = false, // filled by pread, not mapped from the file
     exec: bool = false, // a copied executable segment, its sites rewritten
     shm: u64 = 0,
+    fence: u8 = 0, // FENCED with the guest's protection, for a page past the file's end (fenceFile)
 };
 const gpa = std.heap.page_allocator;
 var vmas: std.ArrayListUnmanaged(Vma) = .{};
@@ -604,6 +605,111 @@ fn vmaPunch(lo: u64, hi: u64, only: ?Kind) void {
             _ = shm_gone.swapRemove(j);
         } else j += 1;
     }
+}
+
+// vmaSplitAt splits the entry across address a, if one is.
+fn vmaSplitAt(a: u64) void {
+    for (vmas.items, 0..) |e, i| {
+        if (e.lo >= a or a >= e.hi) continue;
+        var r = e;
+        r.lo = a;
+        if (r.kind == .file) r.off += a - e.lo;
+        vmas.items[i].hi = a;
+        _ = vmaAdd(r);
+        return;
+    }
+}
+
+// ---- pages past a shared file's end -------------------------------------------
+//
+// An x86-64 guest's 4 KiB pages lie on Darwin's 16 KiB ones, and Darwin zero
+// fills a shared file mapping's pages past the file's end up to the end of the
+// host page that holds it, where Linux raises SIGBUS. Those pages are fenced:
+// inaccessible on the host, their vma keeping the guest's protection, so a
+// fault on one is SIGBUS while the file still ends before it, and once the
+// file has grown over it the page takes the guest's protection back.
+const FENCED: u8 = 8;
+
+// fenceSet marks the shared file pages in [lo, hi) with fence f. lock held.
+fn fenceSet(lo: u64, hi: u64, f: u8) void {
+    vmaSplitAt(lo);
+    vmaSplitAt(hi);
+    for (vmas.items) |*e| {
+        if (e.kind == .file and e.shared and e.lo >= lo and e.hi <= hi) e.fence = f;
+    }
+}
+
+// fenceFile fences what of the shared mapping [lo, hi) of fd at off lies past
+// the file's end, which the guest maps with prot. lock held.
+fn fenceFile(lo: u64, hi: u64, off: u64, fd: i32, prot: u64) void {
+    if (!X86) return;
+    const end = rdUp(fileSize(fd) orelse return);
+    if (off + (hi - lo) <= end) return;
+    const f = if (end > off) lo + (end - off) else lo;
+    fenceSet(f, hi, FENCED | @as(u8, @intCast(prot & 7)));
+    _ = sys(SYS_mprotect, f, hi - f, 0, 0, 0, 0);
+}
+
+// refence fences anew, after a call that may have cut a file short, every
+// shared file page that now lies past its file's end.
+pub fn refence() void {
+    if (!X86) return;
+    lock.lock();
+    defer lock.unlock();
+    var i: usize = 0;
+    while (i < vmas.items.len) : (i += 1) {
+        const e = vmas.items[i];
+        if (e.kind != .file or !e.shared or e.fence != 0) continue;
+        const fd = fdlink.lookup(e.id) orelse continue;
+        const p = protAt(e.lo) orelse continue;
+        fenceFile(e.lo, e.hi, e.off, fd, p);
+    }
+}
+
+// fenceProt keeps the fence on [lo, hi) after the guest set its protection to
+// prot. lock held.
+fn fenceProt(lo: u64, hi: u64, prot: u64) void {
+    var i: usize = 0;
+    while (i < vmas.items.len) : (i += 1) {
+        const e = vmas.items[i];
+        if (e.fence == 0 or e.hi <= lo or e.lo >= hi) continue;
+        const a = @max(e.lo, lo);
+        const b = @min(e.hi, hi);
+        fenceSet(a, b, FENCED | @as(u8, @intCast(prot & 7)));
+        _ = sys(SYS_mprotect, a, b - a, 0, 0, 0, 0);
+    }
+}
+
+// fencedProt is the guest's protection of a fenced page at addr, null if it is
+// not one.
+pub fn fencedProt(addr: u64) ?u32 {
+    if (!X86) return null;
+    lock.lock();
+    defer lock.unlock();
+    for (vmas.items) |e| {
+        if (e.fence != 0 and addr >= e.lo and addr < e.hi) return e.fence & 7;
+    }
+    return null;
+}
+
+// unfence gives the fenced pages of the mapping at addr that the file now
+// covers the guest's protection back; whether addr's page is one of them.
+pub fn unfence(addr: u64) bool {
+    if (!X86) return false;
+    lock.lock();
+    defer lock.unlock();
+    for (vmas.items) |e| {
+        if (e.fence == 0 or addr < e.lo or addr >= e.hi) continue;
+        const fd = fdlink.lookup(e.id) orelse return false;
+        const end = rdUp(fileSize(fd) orelse return false);
+        if (e.off + (addr & ~(PAGE - 1)) - e.lo >= end) return false;
+        const hi = @min(e.hi, e.lo + (end - e.off));
+        const p: u64 = e.fence & 7;
+        fenceSet(e.lo, hi, 0);
+        _ = sys(SYS_mprotect, e.lo, hi - e.lo, if (p & PROT_EXEC != 0) wx.hostProtOf(p) else p, 0, 0, 0);
+        return true;
+    }
+    return false;
 }
 
 fn hasShm(c: u64) bool {
@@ -1187,7 +1293,13 @@ fn mapFileAt(addr: u64, n: u64, prot: u64, shared: bool, fixed: bool, noreplace:
         const dw: u64 = (if (shared) D_SHARED else D_PRIVATE) | (if (fixed) D_FIXED else 0);
         const r = place(addr, n, if (prot & PROT_EXEC != 0) wx.hostProtOf(prot) else prot, dw, sfd, off, noreplace);
         if (isErr(r)) return r;
-        return record(r, n, .{ .lo = r, .hi = r + n, .id = id, .off = off, .shared = shared });
+        const v = record(r, n, .{ .lo = r, .hi = r + n, .id = id, .off = off, .shared = shared });
+        if (shared and !isErr(v)) {
+            lock.lock();
+            fenceFile(r, r + n, off, sfd, prot);
+            lock.unlock();
+        }
+        return v;
     }
     if (off % PAGE == 0 and off + n <= rdUp(fileSize(sfd) orelse 0)) {
         const r = place(addr, n, PROT_RW, D_PRIVATE | (if (fixed) D_FIXED else 0), sfd, off, noreplace);
@@ -1355,7 +1467,13 @@ fn mprotect(addr: u64, len: u64, prot: u64) u64 {
     const shared = anyShared(addr, addr + n);
     const emulate = p & PROT_EXEC != 0 and (shared or !cleanText(addr, addr + n, p));
     if (shared and p & PROT_EXEC != 0) markCode(addr, addr + n);
-    return wx.protect(addr, n, p, emulate, shared);
+    const r = wx.protect(addr, n, p, emulate, shared);
+    if (X86 and shared and !isErr(r)) {
+        lock.lock();
+        fenceProt(addr, addr + n, p);
+        lock.unlock();
+    }
+    return r;
 }
 
 // markCode tells the supervisor the files [lo, hi) maps shared are mapped

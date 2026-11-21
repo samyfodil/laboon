@@ -1581,10 +1581,17 @@ fn faultSignal(dsig: c_int, mc: *const std.c.mcontext_t, info: *Info) u32 {
         var code: i32 = SEGV_MAPERR;
         var addr: u64 = mc.es.faultvaddr;
         switch (trapno) {
-            14 => if (err & 1 != 0) {
-                // #PF: present bit set means a protection violation at a mapped
-                // page; clear means not-present, which keeps SEGV_MAPERR.
-                code = SEGV_ACCERR;
+            14 => {
+                // #PF: an access the mapping permits to a fenced page, past
+                // its file's end, is Linux's SIGBUS; otherwise the present bit
+                // tells a protection failure from no mapping.
+                const need: u32 = if (err & 16 != 0) 4 else if (err & 2 != 0) 2 else 1;
+                if (mem.fencedProt(addr)) |p| {
+                    if (p & need != 0) {
+                        sig = SIGBUS;
+                        code = BUS_ADRERR;
+                    } else code = SEGV_ACCERR;
+                } else if (err & 1 != 0) code = SEGV_ACCERR;
             },
             17 => { // #AC alignment check
                 sig = SIGBUS;
@@ -1705,6 +1712,9 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
     // physical %fs base is 0) and are emulated against the stored guest base.
     if (!tstate.arm64 and dsig_in == DW_SIGSEGV and tl.ready and !tl.busy) {
         if (fsmem.emulate(mc)) return;
+    }
+    if (!tstate.arm64 and (dsig_in == DW_SIGSEGV or dsig_in == DW_SIGBUS) and mc.es.trapno == 14) {
+        if (mem.unfence(mc.es.faultvaddr)) return;
     }
     var dsig = dsig_in;
     // The W^X/OOL fault handling is arm64-only (x86-64 has no in-guest JIT

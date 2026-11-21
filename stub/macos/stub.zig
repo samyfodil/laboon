@@ -584,6 +584,18 @@ fn x64gen(nr: u64) u64 {
     };
 }
 
+// cutsFile reports whether the x86-64 call in frame may have cut a file
+// short: truncate, ftruncate, or an open with O_TRUNC.
+fn cutsFile(frame: [*]const u64) bool {
+    const O_TRUNC: u64 = 0o1000;
+    return switch (frame[8]) {
+        76, 77 => true,
+        2 => frame[1] & O_TRUNC != 0,
+        257 => frame[2] & O_TRUNC != 0,
+        else => false,
+    };
+}
+
 // The guest's x86-64 %fs (and %gs) base. glibc sets %fs through arch_prctl and
 // then reads its TLS as %fs:disp; the physical %fs base cannot be set under
 // Rosetta (wrfsbase faults), so these hold the value the %fs-site handling
@@ -689,6 +701,7 @@ fn serveSyscall(frame: [*]u64) u64 {
     ch.args[5] = frame[5];
     ch.ret = mem.outPrefix(gen, frame);
     const r = serveReplies(ch, frame);
+    if (!tstate.arm64 and @as(i64, @bitCast(r)) >= 0 and cutsFile(frame)) mem.refence();
     // A tracer may have edited the registers during a stop; apply them before
     // the guest resumes, overriding the syscall result in x0.
     if (tstate.arm64) {
