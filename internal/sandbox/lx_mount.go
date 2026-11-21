@@ -8,7 +8,6 @@ import (
 	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/filesystems/bind"
 	"github.com/samyfodil/laboon/filesystems/hostfs"
-	"github.com/samyfodil/laboon/filesystems/memfs"
 	"github.com/samyfodil/laboon/filesystems/overlayfs"
 )
 
@@ -215,55 +214,36 @@ func parseOverlayOpts(data string) (lower []string, upper, work string) {
 	return lower, upper, work
 }
 
-// mountMem services `mount -t tmpfs|ramfs` with a real in-memory filesystem
-// (memfs.NewMemFS) at target: volatile and separate from the rootfs, as the kernel
-// tmpfs is. A mode= option, if given, sets the root directory's permission bits.
+// mountMem services `mount -t tmpfs|ramfs` at target: a fresh tmpfs, volatile
+// and separate from the rootfs as the kernel's is, the same wherever it is
+// mounted. Its files are run-private host files, so a MAP_SHARED mapping maps
+// them directly. The root is sticky and world-writable unless a mode= option
+// sets its permission bits.
 func (g *dguest) mountMem(target, data string) int64 {
-	if sharedMemMount(target) {
-		// The POSIX shared-memory area must be host-backed so a MAP_SHARED mapping
-		// works (shared-memory programs — postgres, Chromium — rely on it); a pure
-		// in-memory backend has no host fd to map. A host-backed file's core.File is
-		// an *os.File, so mmap maps it directly, MAP_SHARED included, no extra code.
-		backing, err := g.dfs.tmpLayer()
-		if err != nil {
-			return sErr(osErrno(err))
-		}
-		return g.mountPseudo(target, tmpfsFS{backing})
-	}
-	mfs := memfs.NewMemFS()
-	if mode := tmpfsMode(data); mode != 0 {
-		m := mode
-		mfs.Root().SetAttr(core.AttrUpdate{Mode: &m})
-	}
-	if err := g.vns().Mount(target, mfs); err != nil {
+	backing, err := g.dfs.tmpLayer()
+	if err != nil {
 		return sErr(osErrno(err))
 	}
-	g.addDynMount(target, mfs)
-	return 0
+	mode, ok := tmpfsMode(data)
+	if !ok {
+		mode = 0o1777
+	}
+	if err := backing.Root().SetAttr(core.AttrUpdate{Mode: &mode}); err != nil {
+		return sErr(osErrno(err))
+	}
+	return g.mountPseudo(target, tmpfsFS{backing})
 }
 
-// sharedMemMount reports whether a tmpfs mount at target is the POSIX
-// shared-memory area (/dev/shm or /run/shm, including under a container rootfs),
-// which must be host-backed so a MAP_SHARED mapping works. It is a kernel
-// filesystem path, like /proc and /sys — not a guess about the program mounting
-// it.
-func sharedMemMount(target string) bool {
-	t := strings.TrimRight(target, "/")
-	return t == "/dev/shm" || strings.HasSuffix(t, "/dev/shm") ||
-		t == "/run/shm" || strings.HasSuffix(t, "/run/shm")
-}
-
-// tmpfsMode reads the octal mode= option from a tmpfs mount's option string, or 0
-// if absent.
-func tmpfsMode(data string) uint32 {
+// tmpfsMode reads the octal mode= option from a tmpfs mount's option string.
+func tmpfsMode(data string) (uint32, bool) {
 	for _, kv := range strings.Split(data, ",") {
 		if k, v, ok := strings.Cut(kv, "="); ok && k == "mode" {
 			if m, err := strconv.ParseUint(v, 8, 32); err == nil {
-				return uint32(m)
+				return uint32(m) & 0o7777, true
 			}
 		}
 	}
-	return 0
+	return 0, false
 }
 
 // mountPseudo mounts a synthetic filesystem (proc, sysfs, cgroup2) at target. A
