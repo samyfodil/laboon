@@ -361,7 +361,7 @@ fn drop(task: u32, ports: []const u32) void {
 // place maps region r at its address: inside the guest window over whatever
 // is there (only the guest's own lies there), elsewhere only where nothing is.
 fn place(task: u32, r: mem.ForkRegion, entry: u32) bool {
-    const in_window = r.addr >= mem.GUEST_BASE and r.addr + r.size <= mem.GUEST_TOP;
+    const in_window = mem.inWindow(r.addr, r.addr + r.size);
     const fl: c_int = VM_FLAGS_FIXED | (if (in_window) VM_FLAGS_OVERWRITE else 0);
     var at = r.addr;
     switch (r.kind) {

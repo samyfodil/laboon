@@ -1956,9 +1956,11 @@ fn loadElf(src: ElfSrc, sites: []const u32, hint: u64, fixed: bool, isl: *Island
     const imageLen = maxend - minbase;
 
     const tail: u64 = if (fixed) 0 else ISLAND_CAP;
-    const rp = mmap(@ptrFromInt(hint), imageLen + tail, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (if (fixed) MAP_FIXED else 0), -1, 0);
+    const at = if (hint == 0 and !fixed) mem.pickFree(imageLen + tail) else hint;
+    const rp = mmap(@ptrFromInt(at), imageLen + tail, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (if (fixed) MAP_FIXED else 0), -1, 0);
     if (rp == null or rp == MAP_FAILED) return null;
     const rb: u64 = @intFromPtr(rp);
+    mem.noteImage(rb, rb + imageLen + tail);
     const region: [*]u8 = @ptrCast(rp);
     const bias = rb - minbase;
 
@@ -2091,18 +2093,20 @@ fn readSites(path: [*:0]const u8) []const u32 {
 
 fn loadAndEnter(path: [*:0]const u8, interpPath: ?[*:0]const u8, mainSites: [*:0]const u8, interpSites: [*:0]const u8, argv: []const [*:0]const u8, envp: []const [*:0]const u8) noreturn {
     procinfo.publish(g_chan);
-    mem.drawLayout(g_chan.flags & chan.LAYOUT_NORAND != 0);
+    mem.drawLayout(g_chan.flags);
     const mf = std.fs.cwd().openFileZ(path, .{}) catch _exit(3);
-    const main_img = mapElf(.{ .file = mf }, readSites(mainSites), mem.hint_exe);
+    // A program with an interpreter goes at ELF_ET_DYN_BASE, one without in
+    // the mmap area, as Linux loads them.
+    const main_img = mapElf(.{ .file = mf }, readSites(mainSites), if (interpPath != null) mem.hint_exe else 0);
     mf.close();
-    mem.placeBreak(main_img.hi + ISLAND_CAP);
+    mem.placeBreak(if (interpPath != null) main_img.hi + ISLAND_CAP else mem.ET_DYN_BASE);
 
     var enter = main_img.entry;
     var atBase: u64 = 0;
     procinfo.info = .{ .sp = 0, .main_lo = main_img.lo, .main_hi = main_img.hi, .interp_lo = 0, .interp_hi = 0, .stack_lo = 0, .stack_hi = 0 };
     if (interpPath) |ip| {
         const fi = std.fs.cwd().openFileZ(ip, .{}) catch _exit(8);
-        const interp = mapElf(.{ .file = fi }, readSites(interpSites), mem.hint_mmap);
+        const interp = mapElf(.{ .file = fi }, readSites(interpSites), 0);
         fi.close();
         enter = interp.entry;
         atBase = interp.base;
@@ -2112,12 +2116,13 @@ fn loadAndEnter(path: [*:0]const u8, interpPath: ?[*:0]const u8, mainSites: [*:0
 
     var vdso: u64 = 0;
     if (vdsoImage()) |v| {
-        const img = loadElf(.{ .mem = v.img }, v.sites, mem.hint_mmap, false, &vdso_isl) orelse _exit(5);
+        const img = loadElf(.{ .mem = v.img }, v.sites, 0, false, &vdso_isl) orelse _exit(5);
         mem.noteVdso(img.lo, img.hi);
         vdso = img.lo;
     }
 
-    const stk = mmap(@ptrFromInt(mem.hint_stack), GUEST_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0) orelse _exit(7);
+    const stk = mmap(@ptrFromInt(mem.stack_top - GUEST_STACK), GUEST_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0) orelse _exit(7);
+    mem.noteImage(@intFromPtr(stk), @intFromPtr(stk) + GUEST_STACK);
     const sp = buildInitStack(@intFromPtr(stk), GUEST_STACK, argv, envp, main_img.phdr, main_img.phent, main_img.phnum, main_img.entry, atBase, vdso);
     procinfo.info.sp = sp;
     procinfo.info.stack_lo = @intFromPtr(stk);

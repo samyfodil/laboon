@@ -73,10 +73,7 @@ func (g *dguest) execve(dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	// process execing a native target; any other combination (either side HVF)
 	// respawns into a stub of the right kind.
 	respawn := (g.ps.forked || g.ps.threads > 1 || g.ps.shared || targetHvf || g.ps.hvf) && fs.run != nil
-	var layout uint32
-	if g.ps.personality&addrNoRandomize != 0 {
-		layout = layoutNorand
-	}
+	layout := execLayout(g.ps.personality, g.ps.rlim[rlimitStack].cur)
 	fs.mu.Unlock()
 	// The stub that loads the program, this one or the fresh one on this slot,
 	// reads how to place it here.
@@ -451,7 +448,29 @@ func (g *dguest) fexecHost(f *os.File) (string, lxErrno) {
 // markSrcOwn is a no-op here: execSrc is a host path, not an owned handle.
 func markSrcOwn(*execSrc, bool) {}
 
-// layoutNorand in the channel page's alive word asks the stub that runs an
-// exec to place the program unrandomized (personality ADDR_NO_RANDOMIZE);
-// stub/macos/chan.zig LAYOUT_NORAND.
-const layoutNorand = 1
+// The channel page's alive word tells the stub that runs an exec how to lay
+// the program out (stub/macos/chan.zig): unrandomized (personality
+// ADDR_NO_RANDOMIZE), the legacy layout (ADDR_COMPAT_LAYOUT), and the stack's
+// rlimit in MiB from bit 8, all ones for none, which sizes the gap the mmap
+// area leaves below the stack and on arm64 makes the layout legacy too.
+const (
+	layoutNorand    = 1
+	layoutCompat    = 2
+	layoutRlimShift = 8
+	layoutRlimInf   = 0xffffff
+)
+
+func execLayout(personality uint32, rlimStack uint64) uint32 {
+	var l uint32
+	if personality&addrNoRandomize != 0 {
+		l |= layoutNorand
+	}
+	if personality&addrCompatLayout != 0 {
+		l |= layoutCompat
+	}
+	mib := uint64(layoutRlimInf)
+	if rlimStack != rlimInf {
+		mib = min(rlimStack>>20, layoutRlimInf-1)
+	}
+	return l | uint32(mib)<<layoutRlimShift
+}

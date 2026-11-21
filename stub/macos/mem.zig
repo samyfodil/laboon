@@ -26,17 +26,37 @@ pub const PAGE: u64 = tstate.page;
 // Darwin places a hinted mapping first-fit upward from the hint.
 pub const GUEST_BASE: u64 = 1 << 40;
 
-// Where an exec places the guest, as Linux's ASLR would: hints Darwin's
-// first-fit placement starts from, each GUEST_BASE plus a random offset of
-// up to 1 GiB (Linux arm64's 18 bits of 4 KiB pages) in a band of its own --
-// the program, the stack, and the mmap area, which takes the interpreter too
-// -- and the break a random part of 1 GiB past the program's end, drawn anew
-// at each exec (drawLayout) and kept across a fork. Unrandomized
-// (ADDR_NO_RANDOMIZE) they are all GUEST_BASE and the break is placed on its
-// first use, as before.
-pub var hint_exe: u64 = GUEST_BASE;
-pub var hint_stack: u64 = GUEST_BASE;
-pub var hint_mmap: u64 = GUEST_BASE;
+// The guest's layout is a 47-bit Linux one, as an arm64 kernel with 16 KiB
+// pages (or an x86-64 one) lays a process out: the stack's top at the task
+// size moved down by a random part of STACK_RND, though no higher than
+// Darwin maps (HOST_TOP); below it the mmap area, whose top (mmap_base)
+// leaves the stack's rlimit and a random offset between them, filled
+// top-down -- bottom-up from TASK_SIZE / UNMAPPED_DIV with the legacy layout
+// (ADDR_COMPAT_LAYOUT, or an unlimited stack on arm64); a program with an
+// interpreter at two thirds of the task size, again moved by a random offset,
+// one without in the mmap area; and the break a random part of 1 GiB past the
+// program's end. Each is drawn anew at an exec (drawLayout) and kept across a
+// fork; ADDR_NO_RANDOMIZE leaves them all at their bases.
+const X86 = @import("builtin").cpu.arch == .x86_64;
+pub const TASK_SIZE: u64 = 1 << 47;
+const HOST_TOP: u64 = 0x7fff_fe00_0000;
+// TOP_LO starts the guest's window under the task size, above the stub's
+// malloc nano zone (GUEST_TOP).
+pub const TOP_LO: u64 = 0x7000_0000_0000;
+const STACK_RND: u64 = if (X86) 16 << 30 else 1 << 30;
+const MMAP_RND_PAGES: u64 = if (X86) 1 << 28 else 1 << 18;
+pub const ET_DYN_BASE: u64 = TASK_SIZE / 3 * 2 & ~(PAGE - 1);
+const UNMAPPED_DIV: u64 = if (X86) 3 else 4;
+// HUGE is the PMD size transparent huge pages align to.
+const HUGE: u64 = PAGE * (PAGE / 8);
+const LAYOUT_COMPAT: u32 = 2; // sandbox/exec_darwin.go layoutCompat
+const LAYOUT_RLIM_INF: u32 = 0xffffff;
+
+pub var hint_exe: u64 = ET_DYN_BASE;
+pub var stack_top: u64 = HOST_TOP;
+var mmap_base: u64 = TASK_SIZE - (128 << 20);
+var legacy_base: u64 = TASK_SIZE / UNMAPPED_DIV;
+var legacy = false;
 var brk_hint: u64 = 0;
 var brk_gap: u64 = 0;
 
@@ -48,24 +68,42 @@ fn randBelow(n: u64) u64 {
     return v % n;
 }
 
-pub fn drawLayout(norand: bool) void {
-    if (norand) {
-        hint_exe = GUEST_BASE;
-        hint_stack = GUEST_BASE;
-        hint_mmap = GUEST_BASE;
-        brk_gap = 0;
-        return;
+// drawLayout draws the layout for an exec from the supervisor's flags
+// (chan.LAYOUT_NORAND, LAYOUT_COMPAT, and the stack's rlimit in MiB from bit 8).
+pub fn drawLayout(flags: u32) void {
+    const norand = flags & 1 != 0;
+    const mib = flags >> 8;
+    const rlim: u64 = if (mib == LAYOUT_RLIM_INF) std.math.maxInt(u64) else @as(u64, mib) << 20;
+    legacy = flags & LAYOUT_COMPAT != 0 or (!X86 and mib == LAYOUT_RLIM_INF);
+    var rnd: u64 = 0;
+    var pad: u64 = 256 * PAGE;
+    if (!norand) {
+        rnd = randBelow(MMAP_RND_PAGES) * PAGE;
+        pad += STACK_RND;
     }
-    const span = (1 << 30) / PAGE;
-    hint_exe = GUEST_BASE + randBelow(span) * PAGE;
-    hint_stack = GUEST_BASE + (8 << 30) + randBelow(span) * PAGE;
-    hint_mmap = GUEST_BASE + (16 << 30) + randBelow(span) * PAGE;
-    brk_gap = randBelow(span) * PAGE;
+    var gap = rlim;
+    if (gap +% pad > gap) gap += pad;
+    gap = std.math.clamp(gap, 128 << 20, TASK_SIZE / 6 * 5);
+    mmap_base = (TASK_SIZE - gap - rnd) & ~(PAGE - 1);
+    legacy_base = rdUp(TASK_SIZE / UNMAPPED_DIV) + rnd;
+    if (norand) {
+        stack_top = HOST_TOP;
+        hint_exe = ET_DYN_BASE;
+        brk_gap = 0;
+    } else {
+        stack_top = HOST_TOP - randBelow((STACK_RND - (TASK_SIZE - HOST_TOP)) / PAGE) * PAGE;
+        hint_exe = ET_DYN_BASE + randBelow(MMAP_RND_PAGES) * PAGE;
+        brk_gap = randBelow((1 << 30) / PAGE) * PAGE;
+    }
+    lock.lock();
+    taken.clearRetainingCapacity();
+    lock.unlock();
 }
 
-// placeBreak sets where the break goes, past the program's end at hi.
+// placeBreak sets where the break goes: past hi, the program's end (or
+// ELF_ET_DYN_BASE for one in the mmap area), by the layout's random gap.
 pub fn placeBreak(hi: u64) void {
-    brk_hint = if (brk_gap == 0) 0 else (hi + PAGE - 1) / PAGE * PAGE + brk_gap;
+    brk_hint = rdUp(hi) + brk_gap;
 }
 
 const NR_BRK: u64 = 214;
@@ -827,16 +865,182 @@ pub fn reset() void {
 // place maps at addr as the caller asked: MAP_FIXED replaces, a NOREPLACE
 // request must land exactly on addr (Darwin takes it as a hint) or EEXIST, and
 // otherwise addr is a hint, an unaligned one naming the page it falls in as
-// Linux takes it.
+// Linux takes it, used when free; where an unfixed mapping goes is pick's.
+// Darwin maps a hint that is free exactly there: one that is not names
+// something taken has not recorded, which is learned and the pick redone.
 fn place(addr: u64, n: u64, prot: u64, dw: u64, fd: i64, off: u64, noreplace: bool) u64 {
-    const r = sys(SYS_mmap, if (addr == 0) hint_mmap else addr & ~(PAGE - 1), n, prot, dw, @bitCast(fd), off);
-    if (r < 0) return lx(r);
-    const got: u64 = @bitCast(r);
-    if (noreplace and got != addr) {
-        _ = sys(SYS_munmap, got, n, 0, 0, 0, 0);
-        return neg(EEXIST);
+    return placeAt(addr, n, prot, dw, fd, off, noreplace, false);
+}
+
+// placeAt is place with lock held already when held.
+fn placeAt(addr: u64, n: u64, prot: u64, dw: u64, fd: i64, off: u64, noreplace: bool, held: bool) u64 {
+    if (dw & D_FIXED != 0 or noreplace) {
+        const r = sys(SYS_mmap, addr & ~(PAGE - 1), n, prot, dw, @bitCast(fd), off);
+        if (r < 0) return lx(r);
+        const got: u64 = @bitCast(r);
+        if (noreplace and got != addr) {
+            _ = sys(SYS_munmap, got, n, 0, 0, 0, 0);
+            return neg(EEXIST);
+        }
+        noteTaken(got, n, held);
+        return got;
     }
-    return got;
+    const anon = fd < 0 and dw & D_SHARED == 0;
+    var tries: u32 = 0;
+    while (tries < 64) : (tries += 1) {
+        if (!held) lock.lock();
+        const at = pick(addr & ~(PAGE - 1), n, anon);
+        if (!held) lock.unlock();
+        const want = at orelse return neg(ENOMEM);
+        const r = sys(SYS_mmap, want, n, prot, dw, @bitCast(fd), off);
+        if (r < 0) return lx(r);
+        const got: u64 = @bitCast(r);
+        if (got == want) {
+            noteTaken(got, n, held);
+            return got;
+        }
+        _ = sys(SYS_munmap, got, n, 0, 0, 0, 0);
+        const there = regionFrom(want) orelse return neg(ENOMEM);
+        noteTaken(there.lo, there.hi - there.lo, held);
+    }
+    return neg(ENOMEM);
+}
+
+// ---- placement -------------------------------------------------------------------
+
+// taken is what the guest's address space holds, sorted and disjoint, which
+// pick places around: every mapping the guest makes and the program's images,
+// stack and break, less what it unmaps. Something it misses is learned when a
+// mapping meant for a free place lands elsewhere (place).
+const Run = struct { lo: u64, hi: u64 };
+var taken: std.ArrayListUnmanaged(Run) = .{};
+
+fn noteTaken(lo: u64, n: u64, held: bool) void {
+    if (!held) lock.lock();
+    defer if (!held) lock.unlock();
+    takenAdd(lo, lo + n);
+}
+
+// takenAdd and takenDel run under lock.
+fn takenAdd(lo_in: u64, hi_in: u64) void {
+    var lo = lo_in;
+    var hi = hi_in;
+    var i: usize = 0;
+    while (i < taken.items.len and taken.items[i].hi < lo) i += 1;
+    var j = i;
+    while (j < taken.items.len and taken.items[j].lo <= hi) : (j += 1) {
+        lo = @min(lo, taken.items[j].lo);
+        hi = @max(hi, taken.items[j].hi);
+    }
+    taken.replaceRange(gpa, i, j - i, &.{.{ .lo = lo, .hi = hi }}) catch {};
+}
+
+fn takenDel(lo: u64, hi: u64) void {
+    var i: usize = 0;
+    while (i < taken.items.len) {
+        const e = taken.items[i];
+        if (e.hi <= lo or e.lo >= hi) {
+            i += 1;
+            continue;
+        }
+        if (e.lo < lo and e.hi > hi) {
+            taken.items[i].hi = lo;
+            taken.insert(gpa, i + 1, .{ .lo = hi, .hi = e.hi }) catch {};
+            return;
+        }
+        if (e.lo < lo) {
+            taken.items[i].hi = lo;
+            i += 1;
+        } else if (e.hi > hi) {
+            taken.items[i].lo = hi;
+            i += 1;
+        } else _ = taken.orderedRemove(i);
+    }
+}
+
+fn clear(lo: u64, hi: u64) bool {
+    for (taken.items) |e| {
+        if (e.lo < hi and e.hi > lo) return false;
+    }
+    return true;
+}
+
+// pick is where n bytes the guest leaves unplaced go, as get_unmapped_area
+// puts them: at the hint when it is free, else by the layout's search, a
+// private anonymous mapping a whole number of huge pages long on a huge-page
+// boundary (thp_get_unmapped_area). lock held.
+fn pick(hint: u64, n: u64, anon: bool) ?u64 {
+    if (n == 0 or n > TASK_SIZE) return null;
+    if (hint != 0 and hint >= PAGE and hint <= HOST_TOP - n and clear(hint, hint + n)) return hint;
+    if (anon and hint == 0 and n % HUGE == 0) {
+        if (search(n + HUGE)) |a| {
+            const skip = (HUGE - a % HUGE) % HUGE;
+            return if (skip == 0 and !legacy) a + HUGE else a + skip;
+        }
+    }
+    return search(n);
+}
+
+// search is top-down below mmap_base falling back to bottom-up from the
+// legacy base, or bottom-up alone with the legacy layout.
+fn search(n: u64) ?u64 {
+    if (!legacy) {
+        if (topDown(n, GUEST_BASE, mmap_base)) |a| return a;
+    }
+    return bottomUp(n, legacy_base, HOST_TOP);
+}
+
+// topDown finds the highest a in [low, high-n] with [a, a+n) clear, as
+// unmapped_area_topdown does.
+fn topDown(n: u64, low: u64, high: u64) ?u64 {
+    var end = high;
+    var i = taken.items.len;
+    while (i > 0 and taken.items[i - 1].lo >= end) i -= 1;
+    while (true) {
+        const gap_lo = if (i > 0) @max(taken.items[i - 1].hi, low) else low;
+        if (end >= n and end - n >= gap_lo) return (end - n) & ~(PAGE - 1);
+        if (i == 0) return null;
+        i -= 1;
+        end = @min(end, taken.items[i].lo);
+        if (end <= low) return null;
+    }
+}
+
+// bottomUp finds the lowest a in [low, high-n] with [a, a+n) clear, as
+// unmapped_area does.
+fn bottomUp(n: u64, low: u64, high: u64) ?u64 {
+    var start = rdUp(low);
+    for (taken.items) |e| {
+        if (e.hi <= start) continue;
+        if (e.lo >= start and e.lo - start >= n) break;
+        start = @max(start, rdUp(e.hi));
+        if (start >= high) return null;
+    }
+    return if (high >= start and high - start >= n) start else null;
+}
+
+// regionFrom is the host mapping at or above addr.
+fn regionFrom(addr: u64) ?Run {
+    var a = addr;
+    var size: u64 = 0;
+    var info: BasicInfo = undefined;
+    var count: c_uint = @sizeOf(BasicInfo) / 4;
+    var obj: c_uint = 0;
+    if (mach_vm_region(task, &a, &size, VM_REGION_BASIC_INFO_64, &info, &count, &obj) != 0) return null;
+    if (obj != 0) _ = mach_port_deallocate(task, obj);
+    return .{ .lo = a, .hi = a + size };
+}
+
+// pickFree is where the loader puts an image or the stack the layout leaves
+// unplaced (0 when the address space has no room).
+pub fn pickFree(n: u64) u64 {
+    lock.lock();
+    defer lock.unlock();
+    return pick(0, n, false) orelse 0;
+}
+
+pub fn noteImage(lo: u64, hi: u64) void {
+    noteTaken(lo, hi - lo, false);
 }
 
 // rwx_state caches the supervisor's answer to LC_RWX: 0 not asked yet, 1
@@ -1279,6 +1483,7 @@ fn dropped(lo: u64, hi: u64) void {
     lock.lock();
     vmaPunch(lo, hi, null);
     anonPunch(lo, hi);
+    takenDel(lo, hi);
     lock.unlock();
     wx.unmapped(lo, hi);
     for (ids[0..nid]) |id| {
@@ -1372,6 +1577,7 @@ fn mremap(old: u64, old_len: u64, new_len: u64, flags: u64, new_addr: u64) u64 {
         moveVdso(old, rdUp(old_len), rdUp(new_len), flags, new_addr)
     else
         remapCode(old, old_len, new_len, flags, new_addr);
+    if (!isErr(r)) noteTaken(r, rdUp(new_len), false);
     flushGone();
     return r;
 }
@@ -1454,7 +1660,7 @@ fn remap(old: u64, old_len: u64, new_len: u64, flags: u64, new_addr: u64) u64 {
         if (extend(old, on, nn - on, last, false)) return old;
     }
     if (flags & MREMAP_MAYMOVE == 0) return neg(ENOMEM);
-    const r = sys(SYS_mmap, hint_mmap, nn, 0, D_PRIVATE | D_ANON, @bitCast(@as(i64, -1)), 0);
+    const r: i64 = @bitCast(placeAt(0, nn, 0, D_PRIVATE | D_ANON, -1, 0, false, true));
     if (r < 0) return neg(ENOMEM);
     return moveTo(old, on, nn, @bitCast(r), flags, first, last);
 }
@@ -1590,9 +1796,13 @@ fn dup(old: u64, nn: u64, flags: u64, new_addr: u64) u64 {
 // at the same addresses: the parent lists it region by region, copy-on-write
 // or shared as Linux's fork would leave it, and hands over its tables.
 
-// GUEST_TOP is malloc's nano zone, the stub's: the guest's memory without an
-// address of its own lies below, from GUEST_BASE.
+// GUEST_TOP is malloc's nano zone, the stub's: the guest's memory lies below,
+// from GUEST_BASE, and above it from TOP_LO.
 pub const GUEST_TOP: u64 = 0x6000_0000_0000;
+
+pub fn inWindow(lo: u64, hi: u64) bool {
+    return lo >= GUEST_BASE and hi <= GUEST_TOP or lo >= TOP_LO and hi <= HOST_TOP;
+}
 
 pub const RegionKind = enum(u32) { copy, share, empty, jit };
 pub const ForkRegion = extern struct { addr: u64, size: u64, cur: i32, max: i32, inherit: u32, kind: RegionKind };
@@ -1630,6 +1840,7 @@ pub fn forkRegions(out: *std.ArrayList(ForkRegion)) bool {
     var ranges = std.ArrayList(Range).init(gpa);
     defer ranges.deinit();
     ranges.append(.{ .lo = GUEST_BASE, .hi = GUEST_TOP }) catch return false;
+    ranges.append(.{ .lo = TOP_LO, .hi = HOST_TOP }) catch return false;
     for (anons.items) |e| ranges.append(.{ .lo = e.lo, .hi = e.hi }) catch return false;
     for (vmas.items) |e| ranges.append(.{ .lo = e.lo, .hi = e.hi }) catch return false;
     if (brk_base != 0) ranges.append(.{ .lo = brk_base, .hi = brk_base + BRK_RESERVE }) catch return false;
@@ -1678,12 +1889,12 @@ pub fn forkRegions(out: *std.ArrayList(ForkRegion)) bool {
 }
 
 // ForkState heads the tables a fork child takes over.
-pub const ForkState = extern struct { brk_base: u64, brk_cur: u64, brk_end: u64, brk_hint: u64, hint_mmap: u64, rwx: u8, nvma: u32, nanon: u32, nroom: u32 };
+pub const ForkState = extern struct { brk_base: u64, brk_cur: u64, brk_end: u64, brk_hint: u64, hint_exe: u64, stack_top: u64, mmap_base: u64, legacy_base: u64, legacy: u8, rwx: u8, nvma: u32, nanon: u32, nroom: u32, ntaken: u32 };
 
 // forkSave appends the tables to buf, after forkRegions; the child is the
 // same binary, so the entries go as they are.
 pub fn forkSave(buf: *std.ArrayList(u8)) bool {
-    const st = ForkState{ .brk_base = brk_base, .brk_cur = brk_cur, .brk_end = brk_end, .brk_hint = brk_hint, .hint_mmap = hint_mmap, .rwx = rwx_state.load(.monotonic), .nvma = @intCast(vmas.items.len), .nanon = @intCast(anons.items.len), .nroom = @intCast(nrooms) };
+    const st = ForkState{ .brk_base = brk_base, .brk_cur = brk_cur, .brk_end = brk_end, .brk_hint = brk_hint, .hint_exe = hint_exe, .stack_top = stack_top, .mmap_base = mmap_base, .legacy_base = legacy_base, .legacy = @intFromBool(legacy), .rwx = rwx_state.load(.monotonic), .nvma = @intCast(vmas.items.len), .nanon = @intCast(anons.items.len), .nroom = @intCast(nrooms), .ntaken = @intCast(taken.items.len) };
     buf.appendSlice(std.mem.asBytes(&st)) catch return false;
     buf.appendSlice(std.mem.sliceAsBytes(vmas.items)) catch return false;
     buf.appendSlice(std.mem.sliceAsBytes(anons.items)) catch return false;
@@ -1692,6 +1903,7 @@ pub fn forkSave(buf: *std.ArrayList(u8)) bool {
         r.busy = false;
         buf.appendSlice(std.mem.asBytes(&r)) catch return false;
     }
+    buf.appendSlice(std.mem.sliceAsBytes(taken.items)) catch return false;
     return wx.forkSave(buf);
 }
 
@@ -1712,12 +1924,17 @@ pub fn forkLoad(b: *[]const u8) bool {
     brk_cur = st.brk_cur;
     brk_end = st.brk_end;
     brk_hint = st.brk_hint;
-    hint_mmap = st.hint_mmap;
+    hint_exe = st.hint_exe;
+    stack_top = st.stack_top;
+    mmap_base = st.mmap_base;
+    legacy_base = st.legacy_base;
+    legacy = st.legacy != 0;
     rwx_state.store(st.rwx, .monotonic);
     const nv = st.nvma * @sizeOf(Vma);
     const na = st.nanon * @sizeOf(Anon);
     const nr = st.nroom * @sizeOf(Room);
-    if (b.len < nv + na + nr or st.nroom > rooms.len) return false;
+    const nt = st.ntaken * @sizeOf(Run);
+    if (b.len < nv + na + nr + nt or st.nroom > rooms.len) return false;
     for (std.mem.bytesAsSlice(Vma, @as([]align(1) const u8, b.*[0..nv]))) |v| {
         if (!vmaAdd(v)) return false;
     }
@@ -1725,7 +1942,9 @@ pub fn forkLoad(b: *[]const u8) bool {
     for (std.mem.bytesAsSlice(Anon, @as([]align(1) const u8, b.*[nv .. nv + na]))) |e| anons.append(gpa, e) catch return false;
     for (std.mem.bytesAsSlice(Room, @as([]align(1) const u8, b.*[nv + na .. nv + na + nr])), 0..) |r, i| rooms[i] = r;
     nrooms = st.nroom;
-    b.* = b.*[nv + na + nr ..];
+    taken.clearRetainingCapacity();
+    for (std.mem.bytesAsSlice(Run, @as([]align(1) const u8, b.*[nv + na + nr .. nv + na + nr + nt]))) |e| taken.append(gpa, e) catch return false;
+    b.* = b.*[nv + na + nr + nt ..];
     return true;
 }
 
@@ -1749,6 +1968,7 @@ fn brk(addr: u64) u64 {
         const r = sys(SYS_mmap, if (brk_hint != 0) brk_hint else GUEST_BASE, BRK_RESERVE, 0, D_PRIVATE | D_ANON | D_NORESERVE, @bitCast(@as(i64, -1)), 0);
         if (r < 0) return 0;
         brk_base = @bitCast(r);
+        takenAdd(brk_base, brk_base + BRK_RESERVE);
         brk_cur = brk_base;
         brk_end = brk_base;
     }

@@ -65,12 +65,19 @@ int main(int argc, char **argv) {
 	// The stack is where Linux's is: within its random reach below the top of
 	// the address space (STACK_TOP less STACK_RND_MASK pages), and the
 	// mappings top-down below it.
+	unsigned long sp = (unsigned long)&pg;
 #ifdef __x86_64__
 	unsigned long stop = 0x7ffffffff000UL, reach = 1UL << 34;
 #else
-	unsigned long stop = 1UL << 48, reach = 1UL << 30;
+	// STACK_TOP is the task size, one of those an arm64 kernel offers with
+	// the page size it runs: the smallest above the stack.
+	unsigned long reach = 1UL << 30, stop = 0;
+	static const int va4k[] = {39, 48, 0}, va16k[] = {36, 47, 48, 0}, va64k[] = {42, 48, 52, 0};
+	const int *va = pg == 4096 ? va4k : pg == 16384 ? va16k : va64k;
+	for (; *va && !stop; va++)
+		if (sp < 1UL << *va)
+			stop = 1UL << *va;
 #endif
-	unsigned long sp = (unsigned long)&pg;
 	CHECK(sp < stop && sp > stop - reach - 64 * MB, "stack at %#lx, not within %#lx below %#lx", sp, reach, stop);
 	char *first = map(0, MB, 0);
 	CHECK((unsigned long)first < sp && (unsigned long)first > stop / 2, "first mapping %p, the stack at %#lx", first, sp);
@@ -90,9 +97,10 @@ int main(int argc, char **argv) {
 	CHECK(t != a && (t + MB <= a || t >= a + MB), "taken hint %p gave %p", a, t);
 
 	// A private anonymous mapping a whole number of huge pages long is
-	// huge-page aligned.
-	char *g = map(0, 4 * MB, 0);
-	CHECK(((uintptr_t)g & (2 * MB - 1)) == 0, "4 MiB mapping at %p not 2 MiB aligned", g);
+	// huge-page aligned: a PMD's worth, a page of page table entries.
+	size_t huge = pg * (pg / 8);
+	char *g = map(0, 2 * huge, 0);
+	CHECK(((uintptr_t)g & (huge - 1)) == 0, "%zu MiB mapping at %p not %zu MiB aligned", 2 * huge / MB, g, huge / MB);
 
 #ifdef __x86_64__
 	char *l = map(0, MB, MAP_32BIT);
