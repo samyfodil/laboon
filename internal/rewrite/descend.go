@@ -138,11 +138,18 @@ func AnalyzeEntries(code []byte, entries []int, scav [][2]int) Plan {
 // targets of the direct branches the code it decoded makes out of it, as
 // offsets from its start: roots of the pages they land in.
 func AnonSites(code []byte, roots []int) (sites, exits []int) {
-	d := descendAll(code, roots, [][2]int{{0, len(code)}}, false)
-	for _, s := range d.sites {
+	plan, exits := AnonPlan(code, roots)
+	for _, s := range plan {
 		sites = append(sites, int(s.Off))
 	}
-	slices.Sort(sites)
+	return sites, exits
+}
+
+// AnonPlan is AnonSites with each site's run to steal, sorted by offset.
+func AnonPlan(code []byte, roots []int) (sites []Site, exits []int) {
+	d := descendAll(code, roots, [][2]int{{0, len(code)}}, false)
+	sites = slices.Clone(d.sites)
+	slices.SortFunc(sites, func(a, b Site) int { return int(a.Off) - int(b.Off) })
 	return sites, d.exits
 }
 

@@ -1171,6 +1171,7 @@ pub fn wxFault(addr: u64, kind: u64, pc: u64, st: *Step) Verdict {
             return writeHeld(frozen[f].key, frozen[f].soff, addr, pc, st);
         }
     }
+    if (kind == 8 and find(addr) != nreg) _ = trampArea(page, true);
     const i = find(addr);
     if (i != nreg and (kind == 8 or kind == 1)) {
         if (kind == 8 and regs[i].kind == .view and regs[i].prot & PROT_EXEC != 0) {
@@ -1529,7 +1530,9 @@ fn heat(i: usize, page: u64, pc: u64) bool {
     if (NtMapViewOfSectionEx(sec, SELF, &aside, null, &vs, 0, PAGE_READWRITE, null, 0) < 0) return false;
     defer _ = NtUnmapViewOfSectionEx(SELF, aside, 0);
     @memcpy(@as([*]u8, @ptrFromInt(aside))[0..PAGE], &heat_buf);
-    const rr = root.request(LC_ANON_SITES, .{ page, pc, aside, 0, 0, 0 });
+    const ta = trampArea(page, false);
+    const aa = areaArgs(ta);
+    const rr = root.request(LC_ANON_SITES, .{ page, pc, aside, aa[0], aa[1], 0 });
     if (@as(i64, @bitCast(rr)) < 0) return false;
     const nsites: usize = @intCast(rr);
     const sc: [*]const u32 = @ptrFromInt(@intFromPtr(root.scratch()));
@@ -1539,13 +1542,18 @@ fn heat(i: usize, page: u64, pc: u64) bool {
         heat_traps[nt] = off;
         nt += 1;
     }
+    if (ta) |a| _ = applyStolen(a, page, aside, sc, nsites, null);
     const nx = placeExcl(aside, r.key, soff);
-    const m = splitView(i, page, page + PAGE) orelse return false;
+    const m = splitView(i, page, page + PAGE) orelse {
+        dropOwn(page, page + PAGE, false);
+        return false;
+    };
     var b: usize = page;
     var s: usize = PAGE;
     var o: i64 = 0;
     if (NtMapViewOfSectionEx(sec, SELF, &b, &o, &s, MEM_REPLACE_PLACEHOLDER, PAGE_EXECUTE_READ, null, 0) < 0) {
         _ = mapPiece(m, r, soff);
+        dropOwn(page, page + PAGE, false);
         return false;
     }
     regs[m] = r;
@@ -2064,8 +2072,9 @@ fn addOwn(pc: u64) bool {
     return true;
 }
 
-// dropOwn forgets the stub's traps in [lo, hi), putting the syscalls back
-// when untrap (the page is writable). The lock is held.
+// dropOwn forgets the stub's traps in [lo, hi), and the instructions it
+// replaced with jumps to trampolines there, putting the syscalls and the
+// instructions back when untrap (the page is writable). The lock is held.
 fn dropOwn(lo: u64, hi: u64, untrap: bool) void {
     forgetTraps(lo, hi);
     var k: usize = 0;
@@ -2077,6 +2086,111 @@ fn dropOwn(lo: u64, hi: u64, untrap: bool) void {
             own[k] = own[nown];
         } else k += 1;
     }
+    k = 0;
+    while (k < nstolen) {
+        const s = &stolen[k];
+        if (s.at >= lo and s.at < hi) {
+            const d: [*]u8 = @ptrFromInt(s.at);
+            if (untrap and std.mem.eql(u8, d[0..s.len], s.new[0..s.len])) @memcpy(d[0..s.len], s.orig[0..s.len]);
+            nstolen -= 1;
+            stolen[k] = stolen[nstolen];
+        } else k += 1;
+    }
+}
+
+// ---- trampolines for code made executable at run time (x86-64) -------------
+//
+// A syscall in such code whose run before it can move takes a trampoline, as
+// one in file code does, rather than only its trap: Windows dispatches an
+// exception on the guest's stack, into the red zone below rsp that Linux
+// leaves alone across a syscall. The supervisor writes a page's trampolines
+// into an area of the stub's in reach of it and says which instructions to
+// replace with jumps to them (sandbox/anoncode_windows_amd64.go); the stub
+// keeps what they were, to put back when the page stops.
+
+const STOLEN_MAX = 16;
+const Stolen = struct { at: u64, len: usize, orig: [STOLEN_MAX]u8, new: [STOLEN_MAX]u8 };
+var stolen: [*]Stolen = undefined;
+var nstolen: usize = 0;
+var capstolen: usize = 0;
+
+const TArea = struct { base: u64 = 0, used: u64 = 0 };
+var tareas = [_]TArea{.{}} ** 64;
+const TRAMP_ROOM: u64 = 512; // the least an area offers a page
+
+// trampArea is an area in reach of page with room for its trampolines, or
+// null (arm64 needs none: its islands are the stub's, see jitSiteWord). Only
+// with alloc does it make one, which changes the region table: wxFault asks
+// so before it looks a region up. The lock is held.
+fn trampArea(page: u64, alloc: bool) ?*TArea {
+    if (@import("builtin").cpu.arch != .x86_64) return null;
+    for (&tareas) |*a| {
+        if (a.base == 0) {
+            if (!alloc) return null;
+            a.base = stubPage(page, PAGE_EXECUTE_READWRITE) orelse return null;
+            return a;
+        }
+        const d = if (a.base > page) a.base - page else page - a.base;
+        if (PAGE - a.used >= TRAMP_ROOM and d + PAGE < REACH) return a;
+    }
+    return null;
+}
+
+fn areaArgs(a: ?*TArea) [2]u64 {
+    const t = a orelse return .{ 0, 0 };
+    return .{ t.base + t.used, PAGE - t.used };
+}
+
+// applyStolen puts the replacements the supervisor sent after a sites reply
+// of r sites at sc into dst, the page at page or its copy held aside, and img
+// when given, and takes the area's bytes its trampolines used. The lock is
+// held.
+fn applyStolen(a: *TArea, page: u64, dst: u64, sc: [*]const u32, r: usize, img: ?*[PAGE]u8) bool {
+    const b: [*]const u8 = @ptrCast(sc);
+    const at = 4 * (r + 1) + 8 * @as(usize, sc[r]);
+    if (at + 8 > root.SLOT_SIZE - 128) return false;
+    const n = std.mem.readInt(u32, b[at..][0..4], .little);
+    a.used = @min(PAGE, (a.used + std.mem.readInt(u32, b[at + 4 ..][0..4], .little) + 15) & ~@as(u64, 15));
+    var any = false;
+    var p = at + 8;
+    var k: u32 = 0;
+    while (k < n and p + 4 + STOLEN_MAX <= root.SLOT_SIZE - 128) : (k += 1) {
+        const off = std.mem.readInt(u16, b[p..][0..2], .little);
+        const len = std.mem.readInt(u16, b[p + 2 ..][0..2], .little);
+        const new = b[p + 4 ..][0..STOLEN_MAX];
+        p += 4 + STOLEN_MAX;
+        if (len > STOLEN_MAX or @as(u64, off) + len > PAGE) continue;
+        const d: [*]u8 = @ptrFromInt(dst + off);
+        var s = Stolen{ .at = page + off, .len = len, .orig = undefined, .new = undefined };
+        @memcpy(s.orig[0..len], d[0..len]);
+        @memcpy(s.new[0..len], new[0..len]);
+        if (!addStolen(s)) continue;
+        @memcpy(d[0..len], new[0..len]);
+        if (img) |m| @memcpy(m[off..][0..len], new[0..len]);
+        any = true;
+    }
+    return any;
+}
+
+fn addStolen(s: Stolen) bool {
+    if (nstolen == capstolen) {
+        const n = @max(capstolen * 2, PAGE / @sizeOf(Stolen));
+        var b: usize = 0;
+        var sz: usize = n * @sizeOf(Stolen);
+        if (NtAllocateVirtualMemory(SELF, &b, 0, &sz, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) < 0) return false;
+        const fresh: [*]Stolen = @ptrFromInt(b);
+        @memcpy(fresh[0..nstolen], stolen[0..nstolen]);
+        if (capstolen > 0) {
+            var o: usize = @intFromPtr(stolen);
+            var z: usize = 0;
+            _ = NtFreeVirtualMemory(SELF, &o, &z, MEM_RELEASE);
+        }
+        stolen = fresh;
+        capstolen = n;
+    }
+    stolen[nstolen] = s;
+    nstolen += 1;
+    return true;
 }
 
 // untrapPage puts the syscalls of the writable page back where the stub's
@@ -2159,7 +2273,9 @@ fn rewritePage(page: u64, pc: u64) bool {
         if (!setProt(page, PAGE_READONLY)) return false;
         const src: [*]const u8 = @ptrFromInt(page);
         @memcpy(&snap, src[0..PAGE]);
-        const rr = root.request(LC_ANON_SITES, .{ page, pc, 0, 0, 0, 0 });
+        const ta = trampArea(page, false);
+        const aa = areaArgs(ta);
+        const rr = root.request(LC_ANON_SITES, .{ page, pc, 0, aa[0], aa[1], 0 });
         if (@as(i64, @bitCast(rr)) < 0) {
             _ = setProt(page, winProt(regs[j].prot & ~PROT_EXEC));
             return false;
@@ -2169,6 +2285,7 @@ fn rewritePage(page: u64, pc: u64) bool {
         if (!setProt(page, PAGE_READWRITE)) return false;
         var any = false;
         for (sc[0..r]) |off| any = trapSite(page, off, &snap) or any;
+        if (ta) |a| any = applyStolen(a, page, page, sc, r, &snap) or any;
         if (!setProt(page, PAGE_EXECUTE_READ)) return false;
         if (std.mem.eql(u8, snap[0..], src[0..PAGE])) {
             _ = NtFlushInstructionCache(SELF, page, PAGE);

@@ -792,7 +792,7 @@ func (g *wguest) syscall(dg *dguest, nr uint64, a [6]uint64) int64 {
 	case lcMapCode:
 		return g.mapCode(dg, a[0], a[1], a[2], a[3], a[4])
 	case lcAnonSites:
-		return g.anonSites(dg, a[0], a[1], a[2])
+		return g.anonSites(dg, a[0], a[1], a[2], a[3], a[4])
 	case lcIsTrap:
 		return g.isTrap(a[0])
 	case lcInsn:

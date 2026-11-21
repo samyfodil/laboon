@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"encoding/binary"
 	"hash/maphash"
 	"slices"
@@ -24,7 +25,7 @@ import (
 // the page each came from, its traps read as the syscalls they were. An entry
 // from a page that changed since is dropped, as the boundary it named may be
 // gone.
-const lcAnonSites = 0x4c430029 // (page, pc) -> n; scratch: the n u32 site offsets, then a u32 count and the u64 pages to rewrite again
+const lcAnonSites = 0x4c430029 // (page, pc[, aside, area, room]) -> n; scratch: the n u32 site offsets, then a u32 count and the u64 pages to rewrite again (then, given an area, anonTramps's patches)
 
 // lcAnonLearn hands over pages the stub made executable without asking: a
 // page with no syscall while no page that ran had one, whose analysis could
@@ -40,9 +41,18 @@ type anonCode struct {
 }
 
 type anonPage struct {
-	hash    uint64 // the page as analyzed; 0 before
-	patched []int  // its trap sites
+	hash    uint64  // the page as analyzed; 0 before
+	patched []int   // its trap sites
+	steal   []uint8 // each one's run a trampoline can take (x86-64), else 0
+	stolen  []anonStolen
 	entries []anonEntry
+}
+
+// anonStolen is an instruction the stub replaced with a jump to a
+// trampoline (anonTramps): its bytes, at off, and what took their place.
+type anonStolen struct {
+	off       int
+	orig, new []byte
 }
 
 // anonEntry is an instruction boundary in a page that code in another page,
@@ -164,8 +174,8 @@ func (a *anonCode) analyze(ps, page, pc uint64, read func(addr uint64, b []byte)
 		}
 	}
 	p.entries = kept
-	sites, exits := anonAnalyze(code, entries)
-	p.hash, p.patched = a.hash(code), sites
+	sites, steal, exits := anonAnalyze(code, entries)
+	p.hash, p.patched, p.steal, p.stolen = a.hash(code), sites, steal, nil
 	var gained []uint64
 	for _, x := range exits {
 		t := page + uint64(int64(x))
@@ -238,6 +248,8 @@ func (a *anonCode) cloneInto(b *anonCode) {
 	for k, p := range a.pages {
 		q := *p
 		q.patched = slices.Clone(p.patched)
+		q.steal = slices.Clone(p.steal)
+		q.stolen = slices.Clone(p.stolen)
 		q.entries = slices.Clone(p.entries)
 		b.pages[k] = &q
 	}
@@ -251,5 +263,31 @@ func untrap(code []byte, p *anonPage) {
 	}
 	for _, off := range p.patched {
 		untrapSite(code, off)
+	}
+	for _, s := range p.stolen {
+		if at := code[s.off:]; bytes.HasPrefix(at, s.new) {
+			copy(at, s.orig)
+		}
+	}
+}
+
+// runs is the trap sites of the page at page as last analyzed, with the run
+// before each a trampoline can take.
+func (a *anonCode) runs(page uint64) (sites []int, steal []uint8) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p := a.pages[page]
+	if p == nil {
+		return nil, nil
+	}
+	return slices.Clone(p.patched), slices.Clone(p.steal)
+}
+
+// stole records the instructions the stub replaced in the page at page.
+func (a *anonCode) stole(page uint64, s []anonStolen) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if p := a.pages[page]; p != nil {
+		p.stolen = s
 	}
 }

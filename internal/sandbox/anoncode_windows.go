@@ -6,13 +6,18 @@ import "github.com/samyfodil/laboon/internal/rewrite"
 
 // anonSites serves lcAnonSites (anoncode.go) for the page at page. A page
 // the stub holds aside (from: a shadow of shared code it fills before putting
-// it in place, stub/windows/mem.zig) is read there.
-func (g *wguest) anonSites(dg *dguest, page, pc, from uint64) int64 {
+// it in place, stub/windows/mem.zig) is read there. Given a trampoline area,
+// [area, area+room), its sites get trampolines there too (anonTramps).
+func (g *wguest) anonSites(dg *dguest, page, pc, from, area, room uint64) int64 {
 	read := g.sp.readMem
 	if from != 0 {
 		read = aside(read, page, pageSize, from)
 	}
-	return g.anon.sites(dg, pageSize, page, pc, read, func(pc uint64) uint64 { return insnEnd(read, pc) })
+	n := g.anon.sites(dg, pageSize, page, pc, read, func(pc uint64) uint64 { return insnEnd(read, pc) })
+	if n >= 0 && area != 0 {
+		g.anonTramps(dg, page, int(n), area, room, read)
+	}
+	return n
 }
 
 // aside reads the ps bytes at page from from instead.
