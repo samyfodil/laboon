@@ -308,7 +308,7 @@ func (g *dguest) execTarget(dirfd int64, pathAddr, argvAddr uint64, flags int64)
 			if e != 0 {
 				return fail(e)
 			}
-			if _, isLink := g.linkTarget(lp); isLink {
+			if _, isLink, _ := g.linkTarget(lp); isLink {
 				return fail(lxELOOP)
 			}
 		}

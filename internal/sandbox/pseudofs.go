@@ -21,11 +21,26 @@ type pnodeFS struct {
 	root  *pnode
 	dev   uint64 // the mount's device number (devProc/devSys/devDevtmp)
 	base  string // the mount's guest path ("/proc"), for inode hashing
-	magic uint64 // f_type statfs reports (PROC_SUPER_MAGIC, ...); 0 = derive from base
+	magic uint64 // f_type statfs reports (PROC_SUPER_MAGIC, ...)
 }
 
 func newPnodeFS(root *pnode, dev, magic uint64, base string) *pnodeFS {
 	return &pnodeFS{root: root, dev: dev, base: base, magic: magic}
+}
+
+// statfs f_type of the synthetic and volatile filesystems.
+const (
+	procMagic   = 0x9fa0
+	sysfsMagic  = 0x62656572
+	cgroupMagic = 0x63677270
+	tmpfsMagic  = 0x01021994
+)
+
+func (f *pnodeFS) fsType() uint64 { return f.magic }
+
+func isCgroupFS(f core.FileSystem) bool {
+	p, ok := f.(*pnodeFS)
+	return ok && p.magic == cgroupMagic
 }
 
 type pnodeNode struct {

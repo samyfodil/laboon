@@ -123,11 +123,11 @@ func (g *dguest) mount(srcAddr, tgtAddr, fsAddr, flags, dataAddr uint64) int64 {
 		// serves do not exercise their object semantics.
 		return g.mountFS(target)
 	case "proc":
-		return g.mountPseudo(target, newPnodeFS(g.procRoot(), devProc, 0x9fa0, target))
+		return g.mountPseudo(target, newPnodeFS(g.procRoot(), devProc, procMagic, target))
 	case "sysfs":
-		return g.mountPseudo(target, newPnodeFS(sysRoot(g.cgStore()), devSys, 0x62656572, target))
+		return g.mountPseudo(target, newPnodeFS(sysRoot(g.cgStore()), devSys, sysfsMagic, target))
 	case "cgroup2":
-		return g.mountPseudo(target, newPnodeFS(cgroupDir(g.cgStore()), devSys, 0x63677270, target))
+		return g.mountPseudo(target, newPnodeFS(cgroupDir(g.cgStore()), devSys, cgroupMagic, target))
 	case "overlay":
 		data, _ := g.readCStr(dataAddr)
 		return g.mountOverlay(target, data)
@@ -216,25 +216,6 @@ func parseOverlayOpts(data string) (lower []string, upper, work string) {
 	return lower, upper, work
 }
 
-// dynMagic returns the statfs f_type of the pseudo filesystem whose mount covers
-// gp (the longest matching dynamic mount), so a proc/sysfs/cgroup2 mount at a
-// non-canonical path reports its real type. ok is false if no such mount covers gp.
-func (fs *dfs) dynMagic(gp string) (uint64, bool) {
-	fs.dynMu.Lock()
-	defer fs.dynMu.Unlock()
-	magic, best := uint64(0), -1
-	for _, m := range fs.dynMounts {
-		pf, ok := m.mfs.(*pnodeFS)
-		if !ok || pf.magic == 0 {
-			continue
-		}
-		if (gp == m.at || strings.HasPrefix(gp, m.at+"/")) && len(m.at) > best {
-			magic, best = pf.magic, len(m.at)
-		}
-	}
-	return magic, best >= 0
-}
-
 // mountMem services `mount -t tmpfs|ramfs` with a real in-memory filesystem
 // (memfs.NewMemFS) at target: volatile and separate from the rootfs, as the kernel
 // tmpfs is. A mode= option, if given, sets the root directory's permission bits.
@@ -244,7 +225,11 @@ func (g *dguest) mountMem(target, data string) int64 {
 		// works (shared-memory programs — postgres, Chromium — rely on it); a pure
 		// in-memory backend has no host fd to map. A host-backed file's core.File is
 		// an *os.File, so mmap maps it directly, MAP_SHARED included, no extra code.
-		return g.mountFS(target)
+		backing, err := g.dfs.tmpLayer()
+		if err != nil {
+			return sErr(osErrno(err))
+		}
+		return g.mountPseudo(target, tmpfsFS{backing})
 	}
 	mfs := memfs.NewMemFS()
 	if mode := tmpfsMode(data); mode != 0 {
@@ -360,8 +345,7 @@ func (g *dguest) umount2(tgtAddr uint64) int64 {
 	}
 	fs.dynMu.Unlock()
 	if idx >= 0 {
-		fs.dynGen.Add(1)
-		g.vns().Unmount(target)
+		fs.dynGen.Add(1) // every view rebuilds without it, with what it covered back
 		return 0
 	}
 	// pivot_root stacks the old root for one detach; the first umount after it
@@ -399,17 +383,44 @@ func (g *dguest) mountBind(srcAddr uint64, target string) int64 {
 // core.FileSystem in the Namespace, so every path under it resolves through the
 // same chokepoint and confined backend as the rest of the guest's view.
 func (g *dguest) mountFS(target string) int64 {
-	fs := g.dfs
-	dir, err := os.MkdirTemp(fs.tmpDir, "lc-mount-")
+	backing, err := g.dfs.tmpLayer()
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	backing := hostfs.NewHostDirFS(dir, fs.hostFS) // confined like the overlay's own layers
-	backing.SetConfine(true)                       // a guest-mutable tree
-	backing.SetMeta(core.NewMetaStore())           // carry device-node kind/rdev the placeholder cannot
-	if err := g.vns().Mount(target, backing); err != nil {
-		return sErr(osErrno(err))
+	return g.mountPseudo(target, backing)
+}
+
+// tmpLayer makes a fresh writable filesystem: a confined host directory under
+// the run's temp dir, removed when the run ends.
+func (fs *dfs) tmpLayer() (*hostfs.HostDirFS, error) {
+	dir, err := os.MkdirTemp(fs.tmpDir, "lc-mount-")
+	if err != nil {
+		return nil, err
 	}
-	g.addDynMount(target, backing)
-	return 0
+	backing := hostfs.NewHostDirFS(dir, fs.hostFS)
+	backing.SetConfine(true)             // a guest-mutable tree
+	backing.SetMeta(core.NewMetaStore()) // carry device-node kind/rdev the placeholder cannot
+	return backing, nil
+}
+
+// tmpfsFS is a tmpfs backed by a run-private host directory: volatile like the
+// kernel's, with host files a MAP_SHARED mapping can map directly.
+type tmpfsFS struct{ *hostfs.HostDirFS }
+
+func (tmpfsFS) fsType() uint64 { return tmpfsMagic }
+
+// shmFS is the run's /dev/shm, shared by every guest: a sticky, world-writable
+// tmpfs, as the kernel's is.
+func (fs *dfs) shmFS() core.FileSystem {
+	fs.shmOnce.Do(func() {
+		t, err := fs.tmpLayer()
+		if err != nil {
+			return
+		}
+		mode := uint32(0o1777)
+		if t.Root().SetAttr(core.AttrUpdate{Mode: &mode}) == nil {
+			fs.shm = tmpfsFS{t}
+		}
+	})
+	return fs.shm
 }

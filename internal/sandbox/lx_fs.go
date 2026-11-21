@@ -42,7 +42,9 @@ type dfs struct {
 	keepUpper bool            // upperAbs is the caller's, kept after the run
 	tmpDir    string          // the run's temp directory (newRunTmp)
 	emptyOnce sync.Once
-	emptyPath string // the run's empty directory (openEmpty)
+	shmOnce   sync.Once
+	shm       core.FileSystem // the run's /dev/shm (shmFS)
+	emptyPath string          // the run's empty directory (openEmpty)
 	emptyErr  error
 	appendMu  sync.Mutex // serializes O_APPEND writes to a backing that cannot append itself
 
@@ -299,14 +301,22 @@ func (fs *dfs) cgStore() *cgStore {
 
 func (fs *dfs) guestNS(g *dguest) *namespace.Namespace {
 	ns := namespace.NewNamespace(fs.overlay)
-	ns.Mount("/proc", newPnodeFS(g.procRoot(), devProc, 0x9fa0, "/proc"))
-	ns.Mount("/sys", newPnodeFS(sysRoot(fs.cgStore()), devSys, 0x62656572, "/sys"))
+	// The kernel filesystems are there whether or not the image has their mount
+	// points.
+	ns.MountShadow("/proc", newPnodeFS(g.procRoot(), devProc, procMagic, "/proc"))
+	ns.MountShadow("/sys", newPnodeFS(sysRoot(fs.cgStore()), devSys, sysfsMagic, "/sys"))
+	ns.MountShadow(cgRoot, newPnodeFS(cgroupDir(fs.cgStore()), devSys, cgroupMagic, cgRoot))
 	// /dev unions the synthetic device nodes over the overlay's own /dev.
 	var ovDev core.Node
 	if loc, err := fs.ns.Resolve("/dev", true); err == nil {
 		ovDev = loc.Node
 	}
-	ns.Mount("/dev", &devFS{syn: g.devRoot(), ovFS: fs.overlay, ovDev: ovDev, dev: devDevtmp})
+	ns.MountShadow("/dev", &devFS{syn: g.devRoot(), ovFS: fs.overlay, ovDev: ovDev, dev: devDevtmp})
+	if !fs.passthrough() {
+		if shm := fs.shmFS(); shm != nil {
+			ns.MountShadow("/dev/shm", shm)
+		}
+	}
 	fs.ensureBinds(g.cfg.Mounts)
 	for _, m := range fs.binds {
 		ns.MountShadow(m.at, m.mfs) // Config.Mounts host-directory binds
@@ -1082,7 +1092,7 @@ func (g *dguest) resolve(gp string, followLast bool) (string, lxErrno) {
 		if i == len(parts)-1 && !followLast {
 			return next, 0
 		}
-		t, ok := g.linkTarget(next)
+		t, ok, magic := g.linkTarget(next)
 		if !ok {
 			cur = next
 			continue
@@ -1091,7 +1101,7 @@ func (g *dguest) resolve(gp string, followLast bool) (string, lxErrno) {
 			return "", lxELOOP
 		}
 		switch {
-		case path.IsAbs(t) && isPseudoPath(next):
+		case path.IsAbs(t) && magic:
 			// A procfs magic link (/proc/<pid>/fd/*, exe, ...) names an already-open
 			// object and resolves the same whatever root the follower chrooted to.
 		case path.IsAbs(t):
@@ -1109,10 +1119,11 @@ func (g *dguest) resolve(gp string, followLast bool) (string, lxErrno) {
 
 // linkTarget reads gp as a symlink through the overlay (upper wins, whiteouts
 // hide the lower). gp's parents are already resolved, so the host path has no
-// symlink below the root.
-func (g *dguest) linkTarget(gp string) (string, bool) {
+// symlink below the root. magic reports a synthetic link, whose absolute
+// target names an open object by its full path whatever the process root.
+func (g *dguest) linkTarget(gp string) (t string, ok, magic bool) {
 	if t, ok, handled := g.pseudoLink(gp); handled {
-		return t, ok
+		return t, ok, true
 	}
 	// The overlay decision — which layer backs gp, with upper winning and a
 	// whiteout hiding the lower — is the vfs Namespace's: it resolves gp through
@@ -1126,10 +1137,10 @@ func (g *dguest) linkTarget(gp string) (string, bool) {
 		// symlink-to-"" made resolve() rejoin to the parent and drop the final
 		// component, so an O_PATH open of <rootfs>/proc recorded <rootfs> and a
 		// runtime's /proc/self/fd check ("possibly malicious path") failed.
-		return "", false
+		return "", false, false
 	}
-	t, err := loc.Node.Readlink()
-	return t, err == nil
+	t, err = loc.Node.Readlink()
+	return t, err == nil, false
 }
 
 // lookup resolves a guest path argument (dirfd-relative) to a symlink-free
@@ -2335,7 +2346,7 @@ func (g *dguest) readlinkGuest(gp string) (string, lxErrno) {
 	if t, e, ok := g.pseudoReadlink(gp); ok {
 		return t, e
 	}
-	if t, ok := g.linkTarget(gp); ok {
+	if t, ok, _ := g.linkTarget(gp); ok {
 		return t, 0
 	}
 	if _, e := g.lstatGuest(gp); e != 0 {

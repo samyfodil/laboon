@@ -311,16 +311,23 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, fl
 	return cur, nil
 }
 
+// MountOf returns the mount point covering the clean absolute path p (the
+// longest at or above it, "/" for the root) and the filesystem mounted there.
+func (ns *Namespace) MountOf(p string) (string, FileSystem) {
+	best, bestFS := "/", ns.root
+	for mp, mfs := range ns.mounts {
+		if (p == mp || strings.HasPrefix(p, mp+"/")) && len(mp) > len(best) {
+			best, bestFS = mp, mfs
+		}
+	}
+	return best, bestFS
+}
+
 // at returns the location for an absolute path already known to resolve, used
 // for "/" and ".." where no lookup or symlink handling is needed.
 func (ns *Namespace) at(abs string) Loc {
 	abs = "/" + clean(abs)
-	best, bestFS := "/", ns.root
-	for mp, mfs := range ns.mounts {
-		if (abs == mp || strings.HasPrefix(abs, mp+"/")) && len(mp) > len(best) {
-			best, bestFS = mp, mfs
-		}
-	}
+	best, bestFS := ns.MountOf(abs)
 	// Walk from bestFS root to abs without symlink/mount handling (callers use
 	// this only for "/" and parent of an already-resolved path).
 	cur := Loc{FS: bestFS, Node: bestFS.Root(), Path: strings.TrimSuffix(best, "/")}

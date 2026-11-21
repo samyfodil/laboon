@@ -1177,7 +1177,7 @@ func (g *dguest) statfs(dirfd int64, pathAddr, bufAddr uint64) int64 {
 		return sErr(osErrno(err))
 	}
 	var b [120]byte
-	magic := fsMagic(fsp)
+	magic := g.fsMagic(fsp)
 	if magic == lxOverlayfsMagic && s.Type != 0 {
 		// A non-pseudo path reports the real backing host filesystem's type, not
 		// laboon's internal overlay: the guest sees an ordinary filesystem (ext4,
@@ -1185,12 +1185,6 @@ func (g *dguest) statfs(dirfd int64, pathAddr, bufAddr uint64) int64 {
 		// which refuses to stack overlay on overlayfs, proceeds as it would on a
 		// real host. Pseudo mounts keep their own magic below.
 		magic = s.Type
-	}
-	if m, ok := g.dfs.dynMagic(fsp); ok {
-		// A pseudo filesystem mounted at a non-canonical path (a container
-		// runtime mounts proc/sysfs/cgroup2 under its rootfs, then pivot_roots)
-		// reports its own f_type, which fsMagic's canonical-path test misses.
-		magic = m
 	}
 	if g.dfs.isNsBind(fsp) {
 		magic = 0x6e736673 // NSFS_MAGIC: a persisted namespace file
@@ -1213,20 +1207,15 @@ func (g *dguest) statfs(dirfd int64, pathAddr, bufAddr uint64) int64 {
 	return 0
 }
 
-// fsMagic is the f_type a path's filesystem reports: the real magic for the
-// pseudo mounts (so a runtime that checks e.g. /sys/fs/cgroup is cgroup2 is
-// satisfied). For any other path it returns lxOverlayfsMagic as a sentinel that
-// statfs replaces with the real backing host filesystem's type when known.
-func fsMagic(gp string) uint64 {
-	switch {
-	case gp == "/sys/fs/cgroup" || strings.HasPrefix(gp, "/sys/fs/cgroup/"):
-		return 0x63677270 // CGROUP2_SUPER_MAGIC
-	case gp == "/proc" || strings.HasPrefix(gp, "/proc/"):
-		return 0x9fa0 // PROC_SUPER_MAGIC
-	case gp == "/sys" || strings.HasPrefix(gp, "/sys/"):
-		return 0x62656572 // SYSFS_MAGIC
-	case gp == "/dev/shm" || strings.HasPrefix(gp, "/dev/shm/"):
-		return 0x01021994 // TMPFS_MAGIC
+// fsMagic is the f_type of the filesystem mounted over gp when it reports its
+// own (a proc, sysfs, cgroup2 or tmpfs instance); for any other it returns
+// lxOverlayfsMagic, a sentinel statfs replaces with the backing filesystem's
+// type when known.
+func (g *dguest) fsMagic(gp string) uint64 {
+	if _, mfs := g.vns().MountOf(gp); mfs != nil {
+		if t, ok := mfs.(interface{ fsType() uint64 }); ok {
+			return t.fsType()
+		}
 	}
 	return lxOverlayfsMagic
 }

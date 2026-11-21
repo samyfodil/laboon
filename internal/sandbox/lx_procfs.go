@@ -355,61 +355,55 @@ func (fs *dfs) hostPidOf(tgid int) int {
 
 // ---- path dispatch -----------------------------------------------------------
 
-func isPseudoPath(gp string) bool {
-	for _, m := range [...]string{"/proc", "/sys", "/dev"} {
-		if strings.HasPrefix(gp, m) && (len(gp) == len(m) || gp[len(m)] == '/') {
-			return true
-		}
+// pseudoMount reports whether gp lies in a synthetic filesystem (a proc, sysfs
+// or cgroup2 instance, or /dev), by the mount that covers it.
+func (g *dguest) pseudoMount(gp string) bool {
+	_, mfs := g.vns().MountOf(gp)
+	switch mfs.(type) {
+	case *pnodeFS, *devFS:
+		return true
 	}
 	return false
 }
 
-// pseudo returns the node at a resolved guest path. handled is false when the
-// path is not synthetic (the overlay serves it: the rest of /dev, /dev/shm).
+// pseudoNode is the synthetic node behind a resolved node, if it is one. pure
+// reports a node with no overlay entry behind it (a missing name under it is
+// missing, not left for the overlay).
+func pseudoNode(n core.Node) (pn *pnode, pure bool) {
+	switch n := n.(type) {
+	case *pnodeNode:
+		return n.n, true
+	case *devNodeU:
+		return n.syn, n.ov == nil
+	}
+	return nil, false
+}
+
+// pseudo returns the synthetic node at a resolved guest path. handled is false
+// when the path is not synthetic (the overlay serves it: the rest of /dev,
+// /dev/shm). A missing name is the synthetic filesystem's answer when the
+// nearest directory above it that exists is purely synthetic.
 func (g *dguest) pseudo(gp string) (n *pnode, e lxErrno, handled bool) {
-	if !isPseudoPath(gp) {
-		// A pseudo filesystem (proc/sysfs/cgroup2) mounted at a non-canonical
-		// path -- a container rootfs, before pivot_root -- resolves through the
-		// namespace to a synthetic node. Serve it like the canonical mounts so
-		// its files read and its directories list (a container runtime reads
-		// e.g. <rootfs>/proc/self/status during init).
-		if _, ok := g.dfs.dynMagic(gp); ok {
-			if loc, err := g.vns().Resolve(gp, false); err == nil {
-				if pn, ok := loc.Node.(*pnodeNode); ok {
-					return pn.n, 0, true
-				}
-			}
-		}
+	if !g.pseudoMount(gp) {
 		return nil, 0, false
 	}
-	parts := strings.Split(strings.TrimPrefix(gp, "/"), "/")
-	var root *pnode
-	var dev uint64
-	switch parts[0] {
-	case "proc":
-		root, dev = g.procRoot(), devProc
-	case "sys":
-		root, dev = sysRoot(g.cgStore()), devSys
-	case "dev":
-		if len(parts) > 1 && devNode(parts[1]) == nil {
-			return nil, 0, false // /dev/shm and anything the rootfs has
-		}
-		root, dev = g.devRoot(), devDevtmp
+	ns := g.vns()
+	loc, err := ns.Resolve(gp, false)
+	if err == nil {
+		n, _ := pseudoNode(loc.Node)
+		return n, 0, n != nil
 	}
-	n = root
-	for _, p := range parts[1:] {
-		if n.kind != pDir {
-			return nil, lxENOTDIR, true
+	for p := path.Dir(gp); ; p = path.Dir(p) {
+		if l, perr := ns.Resolve(p, false); perr == nil {
+			if n, pure := pseudoNode(l.Node); n != nil && pure {
+				return nil, osErrno(err), true
+			}
+			return nil, 0, false
 		}
-		if n = n.child(p); n == nil {
-			return nil, lxENOENT, true
+		if p == "/" {
+			return nil, 0, false
 		}
 	}
-	n.dev, n.ino = dev, pino(gp)
-	if n.kind == pLink && magicTarget(n.target) {
-		n.ino = pino(n.target)
-	}
-	return n, 0, true
 }
 
 func pino(gp string) uint64 {
@@ -463,7 +457,7 @@ func (g *dguest) pseudoStat(gp string) (os.FileInfo, lxErrno, bool) {
 // (procfs files are size 0, devices are character devices), anything else the
 // host file.
 func (g *dguest) fileInfo(d *dfile) (os.FileInfo, error) {
-	if isPseudoPath(d.gp) {
+	if g.pseudoMount(d.gp) {
 		if fi, e, ok := g.pseudoStat(d.gp); ok && e == 0 {
 			return fi, nil
 		}
@@ -474,8 +468,8 @@ func (g *dguest) fileInfo(d *dfile) (os.FileInfo, error) {
 // pseudoChange answers mkdir (create) or unlink of a synthetic path, which
 // procfs and sysfs refuse; handled is false for overlay paths.
 func (g *dguest) pseudoChange(gp string, create bool) (int64, bool) {
-	if strings.HasPrefix(gp, cgRoot+"/") {
-		return sErr(g.cgStore().change(gp, create)), true // a cgroup mkdir/rmdir
+	if at, mfs := g.vns().MountOf(gp); gp != at && isCgroupFS(mfs) {
+		return sErr(g.cgStore().change(cgRoot+gp[len(at):], create)), true // a cgroup mkdir/rmdir
 	}
 	_, e, handled := g.pseudo(gp)
 	switch {
@@ -1097,7 +1091,7 @@ func (t *dguest) fdNode(d *dfile) *pnode {
 		return &pnode{kind: pFdObj, perm: 0o777, fd: d, target: name}
 	}
 	if (d.held() || d.mem != nil || d.fx.opath) && strings.HasPrefix(name, "/") {
-		if isPseudoPath(name) {
+		if t.pseudoMount(name) {
 			return plink(name)
 		}
 		if d.fx.opath && d.pathFD != nil {
@@ -1134,9 +1128,6 @@ func (t *dguest) fdNode(d *dfile) *pnode {
 // node. A plain fd link to a live name is a symlink and resolves through its
 // name before reaching here. ok is false for any non-fd-link path.
 func (g *dguest) fdLinkStat(gp string) (lxStat, lxErrno, bool) {
-	if !isPseudoPath(gp) {
-		return lxStat{}, 0, false
-	}
 	n, e, handled := g.pseudo(gp)
 	if !handled || e != 0 || n.kind != pFdObj || n.fd == nil {
 		return lxStat{}, 0, false

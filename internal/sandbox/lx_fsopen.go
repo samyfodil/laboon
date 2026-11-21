@@ -285,7 +285,7 @@ func (g *dguest) resolveHow(dirfd int64, p string, follow bool, resolve uint64) 
 		if i == len(parts)-1 && !follow {
 			return next, 0
 		}
-		t, ok := g.linkTarget(next)
+		t, ok, _ := g.linkTarget(next)
 		if !ok {
 			cur = next
 			continue
