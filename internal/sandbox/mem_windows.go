@@ -393,7 +393,7 @@ func (g *wguest) codeFill(dg *dguest, fd, off, n, addr uint64, areas []trampArea
 	}
 	f, err := elf.NewFile(src.reader())
 	if err != nil || f.Machine != elfMachine {
-		return nil, nil, nil, lxEACCES // code that is not ours to rewrite
+		return nil, nil, nil, lxENOEXEC // not an image of ours: the stub maps it as data
 	}
 	rw, err := g.newRewriter(src)
 	if err != nil {

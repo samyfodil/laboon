@@ -100,7 +100,9 @@ func (f *HostDirFS) StatFS(n core.Node) (core.StatFS, error) {
 	hn := n.(*HostNode)
 	p := hn.p
 	if hn.kind != core.Dir {
-		p = path.Dir(p)
+		if p = path.Dir(p); p == "." {
+			p = ""
+		}
 	}
 	s, err := f.h.hStatfs(f.hp(p))
 	if err != nil {

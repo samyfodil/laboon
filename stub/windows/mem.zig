@@ -94,6 +94,7 @@ const MADV_DONTNEED: u64 = 4;
 
 const ENOMEM: u64 = 12;
 const EACCES: u64 = 13;
+const ENOEXEC: u64 = 8;
 const EEXIST: u64 = 17;
 const EINVAL: u64 = 22;
 
@@ -508,6 +509,7 @@ fn allMapped(lo: u64, hi: u64) bool {
 // them already). With no room in range, every site takes the trap path.
 fn mapCode(lo: u64, len: u64, prot: u64, fd: u64, off: u64, sized: ?u64) u64 {
     const need = sized orelse root.request(LC_CODE_SIZE, .{ fd, off, len, lo, 0, 0 });
+    if (need == neg(ENOEXEC)) return mapData(lo, len, prot, fd, off);
     if (@as(i64, @bitCast(need)) < 0) {
         _ = unmapRange(lo, lo + len);
         return need;
@@ -541,6 +543,20 @@ fn mapCode(lo: u64, len: u64, prot: u64, fd: u64, off: u64, sized: ?u64) u64 {
     for (areas[0..n]) |c| _ = protect(c, c + tlen, PROT_READ | PROT_EXEC);
     mark(lo, lo + len, areas[0], areas[1]); // rewritten already: executable as it is
     _ = protect(lo, lo + len, prot);
+    return lo;
+}
+
+// mapData fills the private region [lo, lo+len), mapped writable, with the
+// file's bytes and gives it prot. A file that is not an image of ours is data
+// even when mapped executable: like a JIT's code it runs only once rewritten
+// (wxFault).
+fn mapData(lo: u64, len: u64, prot: u64, fd: u64, off: u64) u64 {
+    const r = root.request(LC_MAP_FILL, .{ fd, off, len, lo, 0, 0 });
+    if (@as(i64, @bitCast(r)) < 0) {
+        _ = unmapRange(lo, lo + len);
+        return r;
+    }
+    if (prot != PROT_READ | PROT_WRITE) _ = protect(lo, lo + len, prot);
     return lo;
 }
 
@@ -654,8 +670,18 @@ fn mmap(hint: u64, len0: u64, prot: u64, flags: u64, fd: u64, off: u64) u64 {
     const anon = flags & MAP_ANON != 0;
     // Private file code is rewritten as it is copied in; anonymous code, and
     // a shared mapping's, run only once rewritten (wxFault).
-    const code = prot & PROT_EXEC != 0 and !anon and typ == MAP_PRIVATE;
+    var code = prot & PROT_EXEC != 0 and !anon and typ == MAP_PRIVATE;
     var sized: ?u64 = null;
+    if (code and !fixed) {
+        const need = root.request(LC_CODE_SIZE, .{ fd, off, len, 0, 0, 0 });
+        if (need == neg(ENOEXEC)) {
+            code = false;
+        } else if (@as(i64, @bitCast(need)) < 0) {
+            return need;
+        } else {
+            sized = need;
+        }
+    }
     var lo: u64 = 0;
     if (fixed) {
         lo = addr;
@@ -664,12 +690,9 @@ fn mmap(hint: u64, len0: u64, prot: u64, flags: u64, fd: u64, off: u64) u64 {
             if (flags & MAP_FIXED == 0) return neg(EEXIST);
             if (!unmapRange(lo, lo + len)) return neg(ENOMEM);
         }
-    } else if (code) {
+    } else if (sized) |need| {
         // Code wider than a branch reaches takes a trampoline area on each
         // side (mapCode): leave room for both.
-        const need = root.request(LC_CODE_SIZE, .{ fd, off, len, 0, 0, 0 });
-        if (@as(i64, @bitCast(need)) < 0) return need;
-        sized = need;
         const pad: u64 = if (len + up(need) <= REACH) 0 else up(need);
         const span = len + 2 * pad + PAGE;
         lo = hinted(addr, len) orelse (freeSpan(span) orelse newArea(span) orelse return neg(ENOMEM)) + pad;
@@ -683,14 +706,7 @@ fn mmap(hint: u64, len0: u64, prot: u64, flags: u64, fd: u64, off: u64) u64 {
         const p = if (anon) prot else PROT_READ | PROT_WRITE;
         if (!allocAnon(i, p)) return neg(ENOMEM);
         if (code) return mapCode(lo, len, prot, fd, off, sized);
-        if (!anon) {
-            const r = root.request(LC_MAP_FILL, .{ fd, off, len, lo, 0, 0 });
-            if (@as(i64, @bitCast(r)) < 0) {
-                _ = release(i, lo, lo + len);
-                return r;
-            }
-            if (prot != p) _ = protect(lo, lo + len, prot);
-        }
+        if (!anon) return mapData(lo, len, prot, fd, off);
         return lo;
     }
     const r = root.request(LC_MAP_SECTION, .{ if (anon) ~@as(u64, 0) else fd, if (anon) 0 else off, len, prot, 0, 0 });

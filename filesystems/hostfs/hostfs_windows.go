@@ -910,9 +910,38 @@ func (fs *WinFS) hStatfs(dir string) (core.StatFS, error) {
 	}, nil
 }
 
-// FstatfsOf is the statfs of the filesystem holding the open file f.
+const volumeNameGUID = 0x1
+
+// FstatfsOf is the statfs of the filesystem holding the open file f, found
+// from its handle: the name f was opened by need not resolve any more.
 func FstatfsOf(f *os.File) (core.StatFS, error) {
-	return (&WinFS{}).hStatfs(filepath.Dir(f.Name()))
+	h := windows.Handle(f.Fd())
+	var fi windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &fi); err != nil {
+		return core.StatFS{}, &os.PathError{Op: "fstatfs", Path: f.Name(), Err: err}
+	}
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n, err := windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), volumeNameGUID)
+	if err != nil {
+		return core.StatFS{}, &os.PathError{Op: "fstatfs", Path: f.Name(), Err: err}
+	}
+	p := windows.UTF16ToString(buf[:n])
+	// \\?\Volume{guid}\rest: the volume root ends at the fourth separator.
+	if i := strings.IndexByte(p[len(`\\?\`):], '\\'); i >= 0 {
+		p = p[:len(`\\?\`)+i+1]
+	}
+	root, err := windows.UTF16PtrFromString(p)
+	if err != nil {
+		return core.StatFS{}, err
+	}
+	var avail, total, free uint64
+	if err := windows.GetDiskFreeSpaceEx(root, &avail, &total, &free); err != nil {
+		return core.StatFS{}, &os.PathError{Op: "fstatfs", Path: f.Name(), Err: err}
+	}
+	return core.StatFS{
+		Bsize: 4096, Blocks: total / 4096, Bfree: free / 4096, Bavail: avail / 4096,
+		Files: 1 << 32, Ffree: 1 << 31, Fsid: [2]uint32{fi.VolumeSerialNumber, 0},
+	}, nil
 }
 
 func (fs *WinFS) hReadDir(p string) ([]os.FileInfo, error) {
