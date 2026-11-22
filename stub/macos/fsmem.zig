@@ -292,7 +292,7 @@ pub fn emulate(mc: *std.c.mcontext_t) bool {
             if (writes) storeN(ea, gsize, res);
         },
         0xc6, 0xc7 => { // MOV r/m, imm
-            const imlen: u8 = if (op == 0xc6) 1 else 4;
+            const imlen: u8 = if (op == 0xc6) 1 else if (op66) @as(u8, 2) else 4;
             const raw = loadN(@intFromPtr(code + i), imlen);
             const imm = if (size == 8 and (raw & signBit(imlen)) != 0) raw | ~mask(imlen) else raw;
             storeN(ea, size, imm);
@@ -322,10 +322,28 @@ pub fn emulate(mc: *std.c.mcontext_t) bool {
                 else => return fault(mc),
             }
         },
-        0xfe, 0xff => { // INC/DEC r/m (CF preserved)
+        0xfe, 0xff => { // INC/DEC r/m (CF preserved); CALL/JMP/PUSH r/m
+            const ext = (modrm >> 3) & 7;
+            if (op == 0xff and (ext == 2 or ext == 4)) {
+                const to = loadN(ea, 8);
+                if (ext == 2) {
+                    mc.ss.rsp -%= 8;
+                    storeN(mc.ss.rsp, 8, tstate.pc(mc) + i);
+                }
+                tstate.setPc(mc, to);
+                return true;
+            }
+            if (op == 0xff and ext == 6) {
+                const psize: u8 = if (op66) 2 else 8;
+                const v = loadN(ea, psize);
+                mc.ss.rsp -%= psize;
+                storeN(mc.ss.rsp, psize, v);
+                tstate.setPc(mc, tstate.pc(mc) + i);
+                return true;
+            }
             const a = loadN(ea, size);
             const cf = mc.ss.rflags & CF;
-            switch ((modrm >> 3) & 7) {
+            switch (ext) {
                 0 => {
                     mc.ss.rflags = (addFlags(mc.ss.rflags, size, a, 1) & ~CF) | cf;
                     storeN(ea, size, a +% 1);
@@ -336,6 +354,13 @@ pub fn emulate(mc: *std.c.mcontext_t) bool {
                 },
                 else => return fault(mc),
             }
+        },
+        0x8f => { // POP r/m: an rsp base addresses past the popped slot
+            if ((modrm >> 3) & 7 != 0) return fault(mc);
+            const psize: u8 = if (op66) 2 else 8;
+            const v = loadN(mc.ss.rsp, psize);
+            mc.ss.rsp +%= psize;
+            storeN(if (base == 4) ea +% psize else ea, psize, v);
         },
         0x86, 0x87 => { // XCHG r/m, r
             if (hiByte) return fault(mc);

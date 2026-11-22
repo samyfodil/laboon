@@ -38,3 +38,14 @@ func TestSyscallPreservesRegisters(t *testing.T) {
 		restore()
 	}
 }
+
+// TestFSForms runs testdata/fsforms_amd64.c: push, pop, call and jmp through
+// %fs memory, and a 16-bit %fs store that takes an island, on two threads.
+func TestFSForms(t *testing.T) {
+	root, prog := guestRoot(t, "fsforms_amd64")
+	var o bytes.Buffer
+	code, err := Run(context.Background(), prog, Config{Args: []string{prog}, Stdout: &o, Stderr: &o, RootFS: HostRoot(root)})
+	if err != nil || code != 0 || o.String() != "fsforms ok\nfsforms ok\n" {
+		t.Fatalf("code=%d err=%v out=%q", code, err, o.String())
+	}
+}
