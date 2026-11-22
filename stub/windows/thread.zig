@@ -14,11 +14,12 @@ const arch = stub.arch;
 const HANDLE = usize;
 const NTSTATUS = i32;
 const CURRENT_PROCESS: HANDLE = ~@as(usize, 0);
+const CURRENT_THREAD: HANDLE = ~@as(usize, 1);
 const THREAD_ALL_ACCESS: u32 = 0x1fffff;
 
 extern "ntdll" fn NtCreateThreadEx(h: *HANDLE, access: u32, attr: ?*anyopaque, proc: HANDLE, start: *const anyopaque, arg: ?*anyopaque, flags: u32, zerobits: usize, stacksize: usize, maxstack: usize, attrlist: ?*anyopaque) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtClose(h: HANDLE) callconv(win.WINAPI) NTSTATUS;
-extern "ntdll" fn RtlExitUserThread(code: NTSTATUS) callconv(win.WINAPI) noreturn;
+extern "ntdll" fn NtTerminateThread(h: HANDLE, code: NTSTATUS) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtResumeThread(h: HANDLE, prev: ?*u32) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtFlushProcessWriteBuffers() callconv(win.WINAPI) void;
 extern "ntdll" fn RtlCloneUserProcess(flags: u32, psd: ?*anyopaque, tsd: ?*anyopaque, dbg: HANDLE, info: *CloneInfo) callconv(win.WINAPI) NTSTATUS;
@@ -380,7 +381,17 @@ fn threadExit(code: u64) noreturn {
     ch.args[0] = code;
     sig.restoreWinStack();
     stub.postReq(ch);
-    RtlExitUserThread(@intCast(code & 0xff));
+    endOsThread(@intCast(code & 0xff));
+}
+
+// endOsThread ends the calling OS thread without ntdll's thread shutdown. That
+// shutdown trims the thread pool the parent's ntdll set up at its start, whose
+// worker factory handle a fork child does not have: under strict handle checks
+// the trim's call on it ends the process. The stub loads nothing, so there is
+// nothing for the loader to run at a thread's end.
+fn endOsThread(code: NTSTATUS) noreturn {
+    _ = NtTerminateThread(CURRENT_THREAD, code);
+    unreachable;
 }
 
 // The service thread serves the shared-code registry's requests
@@ -436,5 +447,5 @@ fn lc_service_start(arg: ?*anyopaque) callconv(win.WINAPI) void {
     ch.kind = 2; // MSG_SYSCALL
     ch.nr = LC_SERVICE;
     stub.exchangePub(ch);
-    RtlExitUserThread(0);
+    endOsThread(0);
 }
