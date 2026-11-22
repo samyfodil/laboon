@@ -20,3 +20,7 @@ func (g *dguest) codeFile(fi os.FileInfo) {}
 func (g *dguest) modified(d *dfile) { g.notifyFd(d, inModify) }
 
 func (g *dguest) fileModified(core.File) {}
+
+func (g *dguest) truncated(host func() (int, bool), truncate func() error) error {
+	return truncate()
+}

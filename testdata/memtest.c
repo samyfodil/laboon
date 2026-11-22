@@ -139,10 +139,23 @@ int main(int argc, char **argv) {
 	// under the mapping, its pages past the new end raise SIGBUS
 	CHECK(ftruncate(fd, 2 * pg + 10) == 0 && peek(sm + 2 * pg + 8) == 0 && sm[2 * pg + 20] == 0);
 	CHECK(ftruncate(fd, pg) == 0 && peek(sm + pg + 50) == SIGBUS && touch(sm + pg + 50) == SIGBUS);
+	CHECK(truncate(p, 2 * pg) == 0 && peek(sm + pg + 50) == 0 && truncate(p, pg) == 0 && peek(sm + pg + 50) == SIGBUS);
 	CHECK(munmap(sm + pg, 2 * pg) == 0);
 	int ef = open(q, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	CHECK(ef >= 0);
 	char *em = mmap(0, pg, PROT_READ | PROT_WRITE, MAP_SHARED, ef, 0);
-	CHECK(ef >= 0 && em != MAP_FAILED && touch(em) == SIGBUS);
+	CHECK(em != MAP_FAILED);
+	int es = em == MAP_FAILED ? -1 : touch(em);
+	if (es != SIGBUS) {
+		printf("empty file: touch %d at %p\n", es, (void *)em);
+		FILE *mf = fopen("/proc/self/maps", "r");
+		char ln[256];
+		while (mf && fgets(ln, sizeof ln, mf))
+			printf("  %s", ln);
+		if (mf)
+			fclose(mf);
+	}
+	CHECK(es == SIGBUS);
 	CHECK(munmap(em, pg) == 0 && close(ef) == 0 && unlink(q) == 0);
 	signal(SIGBUS, SIG_DFL);
 	signal(SIGSEGV, SIG_DFL);

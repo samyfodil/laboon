@@ -28,8 +28,10 @@
 //   so a partial munmap unmaps it whole and maps the surviving pieces again.
 // - A shared file mapping may run past the end of the file, as on Linux: the
 //   view holds the pages the file reaches into, and the rest is an eof region,
-//   reserved, where an access raises SIGBUS. Unlike Linux, a file that grows
-//   afterwards does not bring its new pages into the mappings already made.
+//   reserved, where an access raises SIGBUS until the file grows to reach it
+//   (eofGrow). Windows refuses to cut a file a view maps: the supervisor has
+//   every process let its views of the file go first (detachFile), to map
+//   them again as far as the file then reaches when they are touched.
 // - An executable private file mapping is the same, except that the
 //   supervisor rewrites the code it copies in and writes its trampolines and
 //   %fs islands to a second region in branch range, which lives as long as
@@ -67,6 +69,7 @@ extern "ntdll" fn NtQueryVirtualMemory(proc: HANDLE, base: usize, class: u32, in
 extern "ntdll" fn NtFlushVirtualMemory(proc: HANDLE, base: *usize, size: *usize, iosb: *[2]usize) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtFlushInstructionCache(proc: HANDLE, base: usize, size: usize) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtCreateSection(sec: *HANDLE, access: u32, attrs: ?*anyopaque, size: ?*i64, prot: u32, attr: u32, file: HANDLE) callconv(win.WINAPI) NTSTATUS;
+extern "ntdll" fn NtQueryInformationFile(file: HANDLE, iosb: *[2]usize, info: *anyopaque, len: u32, class: u32) callconv(win.WINAPI) NTSTATUS;
 
 const MEM_COMMIT: u32 = 0x1000;
 const MEM_RESERVE: u32 = 0x2000;
@@ -156,6 +159,7 @@ const Region = struct {
     shm: u64 = 0, // a SysV attachment cookie, for shmdt and exit accounting
     hot: bool = false, // a shadow of a view's page (anon, its view's fields kept): see "code in shared memory"
     vdso: bool = false, // the guest's vDSO (mapVdso)
+    fh: HANDLE = 0, // a shared file mapping's (view or eof) file, for what past its end it grows to reach, and its views to map again (detachFile)
 };
 
 var regs: [MAXREG]Region = undefined;
@@ -414,7 +418,7 @@ fn allocAnon(i: usize, prot: u64) bool {
     const typ: u32 = if (prot == 0) MEM_RESERVE | MEM_REPLACE_PLACEHOLDER else MEM_RESERVE | MEM_COMMIT | MEM_REPLACE_PLACEHOLDER;
     regs[i].kind = .anon;
     if (NtAllocateVirtualMemoryEx(SELF, &b, &s, typ, hostProt(i, prot), null, 0) < 0) {
-        regs[i].kind = .free;
+        regs[i] = .{ .lo = regs[i].lo, .hi = regs[i].hi, .kind = .free, .prot = 0, .sec = 0, .off = 0 };
         return false;
     }
     regs[i].prot = prot;
@@ -457,13 +461,14 @@ fn release(i: usize, lo: u64, hi: u64) bool {
         },
         .view => {
             if (NtUnmapViewOfSectionEx(SELF, r.lo, MEM_PRESERVE_PLACEHOLDER) < 0) return false;
-            regs[i].kind = .free;
+            regs[i] = .{ .lo = r.lo, .hi = r.hi, .kind = .free, .prot = 0, .sec = 0, .off = 0 };
             var ok = true;
             if (r.lo < lo) {
                 if (carve(r.lo, lo)) |k| {
                     ok = mapView(k, r.sec, r.off, r.prot, r.key, r.size) and ok;
                     regs[k].file = r.file;
                     regs[k].shm = r.shm;
+                    regs[k].fh = r.fh;
                 } else ok = false;
             }
             if (hi < r.hi) {
@@ -471,11 +476,104 @@ fn release(i: usize, lo: u64, hi: u64) bool {
                     ok = mapView(k, r.sec, r.off + (hi - r.lo), r.prot, r.key, r.size) and ok;
                     regs[k].file = r.file;
                     regs[k].shm = r.shm;
+                    regs[k].fh = r.fh;
                 } else ok = false;
             }
             closeIfUnused(r.sec);
             return ok;
         },
+    }
+}
+
+// adoptFile keeps fh, the file of a shared mapping with key, unless a region
+// holds that file already: the one handle serves them all.
+fn adoptFile(key: u64, fh: HANDLE) HANDLE {
+    if (fh == 0) return 0;
+    for (regs[0..nreg]) |r| {
+        if (r.fh != 0 and r.key == key) {
+            _ = NtClose(fh);
+            return r.fh;
+        }
+    }
+    return fh;
+}
+
+fn closeFileIfUnused(fh: HANDLE) void {
+    for (regs[0..nreg]) |r| {
+        if (r.fh == fh) return;
+    }
+    _ = NtClose(fh);
+}
+
+// fileEnd is the size of file fh.
+fn fileEnd(fh: HANDLE) ?u64 {
+    var iosb: [2]usize = .{ 0, 0 };
+    var info: [24]u8 align(8) = undefined; // FILE_STANDARD_INFORMATION
+    if (NtQueryInformationFile(fh, &iosb, &info, info.len, 5) < 0) return null;
+    return std.mem.readInt(u64, info[8..16], .little); // EndOfFile
+}
+
+// toEof makes free region k the part of shared file mapping r past the end of
+// its file, as r's offset at k's lo, where an access raises SIGBUS until the
+// file reaches it (eofGrow).
+fn toEof(k: usize, r: Region, off: u64) bool {
+    if (!allocAnon(k, 0)) return false;
+    regs[k].kind = .eof;
+    regs[k].prot = r.prot;
+    regs[k].file = true;
+    regs[k].off = off;
+    regs[k].key = r.key;
+    regs[k].fh = r.fh;
+    return true;
+}
+
+// eofGrow maps the part of eof region i the file now reaches, page in it, as
+// a view of a section of the file made afresh; false if the file does not
+// reach page.
+fn eofGrow(i: usize, page: u64) bool {
+    const r = regs[i];
+    const end = fileEnd(r.fh) orelse return false;
+    if (r.off + (page - r.lo) >= end) return false;
+    const hi = @min(r.hi, r.lo + up(end - r.off));
+    const size = @min(end, r.off + (hi - r.lo));
+    var sec: HANDLE = 0;
+    var sz: i64 = @intCast(size);
+    if (NtCreateSection(&sec, 0x7, null, &sz, PAGE_READWRITE, 0x8000000, r.fh) < 0) { // SECTION_QUERY|MAP_WRITE|MAP_READ, SEC_COMMIT
+        sz = @intCast(size);
+        if (NtCreateSection(&sec, 0x5, null, &sz, PAGE_READONLY, 0x8000000, r.fh) < 0) return false;
+    }
+    if (!release(i, r.lo, hi)) {
+        _ = NtClose(sec);
+        return false;
+    }
+    const k = carve(r.lo, hi) orelse {
+        _ = NtClose(sec);
+        return false;
+    };
+    if (!mapView(k, sec, r.off, r.prot, r.key, size)) {
+        _ = NtClose(sec);
+        _ = toEof(k, r, r.off);
+        return false;
+    }
+    regs[k].file = true;
+    regs[k].fh = r.fh;
+    bornFrozen(k);
+    return true;
+}
+
+// detachFile lets the views of the file with key go, for the supervisor to
+// cut it (Windows refuses to while a view maps it): each becomes the part
+// past the file's end, to map again as far as the file then reaches when it
+// is touched (eofGrow).
+fn detachFile(key: u64) void {
+    var i: usize = 0;
+    while (i < nreg) : (i += 1) {
+        if (regs[i].key != key or regs[i].fh == 0) continue;
+        if (regs[i].hot and !cool(i)) continue;
+        if (regs[i].kind != .view) continue;
+        const r = regs[i];
+        if (!release(i, r.lo, r.hi)) continue;
+        if (carve(r.lo, r.hi)) |k| _ = toEof(k, r, r.off);
     }
 }
 
@@ -508,11 +606,13 @@ fn unmapRange(lo: u64, hi: u64) bool {
         // backing this mapping held (a non-backing key is ignored there).
         const drop = regs[i].kind == .view and regs[i].file;
         const key = regs[i].key;
+        const fh = regs[i].fh;
         if (!release(i, s, end)) {
             ok = false;
             break;
         }
         if (drop) _ = root.request(LC_DROPBACKING, .{ key, 0, 0, 0, 0, 0 });
+        if (fh != 0) closeFileIfUnused(fh);
         a = end;
     }
     if (code_freed) sweepTramps();
@@ -807,11 +907,13 @@ fn mmap(hint: u64, len0: u64, prot: u64, flags: u64, fd: u64, off: u64) u64 {
     }
     const r = root.request(LC_MAP_SECTION, .{ if (anon) ~@as(u64, 0) else fd, if (anon) 0 else off, len, prot, 0, 0 });
     if (@as(i64, @bitCast(r)) < 0) {
+        if (root.slot().args[2] != 0) _ = NtClose(root.slot().args[2]);
         _ = release(i, lo, lo + len);
         return r;
     }
     const key = root.slot().args[0];
     const size = root.slot().args[1];
+    const fh = adoptFile(key, root.slot().args[2]);
     const voff = if (anon) 0 else off;
     const vlen = @min(len, up(size -| voff));
     if (vlen < len) {
@@ -828,6 +930,8 @@ fn mmap(hint: u64, len0: u64, prot: u64, flags: u64, fd: u64, off: u64) u64 {
         regs[t].prot = prot;
         regs[t].file = true;
         regs[t].off = voff + vlen;
+        regs[t].key = key;
+        regs[t].fh = fh;
     }
     if (r == 0) return lo; // none of the file is in range
     if (!mapView(i, r, voff, prot, key, size)) {
@@ -836,6 +940,7 @@ fn mmap(hint: u64, len0: u64, prot: u64, flags: u64, fd: u64, off: u64) u64 {
         return neg(EACCES);
     }
     regs[i].file = !anon;
+    regs[i].fh = fh;
     bornFrozen(i);
     root.ensureService(); // a shared view: the registry may owe this process a freeze
     return lo;
@@ -1133,12 +1238,17 @@ pub fn pastEof(addr: u64, access: u64) bool {
     defer releaseLock();
     const i = find(addr);
     if (i == nreg or regs[i].kind != .eof) return false;
-    const need: u64 = switch (access) {
+    return regs[i].prot & accessProt(access) != 0;
+}
+
+// accessProt is the protection an access of Windows' kind (0 read, 1 write,
+// 8 execute) needs.
+fn accessProt(access: u64) u64 {
+    return switch (access) {
         1 => PROT_WRITE,
         8 => PROT_EXEC,
         else => PROT_READ,
     };
-    return regs[i].prot & need != 0;
 }
 
 // sharedKey names the futex word at addr for the supervisor when it lies in a
@@ -1268,6 +1378,9 @@ pub fn wxFault(addr: u64, kind: u64, pc: u64, st: *Step) Verdict {
     acquire();
     defer releaseLock();
     const page = addr & ~(PAGE - 1);
+    // Past the end of a shared mapping's file, which may have grown since.
+    const e = find(addr);
+    if (e != nreg and regs[e].kind == .eof and regs[e].fh != 0 and regs[e].prot & accessProt(kind) != 0 and eofGrow(e, page)) return .handled;
     if (kind == 1) {
         if (frozenAt(page)) |f| {
             if (remote(frozen[f].key, frozen[f].soff)) return ask(.cool, frozen[f].key, frozen[f].soff, st);
@@ -1356,6 +1469,7 @@ fn mapPiece(k: usize, r: Region, off: u64) bool {
     if (!mapView(k, r.sec, off, r.prot, r.key, r.size)) return false;
     regs[k].file = r.file;
     regs[k].shm = r.shm;
+    regs[k].fh = r.fh;
     bornFrozen(k);
     return true;
 }
@@ -2064,6 +2178,7 @@ pub fn serveCode(ch: *root.Chan) u64 {
             stopped = false;
             wake();
         },
+        5 => detachFile(a[1]), // codeDetachFile
         else => {},
     }
     return 0;

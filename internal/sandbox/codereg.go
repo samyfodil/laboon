@@ -36,6 +36,7 @@ const (
 	codeCoolFile               // file: cool the hot pages of it
 	codeStop                   // cool every hot page, heat none until codeGo
 	codeGo
+	codeDetachFile // file: let the views of it go, to map again when touched (Windows)
 )
 
 // codeLink reaches a stub's service: tell has it serve op with body and
@@ -245,6 +246,20 @@ func (r *codeReg) fileWritten(k [2]uint64, body []byte) {
 	}
 	r.mu.Unlock()
 	r.tellAll(to, codeCoolFile, body)
+}
+
+// fileTruncating has every stub that maps file k, named to it by body, and
+// answers, serve op first.
+func (r *codeReg) fileTruncating(k [2]uint64, body []byte) {
+	r.mu.Lock()
+	var to []int
+	for pid := range r.marks[k] {
+		if _, stopped := r.stopped[pid]; !stopped {
+			to = append(to, pid)
+		}
+	}
+	r.mu.Unlock()
+	r.tellAll(to, codeDetachFile, body)
 }
 
 // fork gives stub child the files its parent maps shared and executable,

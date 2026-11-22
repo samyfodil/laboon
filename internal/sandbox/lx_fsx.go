@@ -1074,7 +1074,7 @@ func (g *dguest) truncate(pathAddr uint64, length int64) int64 {
 	if err != nil {
 		return sErr(osErrno(err))
 	}
-	err = f.Truncate(length)
+	err = g.truncated(func() (int, bool) { return hostFdOf(f) }, func() error { return f.Truncate(length) })
 	if err == nil {
 		g.fileModified(f) // cool any shared, executable mappings of this file
 	}
@@ -1105,7 +1105,7 @@ func (g *dguest) ftruncate(fd int64, length int64) int64 {
 		if e := d.checkSeals(st.size, length, false); e != 0 {
 			return sErr(e)
 		}
-		if err := d.vfTruncate(length); err != nil {
+		if err := g.truncated(d.hostFd, func() error { return d.vfTruncate(length) }); err != nil {
 			return sErr(osErrno(err))
 		}
 		g.modified(d)
@@ -1127,11 +1127,11 @@ func (g *dguest) ftruncate(fd int64, length int64) int64 {
 	// A backend file is truncated through its vfs handle (ftruncate needs a
 	// writable fd, so the overlay has already copied it up); a supervisor-owned
 	// anonymous file (O_TMPFILE, memfd) has no handle, so its host temp directly.
+	truncate := d.f.Truncate
 	if d.hf != nil {
-		if err := d.hf.Truncate(length); err != nil {
-			return sErr(osErrno(err))
-		}
-	} else if err := d.f.Truncate(length); err != nil {
+		truncate = d.hf.Truncate
+	}
+	if err := g.truncated(d.hostFd, func() error { return truncate(length) }); err != nil {
 		return sErr(osErrno(err))
 	}
 	g.modified(d)

@@ -29,7 +29,7 @@ func vdsoImage() []byte {
 // branch range, and lcMapCode writes both.
 const (
 	lcMapFill     = 0x4c430020 // (fd, off, len, addr) -> 0
-	lcMapSection  = 0x4c430021 // (fd or -1, off, len, prot) -> section handle in the stub (0 when no byte of the file is past off), key in args[0], section size in args[1]
+	lcMapSection  = 0x4c430021 // (fd or -1, off, len, prot) -> section handle in the stub (0 when no byte of the file is past off), key in args[0], section size in args[1], a handle of a host file in the stub in args[2] (else 0)
 	lcSyncBacking = 0x4c430036 // (key): msync of a non-host file's MAP_SHARED mapping; write its backing back to the file
 	lcDropBacking = 0x4c430037 // (key): a MAP_SHARED mapping of a non-host file is unmapped; release its backing
 	lcCodeSize    = 0x4c430023 // (fd, off, len, addr) -> trampoline bytes
@@ -101,6 +101,7 @@ func (g *wguest) mapSection(dg *dguest, fd, off, n, prot uint64) int64 {
 	var sec windows.Handle
 	var key, size uint64
 	var err error
+	dg.ch.page.args[2] = 0
 	if fd == ^uint64(0) {
 		sec, err = windows.CreateFileMapping(windows.InvalidHandle, nil, windows.PAGE_READWRITE, uint32(n>>32), uint32(n), nil)
 		key, size = sectionKeys.Add(1), n
@@ -162,15 +163,21 @@ func (g *wguest) mapSection(dg *dguest, fd, off, n, prot uint64) int64 {
 				return sErr(osErrno(err))
 			}
 			end := min(off+n, uint64(fi.FileSizeHigh)<<32|uint64(fi.FileSizeLow))
+			// The stub holds the file too: the part of the mapping past the
+			// file's end maps once the file reaches it, and the views go
+			// for a truncate (detachFile).
+			if e := g.fileToStub(dg, h); e != 0 {
+				return sErr(e)
+			}
 			sec, err = windows.CreateFileMapping(h, nil, page, uint32(end>>32), uint32(end), nil)
 			if err == windows.ERROR_FILE_INVALID { // an empty file
-				dg.ch.page.args[0], dg.ch.page.args[1] = 0, 0
+				dg.ch.page.args[0], dg.ch.page.args[1] = futexFileKey(h), 0
 				return 0
 			}
 			if err == nil {
 				if size, err = sectionSize(sec); err == nil && size <= off {
 					windows.CloseHandle(sec)
-					dg.ch.page.args[0], dg.ch.page.args[1] = 0, size
+					dg.ch.page.args[0], dg.ch.page.args[1] = futexFileKey(h), size
 					return 0
 				}
 				if err != nil {
@@ -497,6 +504,21 @@ func (g *wguest) mapCode(dg *dguest, fd, off, n, addr, count uint64) int64 {
 	for _, a := range areas {
 		g.sp.flushCode(a.base, a.size)
 		g.st.addCode(a.base, a.base+a.size)
+	}
+	return 0
+}
+
+// fileToStub duplicates host file h into g's stub as args[2] of the reply,
+// inheritable so a fork child keeps it, and marks the file as one the stub
+// maps shared.
+func (g *wguest) fileToStub(dg *dguest, h windows.Handle) lxErrno {
+	var sh windows.Handle
+	if err := windows.DuplicateHandle(windows.CurrentProcess(), h, g.sp.proc, &sh, 0, true, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		return osErrno(err)
+	}
+	dg.ch.page.args[2] = uint64(sh)
+	if w := dg.mp.w; w != nil && dg.ps.ospid > 0 {
+		w.run.code.mark(dg.ps.ospid, [2]uint64{futexFileKey(h), mappedShared})
 	}
 	return 0
 }

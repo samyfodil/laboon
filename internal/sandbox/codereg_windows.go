@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"encoding/binary"
+	"errors"
 	"os"
 
 	"github.com/samyfodil/laboon/core"
@@ -221,4 +222,26 @@ func (g *dguest) handleModified(fd int) {
 	var body [8]byte
 	binary.LittleEndian.PutUint64(body[:], key)
 	w.run.code.fileWritten([2]uint64{key, 0}, body[:])
+}
+
+// mappedShared marks a file a stub maps shared (codeReg.mark), as the second
+// word of its name.
+const mappedShared = 1
+
+// truncated runs truncate, which cuts or grows the file host names. Windows
+// refuses to cut a file a view of it maps: then every stub that maps it shared
+// lets its views of it go, to map them again, as far as the file then
+// reaches, when they are touched, and truncate runs again.
+func (g *dguest) truncated(host func() (int, bool), truncate func() error) error {
+	err := truncate()
+	w := g.mp.w
+	fd, ok := host()
+	if !errors.Is(err, windows.ERROR_USER_MAPPED_FILE) || w == nil || !ok {
+		return err
+	}
+	key := futexFileKey(windows.Handle(fd))
+	var body [8]byte
+	binary.LittleEndian.PutUint64(body[:], key)
+	w.run.code.fileTruncating([2]uint64{key, mappedShared}, body[:])
+	return truncate()
 }

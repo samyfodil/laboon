@@ -213,3 +213,7 @@ func (fs *dfs) forkCode(parent, child int) {
 		fs.run.broker.code.fork(parent, child)
 	}
 }
+
+func (g *dguest) truncated(host func() (int, bool), truncate func() error) error {
+	return truncate()
+}
