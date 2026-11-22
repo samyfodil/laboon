@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"github.com/samyfodil/laboon/core"
@@ -29,6 +30,18 @@ type HostDirFS struct {
 	// carry, for a standalone mount (a guest tmpfs); nil when this backend is an
 	// overlay layer, whose own MetaStore records it instead.
 	meta *core.MetaStore
+	// making holds a lookup of a name back while a create of it runs: the host
+	// object exists before its guest metadata is recorded, and until then it
+	// would read as root's. One lock per path hash.
+	making [64]sync.RWMutex
+}
+
+func (f *HostDirFS) makingLock(p string) *sync.RWMutex {
+	h := uint32(2166136261)
+	for i := 0; i < len(p); i++ {
+		h = (h ^ uint32(p[i])) * 16777619
+	}
+	return &f.making[h%uint32(len(f.making))]
 }
 
 func NewHostDirFS(root string, h HostFS) *HostDirFS {
@@ -112,7 +125,11 @@ func (f *HostDirFS) StatFS(n core.Node) (core.StatFS, error) {
 }
 
 func (f *HostDirFS) Lookup(dir core.Node, name string) (core.Node, error) {
-	return f.node(path.Join(dir.(*HostNode).p, name))
+	p := path.Join(dir.(*HostNode).p, name)
+	l := f.makingLock(p)
+	l.RLock()
+	defer l.RUnlock()
+	return f.node(p)
 }
 
 func (f *HostDirFS) ReadDir(dir core.Node) ([]core.Dirent, error) {
@@ -130,6 +147,9 @@ func (f *HostDirFS) ReadDir(dir core.Node) ([]core.Dirent, error) {
 
 func (f *HostDirFS) Create(dir core.Node, name string, spec core.CreateSpec) (core.Node, error) {
 	p := path.Join(dir.(*HostNode).p, name)
+	l := f.makingLock(p)
+	l.Lock()
+	defer l.Unlock()
 	hp := f.hp(p)
 	hm := uint32(core.HostMode(spec.Mode, spec.Kind == core.Dir)) // keep the host file owner-writable
 	var err error
