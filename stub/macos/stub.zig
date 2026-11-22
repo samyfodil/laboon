@@ -603,13 +603,21 @@ fn cutsFile(frame: [*]const u64) bool {
 pub threadlocal var g_guest_fsbase: u64 = 0;
 threadlocal var g_guest_gsbase: u64 = 0;
 
+// setGuestTp makes tp this thread's guest thread pointer: in its TSD slot,
+// where arm64's rewritten mrs and x86-64's %fs islands read it, and on x86-64
+// as the %fs base fsmem.zig emulates against.
+fn setGuestTp(tp: u64) void {
+    _ = pthread_setspecific(g_tp_key, @ptrFromInt(tp));
+    if (!tstate.arm64) g_guest_fsbase = tp;
+}
+
 // archPrctl serves an x86-64 arch_prctl(code, addr): it stores or returns the
 // guest's virtual %fs/%gs base. frame[0] is the code, frame[1] the address.
 fn archPrctl(frame: [*]u64) u64 {
     const addr = frame[1];
     switch (frame[0]) {
         ARCH_SET_FS => {
-            g_guest_fsbase = addr;
+            setGuestTp(addr);
             return 0;
         },
         ARCH_SET_GS => {
@@ -840,11 +848,7 @@ fn forkChild(base: [*]u8, child_off: u64, parent_pid: u64, gpid: u64) noreturn {
     // Restore the guest thread pointer where this arch keeps it: the host TSD
     // on arm64, the virtualized %fs base on x86-64 (as cloneBootstrap does).
     const gtls = if (t.flags & CLONE_SETTLS != 0) t.tls else t.tp;
-    if (tstate.arm64) {
-        _ = pthread_setspecific(g_tp_key, @ptrFromInt(gtls));
-    } else {
-        g_guest_fsbase = gtls;
-    }
+    setGuestTp(gtls);
     cc.kind = chan.MSG_FORKED;
     cc.args[0] = rawGetpid();
     chan.exchange(cc); // supervisor records the pid and replies
@@ -1052,11 +1056,12 @@ fn rewriteSite(isl: *Islands, pc: u64) void {
     if (!tstate.arm64) {
         // x86-64: the supervisor sends the guest's syscall (0f 05) site
         // addresses; overwrite each 2-byte syscall in place with ud2 (0f 0b),
-        // which onFault traps and serves (serveTrap). No islands, no sysreg
-        // rewrites (x86-64 TLS is arch_prctl, a serviced syscall). The rewrite
-        // precedes guest execution, so no icache flush is needed.
+        // which onFault traps and serves (serveTrap), and only a ud2 placed so:
+        // the program's own raises SIGILL. No islands, no sysreg rewrites
+        // (x86-64 TLS is arch_prctl, a serviced syscall). The rewrite precedes
+        // guest execution, so no icache flush is needed.
         const u: *align(1) u16 = @ptrFromInt(pc);
-        if (u.* == 0x050f) u.* = 0x0b0f;
+        if (u.* == 0x050f and @import("wx.zig").trapFile(pc)) u.* = 0x0b0f;
         return;
     }
     const w: *u32 = @ptrFromInt(pc);
@@ -1270,11 +1275,7 @@ fn cloneBootstrap(arg: ?*anyopaque) callconv(.C) ?*anyopaque {
     // reschedule); the rewritten mrs tpidr_el0 reads it back. On x86-64 it is
     // the %fs base this thread's %fs accesses resolve against (clone's
     // CLONE_SETTLS arg carried it). On Linux the kernel does this from clone.
-    if (tstate.arm64) {
-        _ = pthread_setspecific(g_tp_key, @ptrFromInt(h.tls));
-    } else {
-        g_guest_fsbase = h.tls;
-    }
+    setGuestTp(h.tls);
     // Save this pthread's own stack pointer before switching to the guest's, so
     // thread exit can return to it (see lcThreadExit). The libc stack is left
     // untouched for the thread's whole life and stays valid for pthread_exit.

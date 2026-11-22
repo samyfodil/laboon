@@ -55,7 +55,7 @@ const LAYOUT_RLIM_INF: u32 = 0xffffff;
 // guest_top is where the guest's address space ends: HOST_TOP, but under Rosetta
 // the host keeps the window's highest gigabytes (the x86-64 shared region,
 // Rosetta's runtime and dyld's stack below it), so an x86-64 guest ends under
-// them, as on a kernel with a smaller task size (noteHost).
+// them (HOST_BLOCK), as on a kernel with a smaller task size (noteHost).
 pub var guest_top: u64 = HOST_TOP;
 pub var hint_exe: u64 = ET_DYN_BASE;
 pub var stack_top: u64 = HOST_TOP;
@@ -961,6 +961,7 @@ pub fn noteVdso(lo: u64, hi: u64) void {
 // detached (the supervisor drops its side at the same point).
 pub fn reset() void {
     wx.clear();
+    @import("fsisl.zig").reset();
     lock.lock();
     defer lock.unlock();
     for (vmas.items) |e| {
@@ -1403,6 +1404,7 @@ fn rewrite(r: u64, n: u64, off: u64, gfd: u64) void {
     lock.unlock();
     const from: [2]u64 = if (room) |rm| rm.used else .{ 0, 0 };
     cur_room = room;
+    wx.unmapped(r, r + n); // what wx knew of the mapping replaced, before the traps placed now
     _ = root.hostCall(LC_REWRITE, .{ r, n, off, gfd, 0, 0 });
     cur_room = null;
     const rm = room orelse return;
@@ -1767,8 +1769,8 @@ fn moveVdso(old: u64, n: u64, nn: u64, flags: u64, dst: u64) u64 {
     if (dst < old + n and old < dst + n) return neg(EINVAL);
     wx.hold();
     defer wx.release();
-    if (!root.remapVdso(dst, n)) return neg(ENOMEM);
     dropped(dst, dst + n);
+    if (!root.remapVdso(dst, n)) return neg(ENOMEM);
     _ = sys(SYS_munmap, old, n, 0, 0, 0, 0);
     dropped(old, old + n);
     noteVdso(dst, dst + n);
@@ -2043,16 +2045,12 @@ pub fn noteHost() void {
         nhost += 1;
         a = ra + size;
     }
-    if (X86) {
-        var floor: u64 = HOST_TOP;
-        for (host_at_start[0..nhost]) |r| {
-            if (r.lo >= HOST_BLOCK) floor = @min(floor, r.lo);
-        }
-        guest_top = floor & ~@as(u64, (1 << 30) - 1);
-    }
+    if (X86) guest_top = HOST_BLOCK;
 }
 
-// HOST_BLOCK bounds from below where the host's own high block starts.
+// HOST_BLOCK bounds from below where the host's own high block starts, which
+// the host's ASLR moves by gigabytes: an x86-64 guest ends there, so a layout
+// drawn unrandomized is the same at every exec.
 const HOST_BLOCK: u64 = 0x7ff0_0000_0000;
 
 // takeHost marks the host's memory in the guest's upper window taken, so no

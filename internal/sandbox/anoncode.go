@@ -8,6 +8,8 @@ import (
 	"hash/maphash"
 	"slices"
 	"sync"
+
+	"github.com/samyfodil/laboon/internal/rewrite"
 )
 
 // Code made executable at run time (stub/windows/mem.zig, stub/macos/wx.zig):
@@ -290,4 +292,30 @@ func (a *anonCode) stole(page uint64, s []anonStolen) {
 	if p := a.pages[page]; p != nil {
 		p.stolen = s
 	}
+}
+
+func insnEnd(read func(addr uint64, b []byte) error, pc uint64) uint64 {
+	b := make([]byte, 16)
+	if read(pc, b) != nil {
+		return 0
+	}
+	if n := rewrite.InsnLen(b); n > 0 {
+		return pc + uint64(n)
+	}
+	return 0
+}
+
+// lcInsn: (pc) -> the length of the x86-64 instruction there | where its
+// RIP-relative displacement starts << 8 (0 when it has none); 0 when it
+// decodes as none. The stub runs a store out of line with it
+// (stub/windows/ool.zig, stub/macos/ool.zig).
+const lcInsn = 0x4c43002c
+
+func insnAt(read func(addr uint64, b []byte) error, pc uint64) int64 {
+	b := make([]byte, 16)
+	for len(b) > 0 && read(pc, b) != nil {
+		b = b[:len(b)-1] // the instruction ends before an unreadable page
+	}
+	n, at := rewrite.RipDisp(b)
+	return int64(n | at<<8)
 }

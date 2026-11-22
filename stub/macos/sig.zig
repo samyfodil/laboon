@@ -31,6 +31,7 @@ const service = @import("service.zig");
 const tstate = @import("tstate.zig");
 const proc = @import("proc.zig");
 const fsmem = @import("fsmem.zig");
+const fsisl = @import("fsisl.zig");
 
 pub const AREA_OFF: usize = chan.SLOT_SIZE * chan.MAX_SLOTS;
 pub const STRIDE: usize = 0x4000;
@@ -110,6 +111,7 @@ const LC_SIGSTOP: u64 = 0x4c430011;
 const LC_SIGTAKE: u64 = 0x4c430012;
 const LC_SIGSETTLE: u64 = 0x4c430013;
 const LC_SIGFAULT: u64 = 0x4c430014;
+const LC_INSN: u64 = 0x4c43002c;
 const LC_SIGRAISE: u64 = 0x4c430015;
 
 // Linux signals.
@@ -891,10 +893,8 @@ fn fromMc(c: *Ctx, mc: *const std.c.mcontext_t) void {
         c.r13 = mc.ss.r13;
         c.r14 = mc.ss.r14;
         c.r15 = mc.ss.r15;
-        // The guest's own rip: the x86-64 out-of-line layer (phase 3) must map a
-        // relocated copy's rip back here, as arm64's ool.guestPc does above;
-        // until it exists the Darwin rip is the guest rip.
-        c.rip = mc.ss.rip;
+        c.rip = ool.guestPc(tl.slot, mc.ss.rip);
+        for (ool.release(tl.slot, mc.ss.rip)) |h| wx.letGo(h);
         c.rflags = mc.ss.rflags;
         // Darwin's float_state is the FXSAVE image behind an 8-byte reserved
         // prefix (fcw onward is 512 bytes); Linux's _fpstate is FXSAVE-shaped
@@ -1789,19 +1789,19 @@ fn idReg(mc: *std.c.mcontext_t) bool {
 fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) void {
     const uc: *std.c.ucontext_t = @ptrCast(@alignCast(ctx.?));
     const mc = uc.mcontext;
-    // The arm64 trampoline-return and OOL-exit traps (brk/svc-return landmarks
-    // and the out-of-line window exits) have no x86-64 analogue: x86-64 serves
-    // syscalls from the SIGILL/mcontext path below and has no in-guest JIT
-    // windows, so a SIGTRAP falls through to the generic delivery.
     if (tstate.arm64) {
         if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_sig_switch)) return doSwitch(mc);
         if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_trap_ret) + 4) return trapReturn(mc);
-        if (dsig_in == DW_SIGTRAP and tl.ready) {
-            if (ool.exit(tl.slot, mc)) |e| {
-                if (e.jit) jit.initThread(); // back to execute mode
-                for (e.holds) |h| wx.letGo(h);
-                return;
-            }
+    }
+    if (dsig_in == DW_SIGTRAP and tl.ready) {
+        if (!tstate.arm64 and fsisl.retry(tstate.pc(mc))) {
+            tstate.setPc(mc, tstate.pc(mc) - 1);
+            return;
+        }
+        if (ool.exit(tl.slot, mc)) |e| {
+            if (e.jit) jit.initThread(); // back to execute mode
+            for (e.holds) |h| wx.letGo(h);
+            return;
         }
     }
     if (dsig_in == DW_SIGILL and tl.ready and !tl.busy) {
@@ -1823,33 +1823,42 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
         } else {
             // A rewritten guest syscall site is a 2-byte ud2 (0f 0b). Service it
             // straight from the mcontext and resume past it (AMD64.md 1e/1f).
-            if (@as(*align(1) const u16, @ptrFromInt(tstate.pc(mc))).* == 0x0b0f) {
-                // Darwin hands an AVX context (es, ss, then the AVX float
-                // state: 1028 bytes) to a thread that uses AVX.
-                @import("root").serveTrap(mc, uc.mcsize >= MCONTEXT_AVX64);
-                return;
+            // Only the traps the stub placed (wx.zig) are.
+            switch (wx.isTrap(tstate.pc(mc))) {
+                .again => return,
+                .trap => {
+                    // Darwin hands an AVX context (es, ss, then the AVX float
+                    // state: 1028 bytes) to a thread that uses AVX.
+                    @import("root").serveTrap(mc, uc.mcsize >= MCONTEXT_AVX64);
+                    return;
+                },
+                else => {},
             }
         }
     }
     // x86-64 %fs is virtualized: glibc's %fs:disp TLS reads/writes fault (the
     // physical %fs base is 0) and are emulated against the stored guest base.
     if (!tstate.arm64 and dsig_in == DW_SIGSEGV and tl.ready and !tl.busy) {
-        if (fsmem.emulate(mc)) return;
+        const pc = tstate.pc(mc);
+        if (fsmem.emulate(mc)) {
+            _ = fsisl.patch(pc, @import("root").g_tp_key, false);
+            return;
+        }
     }
     if (!tstate.arm64 and (dsig_in == DW_SIGSEGV or dsig_in == DW_SIGBUS) and mc.es.trapno == 14) {
         if (mem.unfence(mc.es.faultvaddr)) return;
     }
     var dsig = dsig_in;
-    // The W^X/OOL fault handling is arm64-only (x86-64 has no in-guest JIT
-    // window machinery on the syscall path).
-    if (tstate.arm64) {
-    if (dsig == DW_SIGSEGV or dsig == DW_SIGBUS) {
-        const page = mc.es.far & ~@as(u64, 0x3fff);
-        var st: wx.Step = .{ .from_slot = ool.inSlot(tl.slot, mc.ss.pc), .own = !tl.ready or tl.busy, .lost = ool.lost(tl.slot, mc.ss.pc, page) };
-        const v = wx.fault(mc.es.esr, mc.es.far, mc.ss.pc, &st);
+    if ((dsig == DW_SIGSEGV or dsig == DW_SIGBUS) and (tstate.arm64 or mc.es.trapno == 14)) {
+        const pc = tstate.pc(mc);
+        const far = if (tstate.arm64) mc.es.far else mc.es.faultvaddr;
+        const esr = if (tstate.arm64) mc.es.esr else x86Esr(mc.es.err, far);
+        const page = far & ~@as(u64, tstate.page - 1);
+        var st: wx.Step = .{ .from_slot = ool.inSlot(tl.slot, pc), .own = !tl.ready or tl.busy, .lost = ool.lost(tl.slot, pc, page) };
+        const v = wx.fault(esr, far, pc, &st);
         if (v == .handled) return;
         if (v == .retry) {
-            ool.tried(tl.slot, mc.ss.pc, page);
+            ool.tried(tl.slot, pc, page);
             return;
         }
         if (v == .step and step(mc, &st)) return;
@@ -1875,7 +1884,7 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
             setBusy(&tl, was);
             return;
         }
-        if (v == .other) {
+        if (tstate.arm64 and v == .other) {
             var f: jit.Fault = .{ .pc = mc.ss.pc, .esr = mc.es.esr, .far = mc.es.far, .dsig = dsig, .code = si.code };
             if (jit.flip(&f, mc, tl.slot)) return;
             dsig = f.dsig;
@@ -1883,7 +1892,6 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
             mc.es.esr = f.esr;
             mc.es.far = f.far;
         }
-    }
     }
     if (tl.busy and tstate.pc(mc) >= @intFromPtr(&lc_copy) and tstate.pc(mc) < @intFromPtr(&lc_copy_fault)) {
         tstate.setPc(mc, @intFromPtr(&lc_copy_fault));
@@ -1936,6 +1944,11 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
 // it (wx.Step): fails a store exclusive, or runs its instructions out of
 // line, a window that cannot run so its first instruction alone.
 fn step(mc: *std.c.mcontext_t, st: *const wx.Step) bool {
+    if (!tstate.arm64) {
+        if (runX64(mc, st.start, st.hold)) return true;
+        wx.letGo(st.hold);
+        return st.again;
+    }
     if (st.fail) |r| {
         switch (r) {
             29 => mc.ss.fp = 1,
@@ -1950,6 +1963,28 @@ fn step(mc: *std.c.mcontext_t, st: *const wx.Step) bool {
     wx.letGo(st.hold);
     if (st.again) return true;
     return st.n > 1 and ool.run(tl.slot, mc, st.words[0..1], st.start, false, 0);
+}
+
+// runX64 runs the x86-64 instruction at pc out of line, as decoded by the
+// supervisor (LC_INSN: its length | where its RIP-relative displacement
+// starts << 8).
+fn runX64(mc: *std.c.mcontext_t, pc: u64, hold: u64) bool {
+    const r = codeCall(LC_INSN, .{ pc, 0, 0, 0, 0, 0 });
+    const n: usize = @intCast(r & 0xff);
+    if (n == 0 or n > 15) return false;
+    var code: [15]u8 = undefined;
+    @memcpy(code[0..n], @as([*]const u8, @ptrFromInt(pc))[0..n]);
+    return ool.runX64(tl.slot, mc, code[0..n], @intCast((r >> 8) & 0xff), pc, hold);
+}
+
+// x86Esr gives an x86-64 page fault (its error code err, at far) the shape of
+// the arm64 abort wx.zig decides on: an instruction fetch (I/D) or a data
+// access, a write (W) or a read, a permission fault, or a translation fault
+// past a file's end. Rosetta leaves P clear on a write to a present page.
+fn x86Esr(err: u32, far: u64) u32 {
+    const fsc: u32 = if (mem.pastEnd(far)) 0x04 else 0x0c;
+    if (err & 16 != 0) return 0x20 << 26 | fsc;
+    return 0x24 << 26 | fsc | (if (err & 2 != 0) @as(u32, 1 << 6) else 0);
 }
 
 // ---- syscalls -------------------------------------------------------------------
@@ -2235,3 +2270,4 @@ fn sysSigtimedwait(set: u64, uinfo: u64, uts: u64, size: u64) u64 {
         if (!waitLocal(w | ~ld(&t.mask), deadline)) return neg(EAGAIN);
     }
 }
+

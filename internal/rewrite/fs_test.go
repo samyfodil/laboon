@@ -234,3 +234,25 @@ func TestPlanEncodingFS(t *testing.T) {
 		}
 	}
 }
+
+func TestFSIsland(t *testing.T) {
+	code := []byte{0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0, 0, 0} // mov rax, fs:0x28
+	const vaddr, island = 0x400000, 0x401000
+	patch, isl, ok := FSIsland(code, vaddr, island, 0x80)
+	if !ok || len(patch) != len(code) || patch[0] != 0xe9 {
+		t.Fatalf("patch %x ok %v", patch, ok)
+	}
+	n := len(isl)
+	if to := vaddr + 5 + uint64(int32(binary.LittleEndian.Uint32(patch[1:]))); to < island || to >= island+uint64(n) {
+		t.Fatalf("jmp to %#x, not into the island at %#x", to, island)
+	}
+	if n < 5 || isl[n-5] != 0xe9 {
+		t.Fatalf("island %x does not end in a jmp", isl)
+	}
+	if back := island + uint64(n) + uint64(int32(binary.LittleEndian.Uint32(isl[n-4:]))); back != vaddr+uint64(len(code)) {
+		t.Fatalf("island jumps back to %#x, want %#x", back, vaddr+len(code))
+	}
+	if _, _, ok := FSIsland([]byte{0x64, 0x48, 0x8b, 0x00}, vaddr, island, 0x80); ok {
+		t.Fatal("a 4-byte instruction took an island")
+	}
+}

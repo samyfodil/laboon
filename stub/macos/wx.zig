@@ -70,6 +70,8 @@ const PROT_WRITE: u8 = 2;
 const PROT_EXEC: u8 = 4;
 const SVC0: u32 = 0xd4000001;
 const TRAP: u32 = 0; // udf #0
+const X86 = !tstate.arm64;
+const SITE: u64 = if (X86) 2 else 4; // an x86-64 syscall (0f 05) and its trap, ud2 (0f 0b)
 const LC_ANON_SITES: u64 = 0x4c430029;
 const LC_ANON_LEARN: u64 = 0x4c43002a;
 const ENOMEM: i64 = 12;
@@ -213,6 +215,24 @@ fn setProt(page: u64, n: u64, p: c_int) bool {
     return mprotect(@ptrFromInt(page), n, p) == 0;
 }
 
+fn svcAt(a: u64) bool {
+    if (X86) return @as(*align(1) const u16, @ptrFromInt(a)).* == 0x050f;
+    return @as(*const u32, @ptrFromInt(a)).* == SVC0;
+}
+
+fn trapAt(a: u64) bool {
+    if (X86) return @as(*align(1) const u16, @ptrFromInt(a)).* == 0x0b0f;
+    return @as(*const u32, @ptrFromInt(a)).* == TRAP;
+}
+
+fn putTrap(a: u64) void {
+    if (X86) @as(*align(1) u16, @ptrFromInt(a)).* = 0x0b0f else @as(*u32, @ptrFromInt(a)).* = TRAP;
+}
+
+fn putSvc(a: u64) void {
+    if (X86) @as(*align(1) u16, @ptrFromInt(a)).* = 0x050f else @as(*u32, @ptrFromInt(a)).* = SVC0;
+}
+
 // cutIn removes [lo, hi) from l.
 fn cutIn(l: *List, lo: u64, hi: u64) void {
     var i: usize = 0;
@@ -258,10 +278,15 @@ fn insert(lo: u64, hi: u64, prot: u64) bool {
 // forget drops what is known of the pages in [lo, hi) that run, as they are,
 // traps and all: their memory is gone or replaced.
 fn forget(lo: u64, hi: u64) void {
+    forgetBut(lo, hi);
+    dropTraps(lo, hi);
+}
+
+// forgetBut forgets [lo, hi) but for the traps placed there.
+fn forgetBut(lo: u64, hi: u64) void {
     dropRunning(lo, hi);
     dropKeys(u64, &unlearned, lo, hi);
     dropKeys(void, &jitted, lo, hi);
-    dropTraps(lo, hi);
     dropHot(lo, hi);
     dropKeys(Frozen, &frozen, lo, hi);
     dropAddrs(&xtraps, lo, hi);
@@ -411,8 +436,7 @@ fn stop(page: u64, p: u64) bool {
             var it = traps.keyIterator();
             while (it.next()) |t| {
                 if (t.* < page or t.* >= page + PAGE) continue;
-                const w: *u32 = @ptrFromInt(tmp + (t.* - page));
-                if (w.* == TRAP) w.* = SVC0;
+                if (trapAt(tmp + (t.* - page))) putSvc(tmp + (t.* - page));
             }
             _ = mach_vm_deallocate(mach_task_self(), tmp, PAGE);
             dropTraps(page, page + PAGE);
@@ -421,8 +445,16 @@ fn stop(page: u64, p: u64) bool {
     return setProt(page, PAGE, hostProt(p));
 }
 
-// hasSvc reports whether the frozen page holds an svc #0.
+// hasSvc reports whether the frozen page holds an svc #0; an x86-64 one, a
+// syscall, or the first byte of one running into the next page.
 fn hasSvc(page: u64) bool {
+    if (X86) {
+        const b: [*]const u8 = @ptrFromInt(page);
+        for (0..PAGE - 1) |i| {
+            if (b[i] == 0x0f and b[i + 1] == 0x05) return true;
+        }
+        return b[PAGE - 1] == 0x0f;
+    }
     const w: [*]const u32 = @ptrFromInt(page);
     for (w[0 .. PAGE / 4]) |x| {
         if (x == SVC0) return true;
@@ -492,10 +524,9 @@ fn run(page: u64, pc: u64) bool {
     if (n > 0) {
         const tmp = alias(page) orelse return fail(page, p);
         for (sc[0..n]) |off| {
-            if (off % 4 != 0 or off + 4 > PAGE) continue;
-            const w: *u32 = @ptrFromInt(tmp + off);
-            if (w.* != SVC0) continue;
-            w.* = TRAP;
+            if ((!X86 and off % 4 != 0) or off + SITE > PAGE) continue;
+            if (!svcAt(tmp + off)) continue;
+            putTrap(tmp + off);
             traps.putAssumeCapacity(page + off, {});
             placed += 1;
         }
@@ -546,7 +577,8 @@ pub const Verdict = enum { other, handled, retry, real, step, attach, wait, hot,
 // line the store is part of to keep. retry: handled, a store that may lose to
 // a thread running its page (ool.tried). In: whether the fault is the
 // thread's run out of line (from_slot), the stub's own (own), or a store that
-// ran again in place and lost (lost).
+// ran again in place and lost (lost). On x86-64 only start and hold: the
+// one instruction there runs out of line (sig.zig, runX64).
 pub const Step = struct {
     words: [ool.MAX]u32 = undefined,
     n: u32 = 0,
@@ -647,6 +679,13 @@ fn storeHeld(id: ObjPage, addr: u64, pc: u64, st: *Step) Verdict {
         return .attach;
     }
     if (!st.lost) return .retry;
+    if (X86) {
+        st.n = 1;
+        st.start = pc;
+        st.hold = holdMem(id);
+        st.again = true;
+        return .step;
+    }
     const w = @as(*const u32, @ptrFromInt(pc)).*;
     if (ool.storeExclusive(w)) {
         const cp = pc & ~(PAGE - 1);
@@ -718,6 +757,11 @@ pub const TrapVerdict = enum { no, trap, again, excl };
 pub fn isTrap(pc: u64) TrapVerdict {
     lock();
     defer unlock();
+    if (X86) {
+        if (trapAt(pc)) return if (traps.contains(pc)) .trap else .no;
+        if (svcAt(pc) and find(pc) != null and !running.contains(pc & ~(PAGE - 1))) return .again;
+        return .no;
+    }
     const w = @as(*const u32, @ptrFromInt(pc)).*;
     if (w == TRAP and traps.contains(pc)) return .trap;
     if (w == TRAP and xtraps.contains(pc)) return .excl;
@@ -767,7 +811,8 @@ pub fn protect(lo: u64, n: u64, prot: u64, emulate: bool, shared: bool) u64 {
 pub fn mapped(lo: u64, n: u64, prot: u64, emulate: bool, shared: bool) void {
     lock();
     defer unlock();
-    forget(lo, lo + n);
+    // File code was rewritten as it was mapped: its traps stay.
+    if (!emulate and prot & PROT_EXEC != 0) forgetBut(lo, lo + n) else forget(lo, lo + n);
     cut(lo, lo + n);
     cutIn(&dirty_, lo, lo + n);
     cutIn(&sharedx, lo, lo + n);
@@ -858,7 +903,16 @@ pub fn settle(lo: u64, hi: u64) void {
 pub fn moved(old: u64, on: u64, dst: u64, n: u64, keep: bool) void {
     lock();
     defer unlock();
+    // The traps that stay once its pages stopped, file code's, go with it.
+    var it = traps.keyIterator();
+    var moving: std.ArrayListUnmanaged(u64) = .{};
+    defer moving.deinit(gpa);
+    while (it.next()) |t| {
+        if (t.* >= old and t.* < old + @min(on, n)) moving.append(gpa, t.* - old + dst) catch {};
+    }
     forget(old, old + on);
+    forget(dst, dst + n);
+    for (moving.items) |t| traps.put(gpa, t, {}) catch {};
     moveIn(&regions, old, on, dst, n, keep);
     moveIn(&dirty_, old, on, dst, n, keep);
     moveIn(&sharedx, old, on, dst, n, keep);
@@ -1266,8 +1320,8 @@ fn thawIn(lo: u64, hi: u64) void {
 // page cools and the store runs out of line. A store exclusive no trapped
 // load exclusive ran the window of fails, and its window is learned.
 fn selfStore(page: u64, p: u64, pc: u64, st: *Step) Verdict {
-    const w = @as(*const u32, @ptrFromInt(pc)).*;
-    if (ool.storeExclusive(w)) {
+    const w = if (X86) 0 else @as(*const u32, @ptrFromInt(pc)).*;
+    if (!X86 and ool.storeExclusive(w)) {
         learnExcl(page, pc, w);
         st.fail = ool.statusReg(w);
         return .step;

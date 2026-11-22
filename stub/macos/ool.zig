@@ -17,10 +17,12 @@ const tstate = @import("tstate.zig");
 
 extern "c" fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) ?*anyopaque;
 extern "c" fn mprotect(addr: *anyopaque, len: usize, prot: c_int) c_int;
+extern "c" fn munmap(addr: *anyopaque, len: usize) c_int;
 extern "c" fn sys_icache_invalidate(start: *anyopaque, len: usize) void;
 
 pub const MAX = 32; // instructions at a time
 const PAGE: usize = tstate.page;
+const X86 = !tstate.arm64;
 const EXIT: u32 = 0xd4200000 | (0x5e << 5); // brk #0x5e
 
 // A thread's page, by its slot, and what it last ran: n instructions from
@@ -91,12 +93,72 @@ pub fn run(s: usize, mc: *std.c.mcontext_t, words: []const u32, start: u64, jit:
     return true;
 }
 
+// runX64 makes the thread in slot s resume at a copy of code, the guest's
+// x86-64 instruction at start, its RIP-relative displacement at at (0: none),
+// an int3 after it; false if it cannot run out of line. A copy with a
+// displacement runs from a page within its reach.
+pub fn runX64(s: usize, mc: *std.c.mcontext_t, code: []const u8, at: u32, start: u64, hold: u64) bool {
+    const sl = &slots[s];
+    if (code.len == 0 or code.len > 15 or (at != 0 and at + 4 > code.len)) return false;
+    if (sl.page != 0 and at != 0 and !near(sl.page, start)) {
+        _ = munmap(@ptrFromInt(sl.page), PAGE);
+        sl.page = 0;
+    }
+    if (sl.page == 0) {
+        const hint: ?*anyopaque = if (at != 0) @ptrFromInt((start -| (1 << 30)) & ~@as(u64, PAGE - 1)) else null;
+        const p = mmap(hint, PAGE, 3, 0x1002, -1, 0) orelse return false;
+        if (@intFromPtr(p) == std.math.maxInt(usize)) return false;
+        sl.page = @intFromPtr(p);
+    }
+    var out: [16]u8 = undefined;
+    @memcpy(out[0..code.len], code);
+    if (at != 0) {
+        // The operand's address stays the guest's: the displacement moves by
+        // as much as the instruction does.
+        if (!near(sl.page, start)) return false;
+        const d: i64 = std.mem.readInt(i32, code[at..][0..4], .little);
+        const nd = d + @as(i64, @bitCast(start -% sl.page));
+        if (nd < std.math.minInt(i32) or nd > std.math.maxInt(i32)) return false;
+        std.mem.writeInt(i32, out[at..][0..4], @intCast(nd), .little);
+    }
+    out[code.len] = 0xcc;
+    const dst: [*]u8 = @ptrFromInt(sl.page);
+    if (!std.mem.eql(u8, dst[0 .. code.len + 1], out[0 .. code.len + 1])) {
+        if (mprotect(@ptrFromInt(sl.page), PAGE, 3) != 0) return false;
+        @memcpy(dst[0 .. code.len + 1], out[0 .. code.len + 1]);
+        if (mprotect(@ptrFromInt(sl.page), PAGE, 5) != 0) return false;
+    }
+    sl.exits[0] = start + code.len;
+    sl.start = start;
+    sl.n = @intCast(code.len);
+    sl.nexit = 1;
+    sl.jit = false;
+    sl.holds = .{ hold, 0 };
+    tstate.setPc(mc, sl.page);
+    return true;
+}
+
+fn near(page: u64, pc: u64) bool {
+    const far = if (page > pc) page - pc else pc - page;
+    return far <= (1 << 31) - 2 * PAGE;
+}
+
 // exit takes the trap ending what slot s ran, at mc's pc: the guest resumes
-// where it leads. null if pc is no exit of it.
+// where it leads. null if pc is no exit of it. An x86-64 int3 reports the pc
+// past it.
 pub fn exit(s: usize, mc: *std.c.mcontext_t) ?Exit {
     const sl = &slots[s];
-    if (sl.page == 0 or mc.ss.pc < sl.page) return null;
-    const i = (mc.ss.pc - sl.page) / 4;
+    const pc = tstate.pc(mc);
+    if (sl.page == 0 or pc < sl.page or sl.nexit == 0) return null;
+    if (X86) {
+        if (pc != sl.page + sl.n + 1) return null;
+        tstate.setPc(mc, sl.exits[0]);
+        sl.n = 0;
+        sl.nexit = 0;
+        defer sl.holds = .{ 0, 0 };
+        return .{ .jit = false, .holds = sl.holds };
+    }
+    const i = (pc - sl.page) / 4;
     if (i < sl.n or i >= sl.n + sl.nexit) return null;
     mc.ss.pc = sl.exits[i - sl.n];
     sl.n = 0;
@@ -130,7 +192,8 @@ pub fn tried(s: usize, pc: u64, page: u64) void {
 // inSlot reports whether pc is in what slot s runs.
 pub fn inSlot(s: usize, pc: u64) bool {
     const sl = &slots[s];
-    return sl.page != 0 and pc >= sl.page and pc < sl.page + 4 * (sl.n + sl.nexit);
+    if (sl.nexit == 0) return false;
+    return sl.page != 0 and pc >= sl.page and pc < sl.page + if (X86) sl.n + 1 else 4 * (sl.n + sl.nexit);
 }
 
 // addHold has what slot s runs keep hold id too, and reports whether it can.
@@ -159,6 +222,10 @@ pub fn dropHolds(s: usize) Holds {
 pub fn guestPc(s: usize, pc: u64) u64 {
     const sl = &slots[s];
     if (sl.page == 0 or pc < sl.page) return pc;
+    if (X86) {
+        if (sl.nexit == 0 or pc > sl.page + sl.n + 1) return pc;
+        return if (pc < sl.page + sl.n) sl.start else sl.exits[0];
+    }
     const i = (pc - sl.page) / 4;
     if (i < sl.n) return sl.start + 4 * i;
     if (i < sl.n + sl.nexit) return sl.exits[i - sl.n];
