@@ -151,8 +151,19 @@ func store(dir, refFile, ref string, img v1.Image, maxSize int64) (*Image, error
 	if err := saveLayout(dir, digest.Hex, img); err != nil {
 		return nil, err
 	}
+	// The config is written before the rootfs moves in, so a rootfs without it
+	// is what a removal of the entry left: unpack it afresh. The rootfs is
+	// looked at first, so a store finishing beside this one is not taken for one.
 	if _, err := os.Stat(out.Root); err == nil {
-		return out, remember(refFile, digest.Hex)
+		if _, err := os.Stat(filepath.Join(dir, digest.Hex, "config.json")); err == nil {
+			return out, remember(refFile, digest.Hex)
+		}
+		if err := os.RemoveAll(out.Root); err != nil {
+			return nil, err
+		}
+		if err := os.Remove(out.Root + hostfs.MetaSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
 	}
 
 	// Unpack beside the final location and rename, so a crash never

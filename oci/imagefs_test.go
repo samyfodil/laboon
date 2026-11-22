@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -116,4 +117,36 @@ func read(t *testing.T, f core.FileSystem, p string) string {
 	b := make([]byte, a.Size)
 	k, _ := fh.ReadAt(b, 0)
 	return string(b[:k])
+}
+
+// TestStoreRedoesPartlyRemoved stores an image, removes part of its cache
+// entry as an interrupted rm -r would (the config and some of the rootfs), and
+// stores it again: the entry is unpacked afresh rather than taken as it is.
+func TestStoreRedoesPartlyRemoved(t *testing.T) {
+	img, err := mutate.AppendLayers(empty.Image, mkLayer(t,
+		ent{"bin/", "", tar.TypeDir, 0o755},
+		ent{"bin/sh", "sh", tar.TypeReg, 0o755},
+		ent{"usr/x", "USR", tar.TypeReg, 0o644},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opt := Options{CacheDir: t.TempDir()}
+	stored, err := Store(img, "test/app:latest", opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(filepath.Dir(stored.Root), "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(stored.Root, "bin")); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Store(img, "test/app:latest", opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(again.Root, "bin", "sh")); err != nil || string(b) != "sh" {
+		t.Fatalf("bin/sh after a second store: %q %v", b, err)
+	}
 }
