@@ -147,10 +147,16 @@ func store(dir, refFile, ref string, img v1.Image, maxSize int64) (*Image, error
 			User:       cf.Config.User,
 		},
 	}
-	out.img = img
 	if err := saveLayout(dir, digest.Hex, img); err != nil {
 		return nil, err
 	}
+	// From here on the image is the cached copy: unpacking the one given
+	// would fetch a pulled image's layers a second time.
+	img, err = loadLayoutImage(dir, digest.Hex)
+	if err != nil {
+		return nil, err
+	}
+	out.img = img
 	// The config is written before the rootfs moves in, so a rootfs without it
 	// is what a removal of the entry left: unpack it afresh. The rootfs is
 	// looked at first, so a store finishing beside this one is not taken for one.
