@@ -79,7 +79,7 @@ run postgres postgres postgres:16-alpine       postgres --version
 run mariadb  mariadb  mariadb:11               mariadbd --version
 
 # .NET hangs under laboon in futex/poll threading (runtime bring-up deferred).
-run ?dotnet  dotnet   mcr.microsoft.com/dotnet/runtime:8.0  dotnet --info
+run dotnet   dotnet   mcr.microsoft.com/dotnet/runtime:8.0  dotnet --info
 
 echo "== sweep done: $pass passed, $fail failed${fails:+ ($fails)}"
 exit $fail

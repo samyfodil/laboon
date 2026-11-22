@@ -67,7 +67,7 @@ Run busybox Linux    busybox:1.36              busybox uname -s
 Run redis    Redis    redis:7-alpine           redis-server --version
 Run postgres postgres postgres:16-alpine       postgres --version
 Run mariadb  mariadb  mariadb:11               mariadbd --version
-Run "?dotnet" dotnet  mcr.microsoft.com/dotnet/runtime:8.0  dotnet --info
+Run dotnet    dotnet  mcr.microsoft.com/dotnet/runtime:8.0  dotnet --info
 
 Write-Output "== sweep done: $pass passed, $fail failed $(if ($fails) { '(' + ($fails -join ' ') + ')' })"
 exit $fail
