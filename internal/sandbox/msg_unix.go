@@ -704,6 +704,7 @@ func (g *dguest) dnsSend(d *dfile, iovs [][2]uint64, ns []byte) int64 {
 	if e != 0 {
 		return sErr(e)
 	}
+	q = append([]byte(nil), q...) // the thread's next send reuses q's buffer
 	go func() {
 		if reply := n.eg.answer(q, hostLookup); reply != nil {
 			unix.Sendto(from, reply, 0, dst)

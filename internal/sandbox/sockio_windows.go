@@ -237,6 +237,7 @@ func (n *dnet) connectUDP(s *dsock, ap netip.AddrPort) lxErrno {
 // policy resolves it off the guest's thread and the reply is queued on s as
 // a datagram from ns.
 func (n *dnet) dnsSend(s *dsock, q, ns []byte) {
+	q = append([]byte(nil), q...) // the thread's next send reuses q's buffer
 	go func() {
 		reply := n.eg.answer(q, hostLookup)
 		if reply == nil {

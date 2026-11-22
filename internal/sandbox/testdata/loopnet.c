@@ -3,13 +3,14 @@
 // and an outside address (192.0.2.1, a documentation address no network
 // routes) is unreachable over TCP and UDP. With no network at all (laboon
 // -no-net) there is no INET socket.
-// Usage: loopnet.elf loopback | local [port] | none
+// Usage: loopnet.elf loopback | local [port [dns]] | none
 // (local is loopback without the outside address, for a host with a network
 // whose loopback is the run's own; with a port, a host service listening on
 // 127.0.0.1 there must be out of reach)
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -94,8 +95,65 @@ static void udp(void) {
 	CHECK(n == 5 && memcmp(buf, "dgram", 5) == 0, "recvfrom %zd: %s", n, strerror(errno));
 	CHECK(portOf(b) >= 32768 && ntohs(from.sin_port) == portOf(b) && strcmp(ip, "127.0.0.1") == 0,
 		"from %s:%d, the sender is on %d", ip, ntohs(from.sin_port), portOf(b));
+	// Datagrams sent before any is read each arrive as sent.
+	CHECK(sendto(b, "first", 5, 0, (struct sockaddr *)&at, sizeof at) == 5, "sendto first: %s", strerror(errno));
+	CHECK(sendto(b, "again", 5, 0, (struct sockaddr *)&at, sizeof at) == 5, "sendto again: %s", strerror(errno));
+	n = recv(a, buf, sizeof buf, 0);
+	CHECK(n == 5 && memcmp(buf, "first", 5) == 0, "first datagram: %zd %.*s", n, (int)(n > 0 ? n : 0), buf);
+	n = recv(a, buf, sizeof buf, 0);
+	CHECK(n == 5 && memcmp(buf, "again", 5) == 0, "second datagram: %zd %.*s", n, (int)(n > 0 ? n : 0), buf);
 	close(a);
 	close(b);
+}
+
+// dnsq builds a query for label.invalid.
+static int dnsq(unsigned char *q, int id, const char *label, int type) {
+	int n = 0, l = strlen(label);
+	unsigned char hdr[12] = {id >> 8, id & 0xff, 1, 0, 0, 1};
+	memcpy(q, hdr, 12);
+	n = 12;
+	q[n++] = l;
+	memcpy(q + n, label, l);
+	n += l;
+	q[n++] = 7;
+	memcpy(q + n, "invalid", 7);
+	n += 7;
+	q[n++] = 0;
+	q[n++] = 0;
+	q[n++] = type;
+	q[n++] = 0;
+	q[n++] = 1;
+	return n;
+}
+
+// dnspair sends two queries of one length before reading, as a resolver asks
+// for A and AAAA at once: each gets its own reply. The names are outside the allowlist, so
+// they are refused without a lookup.
+static void dnspair(void) {
+	int s = socket(AF_INET, SOCK_DGRAM, 0);
+	struct sockaddr_in ns = in4("192.0.2.53", 53);
+	unsigned char q[64], r[512];
+	int n = dnsq(q, 0x1111, "first", 1);
+	CHECK(sendto(s, q, n, 0, (struct sockaddr *)&ns, sizeof ns) == n, "query first: %s", strerror(errno));
+	n = dnsq(q, 0x2222, "again", 28);
+	CHECK(sendto(s, q, n, 0, (struct sockaddr *)&ns, sizeof ns) == n, "query second: %s", strerror(errno));
+	int seen = 0;
+	for (int i = 0; i < 2; i++) {
+		struct pollfd p = {.fd = s, .events = POLLIN};
+		CHECK(poll(&p, 1, 10000) == 1, "reply %d never came", i);
+		ssize_t m = recv(s, r, sizeof r, MSG_DONTWAIT);
+		if (m <= 13) {
+			CHECK(0, "reply %d: %zd %s", i, m, strerror(errno));
+			break;
+		}
+		int id = r[0] << 8 | r[1];
+		const char *want = id == 0x1111 ? "first" : "again";
+		CHECK((id == 0x1111 || id == 0x2222) && r[12] == strlen(want) && memcmp(r + 13, want, strlen(want)) == 0,
+			"reply %d: id %#x for %.*s", i, id, r[12], r + 13);
+		seen |= id == 0x1111 ? 1 : id == 0x2222 ? 2 : 0;
+	}
+	CHECK(seen == 3, "replies to %d of the queries (bits)", seen);
+	close(s);
 }
 
 // errors checks the address errors: a port in use, also under a wildcard; an
@@ -170,6 +228,8 @@ int main(int argc, char **argv) {
 			CHECK(r == -1 && errno == ECONNREFUSED, "connect to the host's 127.0.0.1:%s: %d %s", argv[2], r, strerror(errno));
 			close(c);
 		}
+		if (argc > 3 && strcmp(argv[3], "dns") == 0)
+			dnspair();
 	}
 	printf("loopnet fails=%d\n", fails);
 	return fails != 0;

@@ -206,7 +206,7 @@ func (n *dnet) loopMcSend(s *dsock, buf []byte, group netip.AddrPort) lxErrno {
 		if !joined || o.rx.n+len(buf) > sockRcvBuf {
 			continue
 		}
-		o.rx.push(sockSeg{b: buf, from: loopAs(from, o.family)})
+		o.rx.push(sockSeg{b: append([]byte(nil), buf...), from: loopAs(from, o.family)})
 		n.changed(o)
 	}
 	return 0

@@ -609,7 +609,7 @@ func (g *dguest) loopSend(s *dsock, iovs [][2]uint64, total int, dest []byte) in
 	if to == nil || to.shutRd || to.rx.n+len(buf) > sockRcvBuf {
 		return int64(total)
 	}
-	to.rx.push(sockSeg{b: buf, from: loopAs(from, to.family)})
+	to.rx.push(sockSeg{b: append([]byte(nil), buf...), from: loopAs(from, to.family)})
 	n.changed(to)
 	return int64(total)
 }

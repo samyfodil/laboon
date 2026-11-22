@@ -31,7 +31,7 @@ func TestLoopbackWithoutNet(t *testing.T) {
 		{[]string{"loopback"}, false, false, nil},
 		{[]string{"none"}, true, false, nil},
 		{[]string{"local", hostPort}, false, true, nil},
-		{[]string{"local", hostPort}, false, true, []string{"example.com"}},
+		{[]string{"local", hostPort, "dns"}, false, true, []string{"example.com"}},
 	} {
 		var out bytes.Buffer
 		code, err := Run(context.Background(), "/loopnet", Config{

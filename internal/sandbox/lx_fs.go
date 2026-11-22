@@ -678,7 +678,9 @@ type dguest struct {
 
 // gbuf returns this thread's write-scratch buffer grown to n, reused across
 // syscalls so a socket write does not allocate one per call. Only this thread's
-// serveThread touches it, and it is never held across a channel round-trip.
+// serveThread touches it, and it is never held across a channel round-trip:
+// what is kept past the syscall (a queued datagram, a query answered later) is
+// a copy, or the thread's next write changes it.
 func (g *dguest) gbuf(n int) []byte {
 	if cap(g.iobuf) < n {
 		g.iobuf = make([]byte, n)
