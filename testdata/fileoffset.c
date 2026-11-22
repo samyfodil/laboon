@@ -251,6 +251,29 @@ static void lower_append(void) {
 	CHECK(body("/lowerfile", b, sizeof b) == 6 && strcmp(b, "lower+") == 0);
 }
 
+// One read or pread longer than the supervisor's transfer chunk returns the
+// file's bytes in order, each chunk at its own place in the buffer.
+static void big_read(void) {
+	enum { N = 3 * 262144 + 48500 };
+	static unsigned char w[N], r[N];
+	for (int i = 0; i < N; i++) w[i] = (unsigned char)(i * 7 + (i >> 18));
+	int fd = open(p("big"), O_RDWR | O_CREAT | O_TRUNC, 0644);
+	CHECK(fd >= 0);
+	size_t done = 0;
+	while (done < N) {
+		ssize_t k = write(fd, w + done, N - done);
+		if (k <= 0) break;
+		done += k;
+	}
+	CHECK(done == N);
+	CHECK(lseek(fd, 0, SEEK_SET) == 0);
+	memset(r, 0, N);
+	CHECK(read(fd, r, N) == N && memcmp(r, w, N) == 0);
+	memset(r, 0, N);
+	CHECK(pread(fd, r, N - 4096, 4096) == N - 4096 && memcmp(r, w + 4096, N - 4096) == 0);
+	close(fd);
+}
+
 int main(int argc, char **argv) {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	if (argc > 1) {
@@ -271,6 +294,7 @@ int main(int argc, char **argv) {
 	seekcur_lock();
 	dup2_stdout();
 	lower_append();
+	big_read();
 	printf("done fails=%d\n", fails);
 	return 0;
 }

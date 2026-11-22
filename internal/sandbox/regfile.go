@@ -323,10 +323,11 @@ func (g *dguest) regRead(d *dfile, v [][2]uint64, off int64) int64 {
 		}
 		n = p
 	}
-	buf := g.ioBuf(min(n, ioChunk))
 	var total int
 	for total < n {
-		b := buf[:min(n-total, len(buf))]
+		// Fresh each chunk: the last one's bytes may still wait in the window
+		// to be copied out, and ioBuf copies them first.
+		b := g.ioBuf(min(n-total, ioChunk))
 		m, err := d.vfReadAt(b, off+int64(total))
 		if m > 0 {
 			if g.scatter(v, total, b[:m]) != 0 {
