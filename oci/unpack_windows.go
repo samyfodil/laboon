@@ -3,6 +3,8 @@ package oci
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
@@ -36,6 +40,15 @@ func hostRel(name string) string {
 	return filepath.Join(parts...)
 }
 
+const (
+	// The scan an antivirus runs as each new file closes holds up its writer,
+	// so small files are written by several at once.
+	unpackWriters = 16
+	unpackBuffer  = 1 << 20
+)
+
+type unpackLink struct{ target, name string }
+
 // Unpack extracts a flattened image tar (whiteouts already applied) into
 // dir, which must exist and be empty, and writes dir.lcmeta.
 func Unpack(r io.Reader, dir string, maxSize int64) error {
@@ -46,64 +59,16 @@ func Unpack(r io.Reader, dir string, maxSize int64) error {
 	}
 	defer root.Close()
 
-	type link struct{ target, name string }
-	var links []link
 	meta := map[string]hostfs.Entry{}
-	var total int64
-
-	tr := tar.NewReader(r)
-	for {
-		h, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		name, ok := clean(h.Name)
-		if !ok {
-			continue
-		}
-		host := hostRel(name)
-		if d := filepath.Dir(host); d != "." {
-			if err := root.MkdirAll(d, 0o755); err != nil {
-				return fmt.Errorf("%s: %w", name, err)
-			}
-		}
-		// setuid and setgid are dropped, as on Linux; the sticky bit stays.
-		perm := uint32(h.Mode) & 0o1777
-		e := hostfs.Entry{Uid: uint32(h.Uid), Gid: uint32(h.Gid), Path: name}
-		switch h.Typeflag {
-		case tar.TypeDir:
-			if err := root.MkdirAll(host, 0o755); err != nil {
-				return fmt.Errorf("%s: %w", name, err)
-			}
-			e.Mode = sIFDIR | perm
-		case tar.TypeReg:
-			total += h.Size
-			if total > maxSize {
-				return errTooLarge
-			}
-			if err := writeFile(root, host, tr); err != nil {
-				return fmt.Errorf("%s: %w", name, err)
-			}
-			e.Mode = sIFREG | perm
-		case tar.TypeSymlink:
-			if err := writeFile(root, host, strings.NewReader(h.Linkname)); err != nil {
-				return fmt.Errorf("%s: %w", name, err)
-			}
-			e.Mode = sIFLNK | 0o777
-		case tar.TypeLink:
-			if target, ok := clean(h.Linkname); ok {
-				links = append(links, link{target, name})
-			}
-			continue
-		default:
-			continue // devices and FIFOs, as on Linux
-		}
-		if e.Valid() {
-			meta[name] = e
-		}
+	g, ctx := errgroup.WithContext(context.Background())
+	g.SetLimit(unpackWriters)
+	links, err := unpackEntries(ctx, g, tar.NewReader(r), root, meta, maxSize)
+	// A writer's failure is what stopped the reading, so it is the one told.
+	if werr := g.Wait(); werr != nil {
+		err = werr
+	}
+	if err != nil {
+		return err
 	}
 	for _, l := range links {
 		err := root.Link(hostRel(l.target), hostRel(l.name))
@@ -118,6 +83,90 @@ func Unpack(r io.Reader, dir string, maxSize int64) error {
 		}
 	}
 	return writeMeta(dir+hostfs.MetaSuffix, meta)
+}
+
+// unpackEntries creates what the tar holds, handing the files it buffers to g,
+// and returns the hard links, which wait for every file.
+func unpackEntries(ctx context.Context, g *errgroup.Group, tr *tar.Reader, root *os.Root, meta map[string]hostfs.Entry, maxSize int64) ([]unpackLink, error) {
+	var links []unpackLink
+	var total int64
+	made := map[string]bool{}
+	mkdir := func(d string) error {
+		if made[d] {
+			return nil
+		}
+		if err := root.MkdirAll(d, 0o755); err != nil {
+			return err
+		}
+		made[d] = true
+		return nil
+	}
+	write := func(name, host string, b []byte) {
+		g.Go(func() error {
+			if err := writeFile(root, host, bytes.NewReader(b)); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			return nil
+		})
+	}
+	for ctx.Err() == nil {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return links, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		name, ok := clean(h.Name)
+		if !ok {
+			continue
+		}
+		host := hostRel(name)
+		if d := filepath.Dir(host); d != "." {
+			if err := mkdir(d); err != nil {
+				return nil, fmt.Errorf("%s: %w", name, err)
+			}
+		}
+		// setuid and setgid are dropped, as on Linux; the sticky bit stays.
+		perm := uint32(h.Mode) & 0o1777
+		e := hostfs.Entry{Uid: uint32(h.Uid), Gid: uint32(h.Gid), Path: name}
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := mkdir(host); err != nil {
+				return nil, fmt.Errorf("%s: %w", name, err)
+			}
+			e.Mode = sIFDIR | perm
+		case tar.TypeReg:
+			total += h.Size
+			if total > maxSize {
+				return nil, errTooLarge
+			}
+			if h.Size <= unpackBuffer {
+				b := make([]byte, h.Size)
+				if _, err := io.ReadFull(tr, b); err != nil {
+					return nil, fmt.Errorf("%s: %w", name, err)
+				}
+				write(name, host, b)
+			} else if err := writeFile(root, host, tr); err != nil {
+				return nil, fmt.Errorf("%s: %w", name, err)
+			}
+			e.Mode = sIFREG | perm
+		case tar.TypeSymlink:
+			write(name, host, []byte(h.Linkname))
+			e.Mode = sIFLNK | 0o777
+		case tar.TypeLink:
+			if target, ok := clean(h.Linkname); ok {
+				links = append(links, unpackLink{target, name})
+			}
+			continue
+		default:
+			continue // devices and FIFOs, as on Linux
+		}
+		if e.Valid() {
+			meta[name] = e
+		}
+	}
+	return nil, ctx.Err()
 }
 
 func writeFile(root *os.Root, name string, r io.Reader) error {
