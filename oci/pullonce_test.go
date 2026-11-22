@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -81,5 +82,83 @@ func TestPullFetchesLayersOnce(t *testing.T) {
 		if n := gets[d.String()]; n != 1 {
 			t.Errorf("layer %s fetched %d times, want 1", d, n)
 		}
+	}
+}
+
+// TestPullRefetchesBrokenLayer cuts the first download of a layer halfway, as a
+// CDN may: the pull fetches it again and the rootfs is whole.
+func TestPullRefetchesBrokenLayer(t *testing.T) {
+	big := strings.Repeat("laboon ", 64<<10)
+	img, err := mutate.AppendLayers(empty.Image,
+		mkLayer(t, ent{"etc/big", big, tar.TypeReg, 0o644}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf, err := img.ConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf.OS, cf.Architecture = "linux", "amd64"
+	if img, err = mutate.ConfigFile(img, cf); err != nil {
+		t.Fatal(err)
+	}
+	layers, err := img.Layers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ld, err := layers[0].Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	gets, cut := 0, false
+	reg := registry.New()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/blobs/"+ld.String()) {
+			reg.ServeHTTP(w, r)
+			return
+		}
+		mu.Lock()
+		gets++
+		first := !cut
+		cut = true
+		mu.Unlock()
+		if !first {
+			reg.ServeHTTP(w, r)
+			return
+		}
+		rec := httptest.NewRecorder()
+		reg.ServeHTTP(rec, r)
+		body := rec.Body.Bytes()
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(rec.Code)
+		w.Write(body[:len(body)/2])
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}))
+	defer srv.Close()
+
+	ref := strings.TrimPrefix(srv.URL, "http://") + "/test/big:latest"
+	r, err := name.ParseReference(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(r, img); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	gets, cut = 0, false
+	mu.Unlock()
+
+	got, err := Pull(context.Background(), ref, Options{CacheDir: t.TempDir(), Arch: "amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(got.Root, "etc", "big")); err != nil || string(b) != big {
+		t.Fatalf("etc/big: %d bytes, %v", len(b), err)
+	}
+	if gets != 2 {
+		t.Errorf("layer fetched %d times, want 2", gets)
 	}
 }

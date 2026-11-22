@@ -101,7 +101,7 @@ func Pull(ctx context.Context, ref string, opt Options) (*Image, error) {
 	if cf.OS != "linux" || cf.Architecture != arch {
 		return nil, fmt.Errorf("%s is %s/%s, need linux/%s", ref, cf.OS, cf.Architecture, arch)
 	}
-	return store(dir, refFile, ref, img, opt.MaxSize)
+	return store(dir, refFile, ref, refetchImage{img, ctx}, opt.MaxSize)
 }
 
 // Store places a locally built image in the cache under ref, so laboon runs it
