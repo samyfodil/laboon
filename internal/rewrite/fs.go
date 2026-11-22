@@ -136,19 +136,20 @@ func (w *Rewriter) PatchFS(code []byte, vaddr uint64, sites []FSSite) (left []ui
 // FSIsland rewrites the %fs-relative instruction at the start of code, at
 // vaddr and at least a jmp long, to a jump to an island at island that reads
 // the thread pointer from %gs:tp, as PatchFS does a site: patch takes the
-// instruction's place, isl is the island.
+// instruction's place and jumps to island, where isl goes.
 func FSIsland(code []byte, vaddr, island uint64, tp uint32) (patch, isl []byte, ok bool) {
 	in := x86decode(code)
 	if !in.ok || !in.fsMem || in.len < 5 || in.len > len(code) {
 		return nil, nil, false
 	}
-	w := New(island, fsIslandMax, 0)
+	// The area's header goes below island, so the island itself starts there.
+	w := New(island-headerSize, headerSize+fsIslandMax, 0)
 	w.SegmentSlot(tp)
 	b := slices.Clone(code[:in.len])
 	if !w.fsJmp(b, vaddr, 0, 0, in.len) {
 		return nil, nil, false
 	}
-	return b, w.Trampolines(), true
+	return b, w.Trampolines()[headerSize:], true
 }
 
 // enc is an instruction split around its memory operand.

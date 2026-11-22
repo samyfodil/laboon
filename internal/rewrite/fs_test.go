@@ -243,8 +243,11 @@ func TestFSIsland(t *testing.T) {
 		t.Fatalf("patch %x ok %v", patch, ok)
 	}
 	n := len(isl)
-	if to := vaddr + 5 + uint64(int32(binary.LittleEndian.Uint32(patch[1:]))); to < island || to >= island+uint64(n) {
-		t.Fatalf("jmp to %#x, not into the island at %#x", to, island)
+	if to := vaddr + 5 + uint64(int32(binary.LittleEndian.Uint32(patch[1:]))); to != island {
+		t.Fatalf("jmp to %#x, not to the island at %#x", to, island)
+	}
+	if !bytes.HasPrefix(isl, []byte{0x65}) {
+		t.Fatalf("island %x does not start with its thread-pointer load", isl)
 	}
 	if n < 5 || isl[n-5] != 0xe9 {
 		t.Fatalf("island %x does not end in a jmp", isl)
