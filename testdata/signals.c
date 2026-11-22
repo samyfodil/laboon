@@ -401,7 +401,8 @@ static void t_fp(void) {
 	} while (t1.tv_sec - t0.tv_sec < 1 && hits < 20);
 	struct itimerval off = {0};
 	setitimer(ITIMER_REAL, &off, NULL);
-	check("fp-preserved", hits > 0 && a == 0.5 * n);
+	check("fp-handled", hits > 0);
+	check("fp-preserved", a == 0.5 * n);
 }
 
 static pthread_t main_thread;
