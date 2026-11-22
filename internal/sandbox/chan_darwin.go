@@ -109,7 +109,7 @@ func (c *channel) gone() {}
 // end marks the slot dead and wakes both sides: the supervisor's wait
 // returns errExited, and a stub thread still waiting for a reply ends.
 func (c *channel) end() {
-	atomic.StoreUint32(&c.page.state, stDead)
+	markDead(c.page)
 	syncWakeAll(c.stateAddr(), 4, osSyncShared)
 }
 

@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -117,6 +118,22 @@ const (
 	// a wake can.
 	stDead = 3
 )
+
+// markDead sets the state word to stDead, unless it holds a thread's posted
+// gone notice the supervisor has not read: nothing replies to that notice, so
+// the thread, and with it the last of its process, may be gone before it is
+// read, and ending the slot then must not lose how the thread ended.
+func markDead(pg *chanPage) {
+	for {
+		cur := atomic.LoadUint32(&pg.state)
+		if cur == stReq && pg.kind == msgSyscall && pg.nr == nrThreadGone {
+			return
+		}
+		if atomic.CompareAndSwapUint32(&pg.state, cur, stDead) {
+			return
+		}
+	}
+}
 
 const (
 	slotSize = 4096

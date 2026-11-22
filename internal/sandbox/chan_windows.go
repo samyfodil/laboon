@@ -154,7 +154,7 @@ func (c *hostChan) gone() {}
 // returns errExited. The stub thread, if it is still waiting, waits on: its
 // process is ending.
 func (c *hostChan) end() {
-	atomic.StoreUint32(&c.page.state, stDead)
+	markDead(c.page)
 	c.endIO()
 	c.wake()
 }

@@ -124,7 +124,7 @@ func (c *channel) wakeAt() *uint64 {
 // end marks the slot dead and wakes both sides: the supervisor's wait
 // returns errExited, and a stub thread still waiting for a reply exits.
 func (c *channel) end() {
-	atomic.StoreUint32(&c.page.state, stDead)
+	markDead(c.page)
 	unix.Syscall6(unix.SYS_FUTEX, uintptr(unsafe.Pointer(&c.page.state)), futexWake, 1<<31-1, 0, 0, 0)
 }
 
