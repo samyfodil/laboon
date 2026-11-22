@@ -119,6 +119,26 @@ const NR_PREAD64: u64 = 67;
 const NR_BRK: u64 = 214;
 const NR_MUNMAP: u64 = 215;
 const NR_MMAP: u64 = 222;
+const NR_WRITE: u64 = 64;
+const NR_WRITEV: u64 = 66;
+const NR_SENDTO: u64 = 206;
+const NR_SENDMSG: u64 = 211;
+const NR_SENDMMSG: u64 = 269;
+const LC_SIGRAISE: u64 = 0x4c430015;
+const EPIPE: i64 = 32;
+const SIGPIPE: u64 = 13;
+
+// epipeRaises reports whether sc, failing with EPIPE, raises SIGPIPE: a write,
+// or a send without MSG_NOSIGNAL.
+fn epipeRaises(sc: Syscall) bool {
+    const MSG_NOSIGNAL: u64 = 0x4000;
+    return switch (sc.nr) {
+        NR_WRITE, NR_WRITEV => true,
+        NR_SENDTO, NR_SENDMMSG => sc.args[3] & MSG_NOSIGNAL == 0,
+        NR_SENDMSG => sc.args[2] & MSG_NOSIGNAL == 0,
+        else => false,
+    };
+}
 const NR_MPROTECT: u64 = 226;
 const NR_MADVISE: u64 = 233;
 const MADV_DONTNEED: u64 = 4;
@@ -482,6 +502,13 @@ pub const Vmm = struct {
         var pc = sc.elr;
         var pstate = sc.spsr;
         if (traced) v.applyTraceEdits(ch, &x0, &pc, &pstate);
+        // A write to a pipe or socket no one reads raises SIGPIPE, as on Linux.
+        if (@as(i64, @bitCast(x0)) == -EPIPE and epipeRaises(sc)) {
+            ch.kind = chan.MSG_SYSCALL;
+            ch.nr = LC_SIGRAISE;
+            ch.args = .{ SIGPIPE, 0, 0, 0, 0, 0 }; // SI_USER
+            v.served(ch, exchange);
+        }
         if (v.deliverPending(ch, traced, sc, &x0, &pc, pstate, exchange)) return;
         _ = hv_vcpu_set_reg(v.vcpu, REG_X0, x0);
         _ = hv_vcpu_set_reg(v.vcpu, REG_PC, pc);
@@ -912,6 +939,30 @@ pub const Vmm = struct {
     // space. `exchange` is chan.exchange, passed in so this module need not pull
     // the stub's thread-end machinery. Phase 2b: REP_HOST guest-memory ops map
     // via hv_vm_map/protect; REP_FORK/CLONE/EXEC get VM-model implementations.
+    // endThread ends this thread at the supervisor's REP_THREAD_END: it posts
+    // THREAD_GONE as the slot's last message, frees its vcpu, and ends the OS
+    // thread. Without the notice a vfork parent (held in vforkHold) never
+    // resumes, so a Go os/exec hung.
+    fn endThread(v: *Vmm, ch: *chan.Chan) noreturn {
+        ch.kind = chan.MSG_SYSCALL;
+        ch.nr = NR_THREAD_GONE;
+        ch.args[0] = 0;
+        chan.postReq(ch);
+        _ = hv_vcpu_destroy(v.vcpu);
+        pthread_exit(null);
+    }
+
+    // die reports that sig's default action ends the process. A CLONE_VM
+    // child process is a thread of its parent's stub: only it ends.
+    fn die(v: *Vmm, ch: *chan.Chan, sig: u32, exchange: ExchangeFn) noreturn {
+        ch.kind = chan.MSG_SYSCALL;
+        ch.nr = LC_SIGDIE;
+        ch.args = .{ sig, 0, 0, 0, 0, 0 };
+        v.served(ch, exchange);
+        if (ch.kind == chan.REP_THREAD_END) v.endThread(ch);
+        _exit(@intCast(128 + sig));
+    }
+
     pub fn serveSyscall(v: *Vmm, ch: *chan.Chan, sc: Syscall, exchange: *const fn (*chan.Chan) void) u64 {
         ch.kind = chan.MSG_SYSCALL;
         ch.nr = sc.nr;
@@ -924,20 +975,10 @@ pub const Vmm = struct {
             switch (ch.kind) {
                 chan.REP_CLONE => return spawnThread(v, ch, sc, exchange),
                 chan.REP_FORK => return forkSpawn(v, ch, sc, exchange),
-                chan.REP_THREAD_END => {
-                    // A CLONE_VM (vfork) child is exec'ing: the supervisor is
-                    // ending this thread so it can respawn a fresh stub for the
-                    // new program on this slot. Post THREAD_GONE as the slot's
-                    // last message, free this thread's vcpu, and end the OS
-                    // thread -- without it the vfork parent (held in vforkHold
-                    // awaiting THREAD_GONE) never resumes, so a Go os/exec hung.
-                    ch.kind = chan.MSG_SYSCALL;
-                    ch.nr = NR_THREAD_GONE;
-                    ch.args[0] = 0;
-                    chan.postReq(ch);
-                    _ = hv_vcpu_destroy(v.vcpu);
-                    pthread_exit(null);
-                },
+                // A CLONE_VM (vfork) child is exec'ing: the supervisor is
+                // ending this thread so it can respawn a fresh stub for the new
+                // program on this slot.
+                chan.REP_THREAD_END => v.endThread(ch),
                 else => return ch.ret, // REP_RESULT (REP_EXEC: phase 2b)
             }
         }
@@ -1117,13 +1158,7 @@ pub const Vmm = struct {
             return true;
         }
         const act = sigReply(ch).act;
-        if (classify(sig, act) != .handler) {
-            ch.kind = chan.MSG_SYSCALL;
-            ch.nr = LC_SIGDIE;
-            ch.args = .{ sig, 0, 0, 0, 0, 0 };
-            v.served(ch, exchange);
-            _exit(@intCast(128 + sig));
-        }
+        if (classify(sig, act) != .handler) v.die(ch, sig, exchange);
         const info = Info{ .signo = @intCast(sig), .err = 0, .code = s.code, .pad = 0, .a = s.addr, .b = 0 };
         v.deliverSignal(ch, sig, &info, x0, fl.pc, pstate, act, mask);
         return true;
@@ -1248,10 +1283,24 @@ pub const Vmm = struct {
         const restartable = sc_in != null and isRestart(@bitCast(x0.*));
         const sc = sc_in orelse Syscall{ .nr = 0, .args = .{ 0, 0, 0, 0, 0, 0 }, .elr = pc.*, .spsr = pstate };
         const thr = sigThreadRec(ch);
+        // A call under a temporary mask (pselect, ppoll, epoll_pwait): the
+        // mask stays in force for the handlers of the signals that interrupted
+        // it, whose frames restore the real one; otherwise the real one is
+        // back at once.
+        var real: ?u64 = null;
+        if (@atomicLoad(u32, &thr.saved, .acquire) != 0) {
+            @atomicStore(u32, &thr.saved, 0, .release);
+            if (@as(i64, @bitCast(x0.*)) == -@as(i64, EINTR) or restartable) {
+                real = @atomicLoad(u64, &thr.saved_mask, .monotonic);
+            } else {
+                @atomicStore(u64, &thr.mask, @atomicLoad(u64, &thr.saved_mask, .monotonic), .release);
+            }
+        }
         while (true) {
             const proc = sigProcRec(thr.proc);
             const mask = @atomicLoad(u64, &thr.mask, .monotonic);
             if ((@atomicLoad(u64, &thr.pending, .monotonic) | @atomicLoad(u64, &proc.pending, .monotonic)) & ~mask == 0) {
+                if (real) |m| @atomicStore(u64, &thr.mask, m, .release);
                 if (restartable) v.restart(sc, x0, pc);
                 return false;
             }
@@ -1264,6 +1313,7 @@ pub const Vmm = struct {
             v.served(ch, exchange);
             const sig: u32 = @truncate(ch.ret);
             if (sig == 0) { // nothing deliverable (or the tracer suppressed it)
+                if (real) |m| @atomicStore(u64, &thr.mask, m, .release);
                 if (restartable) v.restart(sc, x0, pc);
                 return false;
             }
@@ -1276,13 +1326,7 @@ pub const Vmm = struct {
                     ch.args = .{ sig, 0, 0, 0, 0, 0 };
                     v.served(ch, exchange);
                 },
-                .term => {
-                    ch.kind = chan.MSG_SYSCALL;
-                    ch.nr = LC_SIGDIE;
-                    ch.args = .{ sig, 0, 0, 0, 0, 0 };
-                    v.served(ch, exchange);
-                    _exit(@intCast(128 + sig));
-                },
+                .term => v.die(ch, sig, exchange),
                 .handler => {
                     var hx0 = x0.*;
                     var hpc = pc.*;
@@ -1297,7 +1341,7 @@ pub const Vmm = struct {
                             hpc = sc.elr;
                         }
                     }
-                    v.deliverSignal(ch, sig, &reply.info, hx0, hpc, pstate, reply.act, mask);
+                    v.deliverSignal(ch, sig, &reply.info, hx0, hpc, pstate, reply.act, real orelse mask);
                     return true;
                 },
             }

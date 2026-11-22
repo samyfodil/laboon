@@ -417,6 +417,12 @@ func serveChild(fs *dfs, child *dguest, gpid int, cfg Config) {
 	defer fs.releaseSlot(child)
 	ch := child.ch
 	if err := ch.wait(); err != nil || ch.page.kind != msgForked {
+		// Killed before it checked in (the parent's report named its stub):
+		// the parent has its pid, and reaps it as killed.
+		if err != nil && fs.sigs().killedBy(child.tgid) != 0 {
+			fs.childDone(child, 0, err)
+			return
+		}
 		child.release()
 		fs.forgetProc(child.ps)
 		return
@@ -430,6 +436,10 @@ func serveChild(fs *dfs, child *dguest, gpid int, cfg Config) {
 	}
 	fs.mu.Unlock()
 	fs.watchStub(ospid) // unless the parent's report (forked) did already
+	// A kill that came before the stub checked in found no host process.
+	if fs.sigs().killedBy(child.tgid) != 0 {
+		osKill(ospid)
+	}
 	if cfg.Trace != nil {
 		fmt.Fprintf(cfg.Trace, "[child %d] forked, ospid=%d slot=%d\n", gpid, ospid, child.slot)
 	}
