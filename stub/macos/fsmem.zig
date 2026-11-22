@@ -134,7 +134,8 @@ fn addFlags(f: u64, size: u8, a: u64, b: u64) u64 {
 // emulate services a faulted %fs-relative instruction. Returns false if the
 // fault is not an emulable %fs memory instruction (the caller delivers it).
 pub fn emulate(mc: *std.c.mcontext_t) bool {
-    const code: [*]const u8 = if (@import("fsisl.zig").original(tstate.pc(mc))) |o| o.ptr else @ptrFromInt(tstate.pc(mc));
+    var buf: [16]u8 = undefined;
+    const code: [*]const u8 = @import("fsisl.zig").insn(tstate.pc(mc), &buf).ptr;
     var i: usize = 0;
     var has_fs = false;
     var op66 = false;
@@ -398,7 +399,14 @@ extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
 // can be grown from what a real guest issues, and the fault is delivered
 // (return false) -- a loud miss, never a silent wrong answer.
 fn fault(mc: *std.c.mcontext_t) bool {
-    if (@import("fsisl.zig").patch(tstate.pc(mc), @import("root").g_tp_key, true)) return true;
+    switch (@import("fsisl.zig").patch(tstate.pc(mc), @import("root").g_tp_key)) {
+        .island => |to| {
+            tstate.setPc(mc, to);
+            return true;
+        },
+        .again => return true,
+        .none => {},
+    }
     const p: [*]const u8 = @ptrFromInt(tstate.pc(mc));
     var b: [128]u8 = undefined;
     const s = std.fmt.bufPrint(&b, "FSEMU-MISS pc={x} b={x} {x} {x} {x} {x} {x} {x} {x}\n", .{

@@ -289,7 +289,7 @@ fn collect(task: u32, regions: *std.ArrayList(mem.ForkRegion), entries: *std.Arr
     blob.appendSlice(std.mem.asBytes(&h)) catch return false;
     blob.appendSlice(std.mem.sliceAsBytes(regions.items)) catch return false;
     blob.appendSlice(std.mem.sliceAsBytes(files.items)) catch return false;
-    return mem.forkSave(blob);
+    return mem.forkSave(blob) and @import("fsisl.zig").forkSave(blob);
 }
 
 // Taken is what a fork child resumes from.
@@ -343,7 +343,7 @@ fn take(task: u32, m: *const ForkMsg) ?Taken {
         if (!place(task, r, ents[i])) return null;
     }
     if (!fdlink.forkAdopt(files, fps[0..m.files.count])) return null;
-    if (!mem.forkLoad(&b) or !@import("wx.zig").forkLoad(&b)) return null;
+    if (!mem.forkLoad(&b) or !@import("wx.zig").forkLoad(&b) or !@import("fsisl.zig").forkLoad(&b)) return null;
     procinfo.info = h.info;
     sig.g_restorer = h.restorer;
     // The frame was on a stack of the parent stub's own: resume from the image

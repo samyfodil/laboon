@@ -50,23 +50,27 @@ fn refusedAt(pc: u64) *u64 {
     return &refused[(pc *% 0x9e3779b97f4a7c15) >> 54];
 }
 
+// Next is where a thread whose %fs access at a site faulted goes on: the
+// site's island, the access again (the lock was held: no thread waits for it
+// in a handler, where a kick cannot reach it), or wherever it would without
+// an island.
+pub const Next = union(enum) { none, again, island: u64 };
+
 // patch gives the %fs-relative instruction at pc, which just faulted, an
-// island, when it is in file code and can have one: true once the site jumps
-// to it, run again from pc. One emulated already need not wait for another
-// thread's patch; one fsmem.zig cannot emulate must.
-pub fn patch(pc: u64, tp_key: u64, wait: bool) bool {
-    if (@atomicLoad(u64, refusedAt(pc), .monotonic) == pc) return false;
-    while (busy.swap(true, .acquire)) {
-        if (!wait) return false;
-        std.atomic.spinLoopHint();
-    }
+// island, when it is in file code and can have one. The faulting thread goes
+// on there rather than at pc, where a stale translation of the old bytes
+// would fault again.
+pub fn patch(pc: u64, tp_key: u64) Next {
+    if (@atomicLoad(u64, refusedAt(pc), .monotonic) == pc) return .none;
+    if (busy.swap(true, .acquire)) return .again;
     defer busy.store(false, .release);
-    if (jumpsOut(pc)) return true;
-    if (nsites >= sites.len / 2) return false;
-    const prot = mem.protAt(pc) orelse return false;
-    if (prot & 4 == 0 or prot & 2 != 0 or wx.protAt(pc) != null or mem.isShared(pc)) return false;
+    if (islandOf(pc)) |to| return .{ .island = to };
+    if (nsites >= sites.len / 2) return .none;
+    const prot = mem.protAt(pc) orelse return .none;
+    if (prot & 4 == 0 or prot & 2 != 0 or wx.protAt(pc) != null or mem.isShared(pc)) return .none;
     const at = slot(pc) orelse return refuse(pc);
-    const r = @import("sig.zig").codeCall(LC_FS_ISLAND, .{ pc, at.base + at.used, tp_key * 8, 0, 0, 0 });
+    const isl = at.base + at.used;
+    const r = @import("sig.zig").codeCall(LC_FS_ISLAND, .{ pc, isl, tp_key * 8, 0, 0, 0 });
     const n: usize = @intCast(r & 0xff);
     const m: usize = @intCast((r >> 8) & 0xffff);
     if (n == 0 or m == 0 or m > SLOT) return refuse(pc);
@@ -81,7 +85,7 @@ pub fn patch(pc: u64, tp_key: u64, wait: bool) bool {
     e.len = @intCast(n);
     @memcpy(e.code[0..n], @as([*]const u8, @ptrFromInt(pc))[0..n]);
     @atomicStore(u64, &e.pc, pc, .release);
-    return write(pc, code[0..n]);
+    return if (write(pc, code[0..n])) .{ .island = isl } else .none;
 }
 
 // slotOf is the entry of pc in sites, or the free one it would take.
@@ -94,28 +98,48 @@ fn slotOf(pc: u64) *Site {
 }
 
 // original is the instruction the site at pc held, while pc is one patched.
-pub fn original(pc: u64) ?[]const u8 {
+fn original(pc: u64) ?[]const u8 {
     const e = slotOf(pc);
     if (@atomicLoad(u64, &e.pc, .acquire) != pc) return null;
     const b: *const u8 = @ptrFromInt(pc);
-    if (b.* != 0xcc and !jumpsOut(pc)) return null;
+    if (b.* != 0xcc and islandOf(pc) == null) return null;
     return e.code[0..e.len];
 }
 
-fn refuse(pc: u64) bool {
+fn refuse(pc: u64) Next {
     @atomicStore(u64, refusedAt(pc), pc, .monotonic);
-    return false;
+    return .none;
 }
 
-// jumpsOut reports whether the site at pc is a jmp into an arena already.
-fn jumpsOut(pc: u64) bool {
+// islandOf is the island the site at pc jumps to, once it is patched.
+pub fn islandOf(pc: u64) ?u64 {
     const d: [*]const u8 = @ptrFromInt(pc);
-    if (d[0] != 0xe9) return false;
+    if (d[0] != 0xe9) return null;
     const to = pc +% 5 +% @as(u64, @bitCast(@as(i64, std.mem.readInt(i32, d[1..5], .little))));
-    for (arenas[0..narena]) |a| {
-        if (to >= a.base and to < a.base + ARENA) return true;
+    for (arenas[0..@atomicLoad(usize, &narena, .acquire)]) |a| {
+        if (to >= a.base and to < a.base + ARENA) return to;
     }
-    return false;
+    return null;
+}
+
+// insn is the instruction at pc for fsmem.zig to emulate: a patched site's
+// old one, or the bytes there, read tail first so a patch being written
+// cannot tear them (write() changes the first byte first, under TSO before
+// the tail, which is all written once the first byte is the jmp's).
+pub fn insn(pc: u64, buf: *[16]u8) []const u8 {
+    const d: [*]const u8 = @ptrFromInt(pc);
+    var n: usize = 15;
+    const end = (pc | (PAGE - 1)) + 1;
+    if (end - pc < n and mem.protAt(end) == null) n = end - pc;
+    var i = n;
+    while (i > 1) {
+        i -= 1;
+        buf[i] = @atomicLoad(u8, &d[i], .acquire);
+    }
+    buf[0] = @atomicLoad(u8, &d[0], .acquire);
+    const e = slotOf(pc);
+    if (@atomicLoad(u64, &e.pc, .acquire) == pc and (buf[0] == 0xcc or islandOf(pc) != null)) return e.code[0..e.len];
+    return buf[0..n];
 }
 
 // slot is an arena in reach of pc with room for one more island.
@@ -147,7 +171,7 @@ fn slot(pc: u64) ?*Arena {
     }
     mem.noteImage(b, b + ARENA);
     arenas[narena] = .{ .base = b, .wr = wr, .used = 0 };
-    narena += 1;
+    @atomicStore(usize, &narena, narena + 1, .release);
     return &arenas[narena - 1];
 }
 
@@ -171,10 +195,13 @@ fn write(pc: u64, code: []const u8) bool {
     return true;
 }
 
-// retry reports whether the int3 a thread trapped on, ending at pc, is a
-// site's first byte held while it was patched: the thread runs it again.
-pub fn retry(pc: u64) bool {
-    return original(pc -% 1) != null;
+// resumeAt is where a thread that trapped on an int3 ending at pc goes on, when
+// the int3 is a site's first byte held while it was patched, or a stale
+// translation of it: the site's island once it has one, else the site again.
+pub fn resumeAt(pc: u64) ?u64 {
+    const site = pc -% 1;
+    if (original(site) == null) return null;
+    return islandOf(site) orelse site;
 }
 
 // reset drops the arenas, at an exec.
@@ -188,4 +215,60 @@ pub fn reset() void {
     @memset(&refused, 0);
     @memset(&sites, .{});
     nsites = 0;
+}
+
+// A fork child is a fresh stub running the parent's code, patched sites and
+// all: it takes the tables over. They are read after the guest's memory is
+// described and without the lock (patch holds it across mem.zig's, which the
+// fork holds): an entry is published before its site is written, so every
+// site patched in the child's memory is in them. The child cannot write the
+// parent's arenas (their alias is not inherited), so it takes them as full,
+// and puts back the old bytes of a site its memory caught being written.
+const ForkHead = extern struct { narena: u64, nsite: u64 };
+
+pub fn forkSave(buf: *std.ArrayList(u8)) bool {
+    const na = @atomicLoad(usize, &narena, .acquire);
+    var list = std.ArrayList(Site).init(std.heap.page_allocator);
+    defer list.deinit();
+    for (&sites) |*e| {
+        const pc = @atomicLoad(u64, &e.pc, .acquire);
+        if (pc <= BUSY) continue;
+        var c = e.*;
+        c.pc = pc;
+        list.append(c) catch return false;
+    }
+    const h = ForkHead{ .narena = na, .nsite = list.items.len };
+    buf.appendSlice(std.mem.asBytes(&h)) catch return false;
+    for (arenas[0..na]) |a| buf.appendSlice(std.mem.asBytes(&a.base)) catch return false;
+    buf.appendSlice(std.mem.sliceAsBytes(list.items)) catch return false;
+    for (&refused) |*r| {
+        const v = @atomicLoad(u64, r, .monotonic);
+        buf.appendSlice(std.mem.asBytes(&v)) catch return false;
+    }
+    return true;
+}
+
+pub fn forkLoad(b: *[]const u8) bool {
+    if (b.len < @sizeOf(ForkHead)) return false;
+    const h = std.mem.bytesToValue(ForkHead, b.*[0..@sizeOf(ForkHead)]);
+    if (h.narena > arenas.len or h.nsite > sites.len / 2) return false;
+    const na = h.narena * 8;
+    const ns = h.nsite * @sizeOf(Site);
+    if (b.len < @sizeOf(ForkHead) + na + ns + @sizeOf(@TypeOf(refused))) return false;
+    var rest = b.*[@sizeOf(ForkHead)..];
+    for (std.mem.bytesAsSlice(u64, @as([]align(1) const u8, rest[0..na])), 0..) |base, i| {
+        arenas[i] = .{ .base = base, .wr = 0, .used = ARENA };
+    }
+    narena = @intCast(h.narena);
+    rest = rest[na..];
+    for (std.mem.bytesAsSlice(Site, @as([]align(1) const u8, rest[0..ns]))) |e| {
+        slotOf(e.pc).* = e;
+        if (mem.protAt(e.pc) == null) continue;
+        if (@as(*const u8, @ptrFromInt(e.pc)).* == 0xcc) _ = write(e.pc, e.code[0..e.len]);
+    }
+    nsites = @intCast(h.nsite);
+    rest = rest[ns..];
+    @memcpy(std.mem.asBytes(&refused), rest[0..@sizeOf(@TypeOf(refused))]);
+    b.* = rest[@sizeOf(@TypeOf(refused))..];
+    return true;
 }

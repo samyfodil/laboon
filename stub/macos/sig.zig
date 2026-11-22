@@ -222,6 +222,14 @@ extern fn lc_tc_busy() callconv(.C) void;
 export var lc_busy_tsd: u64 = 0;
 // g_text is the stub's own __TEXT segment.
 var g_text: [2]u64 = .{ 0, 0 };
+
+// g_sigtramp is libSystem's signal trampoline. Rosetta can build a frame for
+// an asynchronous signal (a kick) and then deliver a guest fault pending at
+// the same instruction before the trampoline runs, the fault's pc the
+// trampoline's first instruction: returned from unchanged, the kick's handler
+// runs and its sigreturn resumes the guest, which faults again.
+var g_sigtramp: u64 = 0;
+extern "c" fn dlsym(handle: ?*anyopaque, symbol: [*:0]const u8) ?*anyopaque;
 extern "c" fn sigaltstack(ss: *const DwStack, old: ?*DwStack) c_int;
 extern "c" fn pthread_sigmask(how: c_int, set: ?*const u32, old: ?*u32) c_int;
 const SIG_BLOCK: c_int = 1;
@@ -566,6 +574,9 @@ pub fn install(chan_base: [*]u8) void {
     for ([_]c_int{ DW_SIGSEGV, DW_SIGBUS, DW_SIGILL, DW_SIGFPE, DW_SIGTRAP }) |s| _ = sigaction(s, &fault, null);
     _ = sigaction(DW_SIGUSR1, &.{ .handler = onRoute, .mask = block, .flags = flags }, null);
     _ = sigaction(DW_SIGUSR2, &.{ .handler = onKick, .mask = block, .flags = flags }, null);
+    if (!tstate.arm64) {
+        if (dlsym(@ptrFromInt(@as(usize, @bitCast(@as(isize, -2)))), "_sigtramp")) |p| g_sigtramp = @intFromPtr(p);
+    }
     // EPIPE comes back to the guest, which then gets its own (Linux) SIGPIPE.
     _ = signal(DW_SIGPIPE, DW_SIG_IGN);
 }
@@ -1789,14 +1800,17 @@ fn idReg(mc: *std.c.mcontext_t) bool {
 fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) void {
     const uc: *std.c.ucontext_t = @ptrCast(@alignCast(ctx.?));
     const mc = uc.mcontext;
+    if (!tstate.arm64 and g_sigtramp != 0 and tstate.pc(mc) == g_sigtramp) return;
     if (tstate.arm64) {
         if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_sig_switch)) return doSwitch(mc);
         if (dsig_in == DW_SIGTRAP and tstate.pc(mc) == @intFromPtr(&lc_trap_ret) + 4) return trapReturn(mc);
     }
     if (dsig_in == DW_SIGTRAP and tl.ready) {
-        if (!tstate.arm64 and fsisl.retry(tstate.pc(mc))) {
-            tstate.setPc(mc, tstate.pc(mc) - 1);
-            return;
+        if (!tstate.arm64) {
+            if (fsisl.resumeAt(tstate.pc(mc))) |to| {
+                tstate.setPc(mc, to);
+                return;
+            }
         }
         if (ool.exit(tl.slot, mc)) |e| {
             if (e.jit) jit.initThread(); // back to execute mode
@@ -1840,8 +1854,13 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
     // physical %fs base is 0) and are emulated against the stored guest base.
     if (!tstate.arm64 and dsig_in == DW_SIGSEGV and tl.ready and !tl.busy) {
         const pc = tstate.pc(mc);
+        // A stale translation of a site patched since runs its island.
+        if (fsisl.islandOf(pc)) |to| {
+            tstate.setPc(mc, to);
+            return;
+        }
         if (fsmem.emulate(mc)) {
-            _ = fsisl.patch(pc, @import("root").g_tp_key, false);
+            _ = fsisl.patch(pc, @import("root").g_tp_key);
             return;
         }
     }
