@@ -181,17 +181,29 @@ fn inReach(pc: u64, a: u64) bool {
 }
 
 // write puts code over the instruction it replaces at pc, its first byte an
-// int3 until the rest is in place.
+// int3 until the rest is in place. It writes through a writable alias of the
+// page(s), as wx patches traps: the guest's mapping keeps its protection, so
+// the write cannot fault inside the handler or undo a guest mprotect racing it.
 fn write(pc: u64, code: []const u8) bool {
+    if (mem.protAt(pc) == null) return false;
     const lo = pc & ~(PAGE - 1);
-    const hi = (pc + code.len + PAGE - 1) & ~(PAGE - 1);
-    const prot: c_int = @intCast(mem.protAt(pc) orelse return false);
-    if (mprotect(@ptrFromInt(lo), hi - lo, prot | 2) != 0) return false;
-    const d: [*]u8 = @ptrFromInt(pc);
-    @atomicStore(u8, &d[0], 0xcc, .release);
-    @memcpy(d[1..code.len], code[1..]);
-    @atomicStore(u8, &d[0], code[0], .release);
-    _ = mprotect(@ptrFromInt(lo), hi - lo, prot);
+    const task = mach_task_self();
+    const a = wx.alias(lo) orelse return false;
+    defer _ = mach_vm_deallocate(task, a, PAGE);
+    var b: u64 = 0;
+    if (pc + code.len > lo + PAGE) b = wx.alias(lo + PAGE) orelse return false;
+    defer if (b != 0) {
+        _ = mach_vm_deallocate(task, b, PAGE);
+    };
+    const at = struct {
+        fn f(x: u64, y: u64, base: u64, i: u64) *u8 {
+            const off = i - base;
+            return @ptrFromInt(if (off < PAGE) x + off else y + off - PAGE);
+        }
+    }.f;
+    @atomicStore(u8, at(a, b, lo, pc), 0xcc, .release);
+    for (code[1..], 1..) |c, i| at(a, b, lo, pc + i).* = c;
+    @atomicStore(u8, at(a, b, lo, pc), code[0], .release);
     return true;
 }
 

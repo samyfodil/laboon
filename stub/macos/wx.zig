@@ -407,7 +407,7 @@ fn dropTraps(lo: u64, hi: u64) void {
 
 // alias maps page a second time, writable, so the stub can patch it while it
 // stays frozen for every other thread. The caller deallocates it.
-fn alias(page: u64) ?u64 {
+pub fn alias(page: u64) ?u64 {
     const task = mach_task_self();
     var tmp: u64 = 0;
     var cur: c_int = 0;
