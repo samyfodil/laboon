@@ -186,10 +186,18 @@ func startStub(job windows.Handle, handles []windows.Handle, extra ...uint64) (*
 		return nil, err
 	}
 	flags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_SUSPENDED | windows.DETACHED_PROCESS)
-	if err := windows.CreateProcess(nil, cmdp, nil, nil, true, flags, nil, nil, &si.StartupInfo, &pi); err != nil {
-		return nil, fmt.Errorf("start stub: %w", err)
+	var s *stubProc
+	for try := 0; ; try++ {
+		if err := windows.CreateProcess(nil, cmdp, nil, nil, true, flags, nil, nil, &si.StartupInfo, &pi); err != nil {
+			return nil, fmt.Errorf("start stub: %w", err)
+		}
+		s = &stubProc{proc: pi.Process, thread: pi.Thread}
+		if try == 7 || s.clearOfGuest() {
+			break
+		}
+		windows.TerminateProcess(pi.Process, 1)
+		s.close()
 	}
-	s := &stubProc{proc: pi.Process, thread: pi.Thread}
 	if err := windows.AssignProcessToJobObject(job, pi.Process); err != nil {
 		windows.TerminateProcess(pi.Process, 1)
 		s.close()
@@ -200,6 +208,30 @@ func startStub(job windows.Handle, handles []windows.Handle, extra ...uint64) (*
 		return nil, err
 	}
 	return s, nil
+}
+
+// clearOfGuest reports whether the host's first allocations in the stub, its
+// process and first thread's blocks and stack, are clear of where an
+// unrandomized guest's layout goes: the brk area, the top of the address space
+// and the legacy mmap base. Windows puts them anywhere in the low terabyte,
+// which holds an arm64 guest's whole 39-bit space, and grows later threads up
+// from there; a stub that is not clear is started again, so the layout is the
+// same at each execve.
+func (s *stubProc) clearOfGuest() bool {
+	const lowTB, grow = 1 << 40, 64 << 20
+	task, etDyn := winTask()
+	spots := [][2]uint64{
+		{etDyn, etDyn + brkGap + brkMax},
+		{task - 2<<30, task},
+		{task / unmappedDiv, task/unmappedDiv + mmapAreaRoom},
+	}
+	for _, sp := range spots {
+		lo := (sp[0] - grow) &^ (allocGran - 1)
+		if sp[1] <= lowTB && s.freeAt(lo, sp[1]-lo) < sp[1]-lo {
+			return false
+		}
+	}
+	return true
 }
 
 // newJob makes a run's job: closing it ends every stub in it, it grants no

@@ -894,10 +894,12 @@ func (g *wguest) mapImage(img *wimage, brk bool) error {
 		g.brkEnd = g.brkAt + brkMax
 		_, err := g.sp.reserve(g.brkAt, brkMax)
 		if err != nil {
-			// The randomized place is taken: the area goes right past the
-			// image, as unrandomized, and as on Linux the break stops short of
-			// whatever the host has above it.
-			g.brkAt = img.hi + brkGap
+			// The host has something at the place drawn: the area goes to the
+			// nearest free span above it, and as on Linux the break stops
+			// short of whatever the host has above that.
+			if at := g.sp.freeAbove(g.brkAt, brkMax); at != 0 {
+				g.brkAt = at
+			}
 			g.brkEnd = g.brkAt + g.sp.freeAt(g.brkAt, brkMax)
 			if g.brkEnd > g.brkAt {
 				if _, err := g.sp.reserve(g.brkAt, g.brkEnd-g.brkAt); err != nil {
