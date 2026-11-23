@@ -71,6 +71,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	if cfg.Env == nil {
 		cfg.Env = []string{} // a nil env is empty, never the supervisor's own
 	}
+	cfg.Trace = syncTrace(cfg.Trace)
 	r := &procRun{cfg: cfg, cache: cfg.Cache}
 	if r.cache == nil {
 		r.cache = defaultCache()
@@ -978,6 +979,36 @@ func (g *wguest) syscall(dg *dguest, nr uint64, a [6]uint64) int64 {
 		isar0, isar1, isar2 := isarFromHwcap(hwcap, hwcap2)
 		dg.ch.page.args[0], dg.ch.page.args[1], dg.ch.page.args[2] = isar0, isar1, isar2
 		return 0
+	case wYield, wSetTid, wGtod, wTime, wGetrandom:
+		if dg.cfg.Trace == nil {
+			return g.direct(dg, nr, a)
+		}
+		gnr, ga, ok := toGeneric(nr, a)
+		if !ok {
+			gnr = 0x4c43f000 + nr // time(2), x86-64's own
+		}
+		return dg.serveTraced(func(dg *dguest, _ [6]uint64) int64 { return g.direct(dg, nr, a) }, gnr, ga)
+	}
+	gnr, ga, ok := toGeneric(nr, a)
+	if !ok {
+		return sErr(lxENOSYS)
+	}
+	h, ok := handler(gnr)
+	if !ok {
+		dg.traceNosys(gnr, ga)
+		return sErr(lxENOSYS)
+	}
+	dg.moveRseq()
+	if dg.cfg.Trace != nil {
+		return fromGeneric(nr, a, dg.serveTraced(h, gnr, ga))
+	}
+	return fromGeneric(nr, a, h(dg, ga))
+}
+
+// direct serves the calls the Windows supervisor answers without the shared
+// handlers.
+func (g *wguest) direct(dg *dguest, nr uint64, a [6]uint64) int64 {
+	switch nr {
 	case wYield:
 		return 0
 	case wSetTid:
@@ -1009,14 +1040,5 @@ func (g *wguest) syscall(dg *dguest, nr uint64, a [6]uint64) int64 {
 		}
 		return int64(len(b))
 	}
-	gnr, ga, ok := toGeneric(nr, a)
-	if !ok {
-		return sErr(lxENOSYS)
-	}
-	h, ok := handler(gnr)
-	if !ok {
-		return sErr(lxENOSYS)
-	}
-	dg.moveRseq()
-	return fromGeneric(nr, a, h(dg, ga))
+	return sErr(lxENOSYS)
 }

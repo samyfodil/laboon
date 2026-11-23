@@ -53,6 +53,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	if cfg.Cache == nil {
 		cfg.Cache = defaultCache()
 	}
+	cfg.Trace = syncTrace(cfg.Trace)
 	entryOff, err := stubEntry()
 	if err != nil {
 		return 0, err
@@ -468,6 +469,7 @@ func serveGuest(dg *dguest) (int, error) {
 			pg.ret = uint64(dg.sigCall(nr, a))
 			ch.reply(repResult)
 		case generic && (gnr == lxClone || gnr == lxClone3):
+			dg.traceEntry(gnr, ga)
 			var r cloneReq
 			var e lxErrno
 			if gnr == lxClone {
@@ -483,6 +485,7 @@ func serveGuest(dg *dguest) (int, error) {
 			}
 			dg.clone(r, dg.cfg) // replies (or the stub returns for the parent)
 		case generic && (gnr == lxExecve || gnr == lxExecveat):
+			dg.traceEntry(gnr, ga)
 			var ok bool
 			var err error
 			if gnr == lxExecve {
@@ -505,6 +508,7 @@ func serveGuest(dg *dguest) (int, error) {
 			// answered above with repResult and never reaches here.
 			ch.reply(repSigreturn)
 		case generic && gnr == lxExit:
+			dg.traceEntry(gnr, ga)
 			code := int(ga[0] & 0xff)
 			dg.ptraceEvent(ptraceEventExit, uint64(code<<8))
 			dg.dfs.mu.Lock()
@@ -542,6 +546,7 @@ func serveGuest(dg *dguest) (int, error) {
 			}
 			return code, nil
 		case generic && gnr == lxExitGroup:
+			dg.traceEntry(gnr, ga)
 			code := int(ga[0] & 0xff)
 			dg.ptraceEvent(ptraceEventExit, uint64(code<<8))
 			if dg.sharedStub() {
@@ -556,15 +561,17 @@ func serveGuest(dg *dguest) (int, error) {
 		default:
 			var r int64
 			if h, ok := handler(gnr); ok && generic {
-				r = fromGeneric(nr, a, h(dg, ga))
+				if dg.cfg.Trace != nil {
+					r = fromGeneric(nr, a, dg.serveTraced(h, gnr, ga))
+				} else {
+					r = fromGeneric(nr, a, h(dg, ga))
+				}
 			} else {
+				dg.traceNosys(gnr, ga)
 				r = sErr(lxENOSYS)
 			}
 			if r == sErr(lxEPIPE) && epipeRaises(gnr, ga) {
 				dg.raiseSelf(13) // SIGPIPE
-			}
-			if dg.cfg.Trace != nil {
-				fmt.Fprintf(dg.cfg.Trace, "[%d] %d(%#x, %#x, %#x, %#x, %#x, %#x) = %d\n", dg.pid, nr, a[0], a[1], a[2], a[3], a[4], a[5], r)
 			}
 			r = dg.outResult(r)
 			pg.ret = uint64(r)

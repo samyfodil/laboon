@@ -156,6 +156,7 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	if cfg.Cache == nil {
 		cfg.Cache = defaultCache()
 	}
+	cfg.Trace = syncTrace(cfg.Trace)
 	if cfg.Env == nil {
 		cfg.Env = []string{} // a nil env is empty, never the supervisor's own
 	}
@@ -518,9 +519,6 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 		if err := ch.wait(); err != nil {
 			return err
 		}
-		if cfg.Trace != nil {
-			fmt.Fprintf(cfg.Trace, "[pid %d]   -> ret=%#x\n", g.pid, ch.page.ret)
-		}
 		if int64(ch.page.ret) == -int64(unix.EINTR) {
 			ch.page.ret = ^uint64(-restartSys - 1) // ERESTARTSYS: a signal's kick: the stub restarts or delivers
 		} else {
@@ -560,9 +558,6 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 		nr := ch.page.nr
 		a := ch.page.args
 		g.noteOut(ch.page.ret)
-		if cfg.Trace != nil {
-			fmt.Fprintf(cfg.Trace, "[pid %d] nr=%d args=%#x %#x %#x\n", g.pid, nr, a[0], a[1], a[2])
-		}
 		// ptrace syscall-entry stop: a traced thread blocks here until the
 		// tracer resumes it, which may edit its registers.
 		if !g.ptraceEnter(nr, a) {
@@ -587,6 +582,7 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 		gnr, ga, generic := g.toGeneric(nr, a)
 		switch gnr {
 		case lxExit:
+			g.traceEntry(gnr, ga)
 			code := int(int32(a[0]))
 			if g.isThread {
 				// The stub already ended the thread (cleared and woke its tid
@@ -599,9 +595,6 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 			}
 			if g.sharedStub() {
 				return code, errNeverRan // the stub could not start its thread
-			}
-			if cfg.Trace != nil {
-				fmt.Fprintf(cfg.Trace, "[pid %d] EXIT code=%d\n", g.pid, code)
 			}
 			g.beginExit(code)
 			ch.page.nr = dwExit
@@ -621,10 +614,8 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 			return code, nil
 
 		case lxExitGroup:
+			g.traceEntry(gnr, ga)
 			code := int(int32(a[0]))
-			if cfg.Trace != nil {
-				fmt.Fprintf(cfg.Trace, "[pid %d] EXIT_GROUP code=%d\n", g.pid, code)
-			}
 			g.ptraceEvent(ptraceEventExit, uint64(code<<8))
 			g.beginExit(code)
 			if !g.isThread && g.sharedStub() {
@@ -639,49 +630,73 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 			// pipe or file) takes the in-stub fast path; everything else the
 			// supervisor performs on the guest's open file.
 			if sfd := g.stubFd(int64(a[0])); sfd >= 0 {
+				call := g.traceStart(gnr, ga)
 				ch.page.nr = dwWrite
 				ch.page.args[0] = uint64(sfd)
 				if err := hostThen(); err != nil {
 					return 0, err
 				}
+				g.traceEnd(call, int64(ch.page.ret))
 			} else {
-				ch.page.ret = uint64(g.writeFile(int64(a[0]), a[1], int64(a[2])))
+				if cfg.Trace != nil {
+					ch.page.ret = uint64(g.serveTraced(func(g *dguest, a [6]uint64) int64 { return g.writeFile(int64(a[0]), a[1], int64(a[2])) }, gnr, a))
+				} else {
+					ch.page.ret = uint64(g.writeFile(int64(a[0]), a[1], int64(a[2])))
+				}
 				ch.reply(repResult)
 			}
 
 		case lxRead:
 			if sfd := g.stubFd(int64(a[0])); sfd >= 0 {
+				call := g.traceStart(gnr, ga)
 				ch.page.nr = dwRead
 				ch.page.args[0] = uint64(sfd)
 				if err := hostThen(); err != nil {
 					return 0, err
 				}
+				g.traceEnd(call, int64(ch.page.ret))
 			} else {
-				ch.page.ret = uint64(g.read(int64(a[0]), a[1], int64(a[2])))
+				if cfg.Trace != nil {
+					ch.page.ret = uint64(g.serveTraced(func(g *dguest, a [6]uint64) int64 { return g.read(int64(a[0]), a[1], int64(a[2])) }, gnr, a))
+				} else {
+					ch.page.ret = uint64(g.read(int64(a[0]), a[1], int64(a[2])))
+				}
 				ch.reply(repResult)
 			}
 
 		case lxWritev:
 			if sfd := g.stubFd(int64(a[0])); sfd >= 0 {
+				call := g.traceStart(gnr, ga)
 				ch.page.nr = dwWritev
 				ch.page.args[0] = uint64(sfd)
 				if err := hostThen(); err != nil {
 					return 0, err
 				}
+				g.traceEnd(call, int64(ch.page.ret))
 			} else {
-				ch.page.ret = uint64(g.writev(int64(a[0]), a[1], int64(a[2])))
+				if cfg.Trace != nil {
+					ch.page.ret = uint64(g.serveTraced(func(g *dguest, a [6]uint64) int64 { return g.writev(int64(a[0]), a[1], int64(a[2])) }, gnr, a))
+				} else {
+					ch.page.ret = uint64(g.writev(int64(a[0]), a[1], int64(a[2])))
+				}
 				ch.reply(repResult)
 			}
 
 		case lxReadv:
 			if sfd := g.stubFd(int64(a[0])); sfd >= 0 {
+				call := g.traceStart(gnr, ga)
 				ch.page.nr = dwReadv
 				ch.page.args[0] = uint64(sfd)
 				if err := hostThen(); err != nil {
 					return 0, err
 				}
+				g.traceEnd(call, int64(ch.page.ret))
 			} else {
-				ch.page.ret = uint64(g.readv(int64(a[0]), a[1], int64(a[2])))
+				if cfg.Trace != nil {
+					ch.page.ret = uint64(g.serveTraced(func(g *dguest, a [6]uint64) int64 { return g.readv(int64(a[0]), a[1], int64(a[2])) }, gnr, a))
+				} else {
+					ch.page.ret = uint64(g.readv(int64(a[0]), a[1], int64(a[2])))
+				}
 				ch.reply(repResult)
 			}
 
@@ -698,22 +713,20 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 				ch.reply(repResult)
 				break
 			}
+			call := g.traceStart(gnr, ga)
 			id := g.clone(r, cfg) // replies repClone / repFork (or an error)
-			if cfg.Trace != nil {
-				fmt.Fprintf(cfg.Trace, "[pid %d] clone(%#x) -> %d\n", g.pid, r.flags, id)
-			}
+			g.traceEnd(call, int64(id))
 
 		case lxExecve, lxExecveat:
+			g.traceEntry(gnr, ga)
 			var ok bool
 			if gnr == lxExecve {
 				ok = g.execve(lxAtFdcwd, ga[0], ga[1], ga[2], 0)
 			} else {
 				ok = g.execve(int64(int32(ga[0])), ga[1], ga[2], ga[3], int64(int32(ga[4])))
 			}
-			if cfg.Trace != nil {
-				fmt.Fprintf(cfg.Trace, "[pid %d] execve -> %v ret=%#x\n", g.pid, ok, ch.page.ret)
-			}
 			if !ok {
+				g.traceEnd(sysName(gnr), int64(ch.page.ret))
 				ch.reply(repResult) // failed: errno already in page.ret, guest continues
 			}
 			// On success the new program's first syscall is the next
@@ -759,17 +772,16 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 		default:
 			if h, ok := handler(gnr); ok && generic {
 				g.moveRseq()
-				ch.page.ret = uint64(g.fromGeneric(nr, a, h(g, ga)))
 				if cfg.Trace != nil {
-					fmt.Fprintf(cfg.Trace, "[pid %d]   -> ret=%#x\n", g.pid, ch.page.ret)
+					ch.page.ret = uint64(g.fromGeneric(nr, a, g.serveTraced(h, gnr, ga)))
+				} else {
+					ch.page.ret = uint64(g.fromGeneric(nr, a, h(g, ga)))
 				}
 				g.ptraceSyscallExit(int64(ch.page.ret))
 				ch.reply(repResult)
 				break
 			}
-			if cfg.Trace != nil {
-				fmt.Fprintf(cfg.Trace, "[pid %d] ENOSYS for linux syscall %d\n", g.pid, nr)
-			}
+			g.traceNosys(gnr, ga)
 			ch.page.ret = errno(lxENOSYS)
 			g.ptraceSyscallExit(int64(ch.page.ret))
 			ch.reply(repResult)

@@ -134,6 +134,7 @@ func serveGuest(dg *dguest) (int, error) {
 			ch.reply(repResult)
 		case generic && (gnr == lxClone || gnr == lxClone3):
 			_, ga, _ := toGeneric(nr, a)
+			dg.traceEntry(gnr, ga)
 			var r cloneReq
 			var e lxErrno
 			if gnr == lxClone {
@@ -150,6 +151,7 @@ func serveGuest(dg *dguest) (int, error) {
 			w.tracef("[lc] [%d] clone(%#x) = %d\n", dg.pid, r.flags, id)
 		case generic && (gnr == lxExecve || gnr == lxExecveat):
 			_, ga, _ := toGeneric(nr, a)
+			dg.traceEntry(gnr, ga)
 			var ok bool
 			var err error
 			if gnr == lxExecve {
@@ -165,7 +167,9 @@ func serveGuest(dg *dguest) (int, error) {
 			}
 		case nr == wExit || nr == wExitGroup:
 			code := int(a[0] & 0xff)
-			w.tracef("[lc] [%d] exit(%d)\n", dg.pid, code)
+			if _, ga, ok := toGeneric(nr, a); ok {
+				dg.traceEntry(gnr, ga)
+			}
 			dg.ptraceEvent(ptraceEventExit, uint64(code<<8))
 			dg.beginExit(code)
 			if !dg.isThread && dg.sharedStub() {
@@ -176,7 +180,6 @@ func serveGuest(dg *dguest) (int, error) {
 			return code, nil
 		default:
 			r := w.syscall(dg, nr, a)
-			w.tracef("[lc] [%d] %d(%#x, %#x, %#x) = %d\n", dg.pid, nr, a[0], a[1], a[2], r)
 			pg.ret = uint64(r)
 			if isRealSyscall(nr) {
 				dg.ptraceSyscallExit(r) // a stub's own request has no stops, as on entry
