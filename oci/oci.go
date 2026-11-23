@@ -147,6 +147,11 @@ func store(dir, refFile, ref string, img v1.Image, maxSize int64) (*Image, error
 			User:       cf.Config.User,
 		},
 	}
+	unlock, err := lockImage(dir, digest.Hex)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := saveLayout(dir, digest.Hex, img); err != nil {
 		return nil, err
 	}
@@ -157,55 +162,43 @@ func store(dir, refFile, ref string, img v1.Image, maxSize int64) (*Image, error
 		return nil, err
 	}
 	out.img = img
-	// The config is written before the rootfs moves in, so a rootfs without it
-	// is what a removal of the entry left: unpack it afresh. The rootfs is
-	// looked at first, so a store finishing beside this one is not taken for one.
-	if _, err := os.Stat(out.Root); err == nil {
-		if _, err := os.Stat(filepath.Join(dir, digest.Hex, "config.json")); err == nil {
+	// The rootfs is unpacked in place, under the image's lock, and the config
+	// written once it is whole: a rootfs without it is one an unpack or a
+	// removal left half done, and goes. A directory is never renamed, which
+	// Windows refuses while anything, an antivirus scan say, holds a file in it.
+	cfgFile := filepath.Join(dir, digest.Hex, "config.json")
+	if _, err := os.Stat(cfgFile); err == nil {
+		if _, err := os.Stat(out.Root); err == nil {
 			return out, remember(refFile, digest.Hex)
 		}
-		if err := os.RemoveAll(out.Root); err != nil {
-			return nil, err
-		}
-		if err := os.Remove(out.Root + hostfs.MetaSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := os.Remove(cfgFile); err != nil {
 			return nil, err
 		}
 	}
-
-	// Unpack beside the final location and rename, so a crash never
-	// leaves a half-written rootfs that looks complete.
-	if err := os.MkdirAll(filepath.Join(dir, digest.Hex), 0o700); err != nil {
+	if err := os.RemoveAll(out.Root); err != nil {
 		return nil, err
 	}
-	tmp, err := os.MkdirTemp(filepath.Join(dir, digest.Hex), ".unpack-*")
-	if err != nil {
+	if err := os.Remove(out.Root + hostfs.MetaSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	defer os.RemoveAll(tmp)
+	if err := os.MkdirAll(out.Root, 0o700); err != nil {
+		return nil, err
+	}
 	flat := mutate.Extract(img)
 	defer flat.Close()
 	if maxSize == 0 {
 		maxSize = 16 << 30
 	}
-	defer os.Remove(tmp + hostfs.MetaSuffix)
-	if err := Unpack(flat, tmp, maxSize); err != nil {
+	if err := Unpack(flat, out.Root, maxSize); err != nil {
+		os.RemoveAll(out.Root)
+		os.Remove(out.Root + hostfs.MetaSuffix)
 		return nil, fmt.Errorf("unpack %s: %w", ref, err)
 	}
 	cfg, err := json.Marshal(out.Config)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(dir, digest.Hex, "config.json"), cfg, 0o600); err != nil {
-		return nil, err
-	}
-	// A rootfs extracted for Windows keeps its POSIX metadata beside it; it
-	// moves first, so a rootfs never appears without it.
-	if _, err := os.Stat(tmp + hostfs.MetaSuffix); err == nil {
-		if err := os.Rename(tmp+hostfs.MetaSuffix, out.Root+hostfs.MetaSuffix); err != nil {
-			return nil, err
-		}
-	}
-	if err := os.Rename(tmp, out.Root); err != nil && !errors.Is(err, fs.ErrExist) {
+	if err := writeAtomic(cfgFile, cfg); err != nil {
 		return nil, err
 	}
 	return out, remember(refFile, digest.Hex)
@@ -238,6 +231,35 @@ func local(dir, refFile, ref string) (*Image, error) {
 	now := time.Now()
 	os.Chtimes(filepath.Join(dir, h), now, now) // mark used, for Sweep's least-recently-used order
 	return out, nil
+}
+
+// lockImage holds the lock that orders storing and removing the image hex.
+// Its lock file stays when the image goes: one removed while another process
+// waits on it would let a third take a lock of its own.
+func lockImage(dir, hex string) (unlock func(), err error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	return lockFile(filepath.Join(dir, hex+".lock"))
+}
+
+// writeAtomic writes p whole or not at all.
+func writeAtomic(p string, b []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(p), "."+filepath.Base(p)+"-*")
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(b)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), p)
+	}
+	if err != nil {
+		os.Remove(f.Name())
+	}
+	return err
 }
 
 func remember(refFile, hex string) error {

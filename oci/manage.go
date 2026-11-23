@@ -76,10 +76,29 @@ func Remove(ref string, opt Options) error {
 	if err := os.Remove(refFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if h := strings.TrimSpace(string(hex)); validHex(h) && !referenced(dir, h, "") {
-		return os.RemoveAll(filepath.Join(dir, h))
+	if h := strings.TrimSpace(string(hex)); validHex(h) {
+		_, err := removeImage(dir, h)
+		return err
 	}
 	return nil
+}
+
+// removeImage removes the unpacked image hex unless a ref names it, under its
+// lock, so neither a store in progress nor one finished meanwhile loses it.
+// Its config goes first: a rootfs without one is never taken for whole.
+func removeImage(dir, hex string) (bool, error) {
+	unlock, err := lockImage(dir, hex)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	if referenced(dir, hex, "") {
+		return false, nil
+	}
+	if err := os.Remove(filepath.Join(dir, hex, "config.json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	return true, os.RemoveAll(filepath.Join(dir, hex))
 }
 
 // Sweep bounds the image cache on a build node, which pulls accumulate on. It
@@ -123,7 +142,7 @@ func Sweep(opt Options, budget int64) (int64, error) {
 	var freed int64
 	remove := func(hex string, sz int64) {
 		removeRefs(dir, hex)
-		if os.RemoveAll(filepath.Join(dir, hex)) == nil {
+		if gone, err := removeImage(dir, hex); gone && err == nil {
 			freed += sz
 			total -= sz
 		}
