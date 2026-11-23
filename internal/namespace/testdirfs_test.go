@@ -131,7 +131,7 @@ func (n *testDirNode) Stat() (Attr, error) {
 		a.Nlink = nlink
 	}
 	if a.Kind == Symlink {
-		a.Target, _ = os.Readlink(n.fs.hp(n.p))
+		a.Target, _ = n.Readlink()
 	}
 	return a, nil
 }
@@ -156,7 +156,12 @@ func (n *testDirNode) SetAttr(u AttrUpdate) error {
 	}
 	return nil
 }
-func (n *testDirNode) Readlink() (string, error) { return os.Readlink(n.fs.hp(n.p)) }
+// Readlink is the link's target with slashes, as a guest path is: Windows
+// keeps a link made to "/x" as "\x".
+func (n *testDirNode) Readlink() (string, error) {
+	t, err := os.Readlink(n.fs.hp(n.p))
+	return filepath.ToSlash(t), err
+}
 func (n *testDirNode) Open(flags int) (File, error) {
 	of, err := os.OpenFile(n.fs.hp(n.p), flags, 0)
 	if err != nil {
