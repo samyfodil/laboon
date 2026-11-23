@@ -261,12 +261,47 @@ const CLONE_CHILD_SETTID: u64 = 0x1000000;
 // freshly queued signal. A thread in a syscall takes it as the syscall ends
 // (dispatchSyscall); one running guest code is stopped for its run loop to
 // deliver it (vmm.kickRunning).
+//
+// The handler only wakes the kicker thread, which stops the vcpus: the kick
+// may land on a thread inside a Hypervisor call, and hv_vcpus_exit taking that
+// call's lock again on the same thread aborts the process. The kick still
+// interrupts the thread it lands on, which cuts a sleep short (sleepTo).
+var kick_pipe: [2]c_int = .{ -1, -1 };
+
 fn sigKick(_: c_int) callconv(.C) void {
-    vmm.kickRunning();
+    const saved = __error().*; // the interrupted thread's errno
+    const b = [1]u8{1};
+    _ = write(kick_pipe[1], &b, 1); // a full pipe already has a wake queued
+    __error().* = saved;
 }
+
+fn kicker(_: ?*anyopaque) callconv(.C) ?*anyopaque {
+    var all: u32 = ~@as(u32, 0);
+    _ = pthread_sigmask(SIG_BLOCK, &all, null);
+    var buf: [64]u8 = undefined;
+    while (true) {
+        if (read(kick_pipe[0], &buf, buf.len) <= 0) return null;
+        vmm.kickRunning();
+    }
+}
+
 fn installSigKick() void {
+    if (pipe(&kick_pipe) != 0) _exit(124);
+    for (kick_pipe) |fd| _ = fcntl(fd, F_SETFD, FD_CLOEXEC); // not into a respawn or fork child
+    _ = fcntl(kick_pipe[1], F_SETFL, O_NONBLOCK);
+    var t: usize = 0;
+    if (pthread_create(&t, null, kicker, null) != 0) _exit(124);
     _ = signal(30, sigKick);
 }
+extern "c" fn pipe(fds: *[2]c_int) c_int;
+extern "c" fn __error() *c_int;
+extern "c" fn fcntl(fd: c_int, cmd: c_int, ...) c_int;
+extern "c" fn pthread_create(t: *usize, attr: ?*anyopaque, f: *const fn (?*anyopaque) callconv(.C) ?*anyopaque, arg: ?*anyopaque) c_int;
+const F_SETFD: c_int = 2;
+const FD_CLOEXEC: c_int = 1;
+const F_SETFL: c_int = 4;
+const O_NONBLOCK: c_int = 4;
+const SIG_BLOCK: c_int = 1;
 
 // unblockKick lets kicks (SIGUSR1) in: a fork child starts with them blocked
 // (forkSpawn), since one arriving before installSigKick would end it.
