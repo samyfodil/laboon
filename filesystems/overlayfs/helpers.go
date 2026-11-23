@@ -16,6 +16,16 @@ func present(L FileSystem, dn Node, name string) bool {
 	return err == nil
 }
 
+// probe is present, and the error of a lookup that could not tell (nil when it
+// could).
+func probe(L FileSystem, dn Node, name string) (bool, error) {
+	_, err := L.Lookup(dn, name)
+	if err == nil || DefinitelyNotExist(err) {
+		return err == nil, nil
+	}
+	return false, err
+}
+
 // layerNode resolves an overlay path within one layer, from its root.
 func layerNode(L FileSystem, p string) (Node, bool) {
 	n := L.Root()

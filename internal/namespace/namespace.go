@@ -35,13 +35,17 @@ type Namespace struct {
 type resolveKey struct {
 	p          string
 	followLast bool
+	walk       bool // Walk.Path's answer for p, a path that does not exist
 }
 
-// resolveEnt caches a successful resolution. Only successes are cached, so there
-// is no error field. loc.Node is a private pristine node; a hit returns a clone.
+// resolveEnt caches a resolution: a location (loc.Node is a private pristine
+// node; a hit returns a clone), or a definite miss (err), or for a walk key
+// the path a missing p ends at.
 type resolveEnt struct {
-	gen uint64
-	loc Loc
+	gen  uint64
+	loc  Loc
+	err  error
+	path string
 }
 
 // resolveCacheMax bounds the cache; at the limit it is dropped whole (the next
@@ -199,33 +203,61 @@ func (ns *Namespace) resolve(p string, followLast bool, hops int) (Loc, error) {
 	key := resolveKey{p: p, followLast: followLast}
 	ns.cacheMu.Lock()
 	if e, ok := ns.cache[key]; ok && e.gen == g {
+		ns.cacheMu.Unlock()
+		if e.err != nil {
+			return Loc{}, e.err
+		}
 		loc := e.loc
 		loc.Node = cloneNode(loc.Node) // a fresh node per hit: copy-up mutates the node in place, so hits must not share one
-		ns.cacheMu.Unlock()
 		return loc, nil
 	}
 	ns.cacheMu.Unlock()
 	var crossed bool
 	loc, err := ns.walk(p, followLast, 0, &crossed, "", nil)
-	// Cache only a success that stayed within the versioned overlay root. Skip
+	// Cache only a result that stayed within the versioned overlay root. Skip
 	// it if the walk crossed a mount (a dynamic fs like /proc is not covered by
 	// the overlay's generation, and a /proc/self/fd link can resolve back into
-	// the overlay), or if a mutation bumped the generation during the walk.
-	// Errors are never cached: a lower-layer lstat failure is masked as
-	// ErrNotExist, so a transient error must not stick as a permanent miss.
-	if err == nil && !crossed && ns.genOf() == g {
+	// the overlay), or if a mutation bumped the generation during the walk. Of
+	// the errors only a definite miss is kept: a lookup that failed for another
+	// reason reads as a miss too, and must not stick as one.
+	if crossed || ns.genOf() != g {
+		return loc, err
+	}
+	switch {
+	case err == nil:
 		if cn := cloneNode(loc.Node); cn != nil {
 			stored := loc
 			stored.Node = cn
-			ns.cacheMu.Lock()
-			if ns.cache == nil || len(ns.cache) >= resolveCacheMax {
-				ns.cache = make(map[resolveKey]resolveEnt)
-			}
-			ns.cache[key] = resolveEnt{gen: g, loc: stored}
-			ns.cacheMu.Unlock()
+			ns.store(key, resolveEnt{gen: g, loc: stored})
 		}
+	case DefinitelyNotExist(err):
+		ns.store(key, resolveEnt{gen: g, err: err})
 	}
 	return loc, err
+}
+
+func (ns *Namespace) store(key resolveKey, e resolveEnt) {
+	ns.cacheMu.Lock()
+	if ns.cache == nil || len(ns.cache) >= resolveCacheMax {
+		ns.cache = make(map[resolveKey]resolveEnt)
+	}
+	ns.cache[key] = e
+	ns.cacheMu.Unlock()
+}
+
+// walkMiss is the cached Walk.Path answer for p, a path that did not exist.
+func (ns *Namespace) walkMiss(p string, followLast bool) (string, error, bool) {
+	if ns.genOf == nil {
+		return "", nil, false
+	}
+	g := ns.genOf()
+	ns.cacheMu.Lock()
+	e, ok := ns.cache[resolveKey{p: p, followLast: followLast, walk: true}]
+	ns.cacheMu.Unlock()
+	if !ok || e.gen != g {
+		return "", nil, false
+	}
+	return e.path, e.err, true
 }
 
 // A Walk is how a process resolves a path: under its root, from a starting
@@ -265,26 +297,50 @@ func (w Walk) Path(ns *Namespace, p string) (string, error) {
 	if w.InRoot || w.Beneath {
 		o.root, o.scoped, o.beneath = start, true, w.Beneath
 	}
-	p = strings.TrimRight(p, "/")
+	if t := strings.TrimRight(p, "/"); t != "" || !path.IsAbs(p) {
+		p = t
+	} else {
+		p = "/"
+	}
 	if path.IsAbs(p) {
 		if o.beneath {
 			return "", &fs.PathError{Op: "resolve", Path: p, Err: ErrCrossDevice}
 		}
 		start = o.root
 	}
-	if !o.scoped && o.root == "" && !o.noSymlinks && !o.noMagic && path.IsAbs(p) {
-		// The common case, an unchrooted absolute path: the cached Resolve
-		// answers whenever the path exists.
-		if loc, err := ns.resolve(p, w.FollowLast, 0); err == nil {
+	plain := !o.scoped && o.root == "" && !o.noSymlinks && !o.noMagic && path.IsAbs(p)
+	// keep is whether the walk's answer may be cached: an unchrooted absolute
+	// path Resolve found definitely missing, so the walk ends at the same
+	// missing name (a doubtful miss reads as missing to the walk too).
+	keep := false
+	var g uint64
+	if plain {
+		// The common case: the cached Resolve answers whenever the path
+		// exists, and the walk cache when it does not.
+		if ns.genOf != nil {
+			g = ns.genOf()
+		}
+		loc, err := ns.resolve(p, w.FollowLast, 0)
+		if err == nil {
 			return absPath(loc.Path), nil
 		}
+		if gp, err, ok := ns.walkMiss(p, w.FollowLast); ok {
+			return gp, err
+		}
+		keep = ns.genOf != nil && DefinitelyNotExist(err)
 	}
 	var crossed bool
 	loc, err := ns.walk(start+"/"+p, w.FollowLast, 0, &crossed, "", o)
+	if err == nil {
+		loc.Path = absPath(loc.Path)
+	}
+	if keep && !crossed && ns.genOf() == g && (err == nil || DefinitelyNotExist(err)) {
+		ns.store(resolveKey{p: p, followLast: w.FollowLast, walk: true}, resolveEnt{gen: g, path: loc.Path, err: err})
+	}
 	if err != nil {
 		return "", err
 	}
-	return absPath(loc.Path), nil
+	return loc.Path, nil
 }
 
 func absPath(p string) string {

@@ -3,6 +3,7 @@
 package hostfs
 
 import (
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -99,7 +100,10 @@ func (f *HostDirFS) node(p string) (core.Node, error) {
 	}
 	fi, err := lstat(f.hp(p))
 	if err != nil {
-		return nil, &fs.PathError{Op: "lookup", Path: p, Err: fs.ErrNotExist}
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return nil, core.NotExist("lookup", p)
+		}
+		return nil, core.MaybeNotExist("lookup", p, err)
 	}
 	dev, ino := HostDevIno(fi)
 	return &HostNode{fs: f, p: p, kind: HostKind(fi), id: core.NodeID{Dev: dev, Ino: ino}}, nil

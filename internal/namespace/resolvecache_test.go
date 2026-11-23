@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	. "github.com/samyfodil/laboon/core"
@@ -45,8 +46,8 @@ func TestResolveCacheInvalidation(t *testing.T) {
 		t.Fatalf("/a/new should be absent: %v", err)
 	}
 
-	// Create /a/new via the overlay: it must now resolve (negatives aren't
-	// cached, and Create bumps the generation regardless).
+	// Create /a/new via the overlay: it must now resolve (the cached miss is
+	// stale once Create bumps the generation).
 	if _, err := ofs.Create(adir.Node, "new", CreateSpec{Kind: Reg, Mode: 0o644}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -134,4 +135,85 @@ func TestResolveCacheConcurrent(t *testing.T) {
 		}()
 	}
 	<-done
+}
+
+// countFS counts its root's lookups and makes the lookup of the name doubt a
+// miss that may not hold.
+type countFS struct {
+	FileSystem
+	g       Generational
+	lookups atomic.Int64
+	doubt   atomic.Pointer[string]
+}
+
+func (c *countFS) Gen() uint64 { return c.g.Gen() }
+func (c *countFS) Touch()      { c.g.Touch() }
+
+func (c *countFS) Lookup(dir Node, name string) (Node, error) {
+	c.lookups.Add(1)
+	if d := c.doubt.Load(); d != nil && *d == name {
+		return nil, MaybeNotExist("lookup", name, errors.New("host refused"))
+	}
+	return c.FileSystem.Lookup(dir, name)
+}
+
+// TestResolveCacheMiss checks a definite miss is cached, for Resolve and for
+// Walk.Path, until the overlay changes, and a doubtful one never is.
+func TestResolveCacheMiss(t *testing.T) {
+	lowerDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(lowerDir, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ofs := overlayfs.OverlayFS(newTestDirFS(lowerDir), newTestDirFS(t.TempDir()))
+	c := &countFS{FileSystem: ofs, g: ofs.(Generational)}
+	ns := NewNamespace(c)
+	walk := Walk{FollowLast: true}
+
+	for i := 0; i < 3; i++ {
+		if _, err := ns.Resolve("/a/nope", true); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("/a/nope: %v", err)
+		}
+		if gp, err := walk.Path(ns, "/a/nope"); err != nil || gp != "/a/nope" {
+			t.Fatalf("walk /a/nope = %q, %v", gp, err)
+		}
+		if _, err := walk.Path(ns, "/no/such"); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("walk /no/such: %v", err)
+		}
+		if i == 0 {
+			c.lookups.Store(0)
+		}
+	}
+	if n := c.lookups.Load(); n != 0 {
+		t.Errorf("cached misses still made %d lookups", n)
+	}
+
+	adir, err := ns.Resolve("/a", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ofs.Create(adir.Node, "nope", CreateSpec{Kind: Reg, Mode: 0o644}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ns.Resolve("/a/nope", true); err != nil {
+		t.Fatalf("created /a/nope still missing: %v", err)
+	}
+
+	name := "maybe"
+	c.doubt.Store(&name)
+	if _, err := ns.Resolve("/maybe", true); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("doubtful /maybe: %v", err)
+	}
+	if _, err := walk.Path(ns, "/maybe/x"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("doubtful walk /maybe/x: %v", err)
+	}
+	c.doubt.Store(nil)
+	if err := os.Mkdir(filepath.Join(lowerDir, "maybe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ns.Resolve("/maybe", true); err != nil {
+		t.Errorf("a doubtful miss was cached: %v", err)
+	}
+	if gp, err := walk.Path(ns, "/maybe/x"); err != nil || gp != "/maybe/x" {
+		t.Errorf("a doubtful walk was cached: %q, %v", gp, err)
+	}
 }

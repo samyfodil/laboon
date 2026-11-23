@@ -79,6 +79,7 @@ func (f *overlay) Lookup(dir Node, name string) (Node, error) {
 	d := dir.(*overlayNode)
 	nodes := make([]Node, len(f.layers))
 	owner := -1
+	var doubt error // a layer's lookup that could not tell whether the name is there
 	for i := len(f.layers) - 1; i >= 0; i-- {
 		dn := d.nodes[i]
 		if dn == nil {
@@ -87,18 +88,34 @@ func (f *overlay) Lookup(dir Node, name string) (Node, error) {
 		L := f.layers[i]
 		// The whiteout/opaque probes only matter to stop the descent to lower
 		// layers, so they are pointless on the bottom layer.
-		whited := i > 0 && present(L, dn, WhiteoutPrefix+name)
+		var whited, opaque bool
+		var err error
+		if i > 0 {
+			if whited, err = probe(L, dn, WhiteoutPrefix+name); err != nil {
+				doubt = err
+			}
+		}
 		if c, err := L.Lookup(dn, name); err == nil {
 			nodes[i] = c
 			if owner < 0 {
 				owner = i
 			}
+		} else if !DefinitelyNotExist(err) {
+			doubt = err
 		}
-		if whited || (i > 0 && present(L, dn, OpaqueMarker)) {
+		if !whited && i > 0 {
+			if opaque, err = probe(L, dn, OpaqueMarker); err != nil {
+				doubt = err
+			}
+		}
+		if whited || opaque {
 			break
 		}
 	}
 	if owner < 0 {
+		if doubt != nil {
+			return nil, MaybeNotExist("lookup", path.Join(d.p, name), doubt)
+		}
 		return nil, NotExist("lookup", path.Join(d.p, name))
 	}
 	return &overlayNode{fs: f, p: path.Join(d.p, name), nodes: nodes, owner: owner, kind: nodes[owner].Kind()}, nil
