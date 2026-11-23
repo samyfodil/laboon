@@ -11,9 +11,9 @@ import (
 	"testing"
 )
 
-// protBTI matches a traced mmap or mprotect (arm64 222, 226) whose prot is
-// PROT_READ|PROT_EXEC|PROT_BTI; the trace prints all six argument registers.
-var protBTI = regexp.MustCompile(`\] 22[26]\(0x[0-9a-f]+, 0x[0-9a-f]+, 0x15, `)
+// protBTI matches a traced mmap or mprotect whose prot is
+// PROT_READ|PROT_EXEC|PROT_BTI.
+var protBTI = regexp.MustCompile(`\] (mmap|mprotect)\(0x[0-9a-f]+, (0x[0-9a-f]+|\d+), 0x15[,)]`)
 
 // glibc maps each BTI library's code a second time with PROT_BTI added. The
 // code is already rewritten and unchanged, so it must not be rewritten again
