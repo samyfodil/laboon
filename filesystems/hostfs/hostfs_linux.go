@@ -40,7 +40,7 @@ func NewHostFS(rootAbs, upperAbs, workAbs string) HostFS {
 func NewRawHostFS(root string) HostFS { return &LinuxFS{root} }
 
 // HostPath is the host path of resolved guest path gp under root.
-func HostPath(root, gp string) string { return filepath.Join(root, filepath.FromSlash(gp)) }
+func HostPath(root, gp string) string { return joinClean(root, gp) }
 
 func (fs *LinuxFS) resolve() uint64 {
 	if fs.rootAbs == "" {

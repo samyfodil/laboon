@@ -73,21 +73,28 @@ func withSep(dir string) string {
 	return dir + string(filepath.Separator)
 }
 
-// inLower reports whether p is in the read-only lower layer. A root of /
-// holds the upper layer and the supervisor's own directories too.
+// inLower reports whether p is in the read-only lower layer. A root of / (or
+// of the temp directory) holds the upper layer and the supervisor's own files
+// too; a root below the temp directory, as a test's is, holds none of them.
 func (c *CachedFS) inLower(p string) bool {
-	if !strings.HasPrefix(p, c.lower) || c.inUpper(p) {
+	if !under(p, c.lower) || c.inUpper(p) {
 		return false
 	}
 	for _, d := range c.own {
-		if strings.HasPrefix(p, d) {
+		if strings.HasPrefix(p, d) && !(len(c.lower) > len(d) && strings.HasPrefix(c.lower, d)) {
 			return false
 		}
 	}
 	return true
 }
 
-func (c *CachedFS) inUpper(p string) bool { return c.upper != "" && strings.HasPrefix(p, c.upper) }
+func (c *CachedFS) inUpper(p string) bool { return c.upper != "" && under(p, c.upper) }
+
+// under reports whether p is the directory dir (given with its trailing
+// separator) or a path below it.
+func under(p, dir string) bool {
+	return strings.HasPrefix(p, dir) || len(p) == len(dir)-1 && strings.HasPrefix(dir, p)
+}
 
 // missing reports whether upper path p, or a directory above it, was found
 // missing since the last change to the upper layer.
