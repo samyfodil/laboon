@@ -97,6 +97,25 @@ func TestUnmapOwnStackSparesRemaps(t *testing.T) {
 	}
 }
 
+// A stack its thread unmapped is still the host's until the thread is gone,
+// so no mapping is placed there meanwhile.
+func TestPlaceAvoidsOwnStack(t *testing.T) {
+	m := newMemProc(1)
+	m.lay = mmapLayout{base: 0x7f0000000000, legacyBase: 0x10000000, norand: true}
+	at, ok := m.place(0, 0x3000, 0, true)
+	if !ok {
+		t.Fatal("no room")
+	}
+	m.ownStack[2] = run{lo: at - 0x200000, hi: at + 0x3000}
+	got, ok := m.place(0, 0x3000, 0, true)
+	if !ok || got+0x3000 > at-0x200000 && got < at+0x3000 {
+		t.Fatalf("placed at %#x, inside the exiting stack [%#x, %#x)", got, at-0x200000, at+0x3000)
+	}
+	if h, ok := m.place(at, 0x3000, 0, true); !ok || h == at {
+		t.Fatalf("a hint into the exiting stack was taken: %#x", h)
+	}
+}
+
 // The set of guest mappings merges, splits and counts as mappings come and go.
 func TestVmaSet(t *testing.T) {
 	var s vmaSet

@@ -151,13 +151,17 @@ func (s *vmaSet) addForeign(lo, hi uint64) {
 }
 
 // obstacles is what a mapping may not overlap besides the guest's own: the
-// stub's window and reserved ranges, the foreign ones and the stack's guard
-// gap, sorted. m.mu held.
+// stub's window and reserved ranges, the foreign ones, the stacks exiting
+// threads unmapped but still run on, and the stack's guard gap, sorted.
+// m.mu held.
 func (m *memProc) obstacles() []run {
-	o := make([]run, 0, len(m.vm.foreign)+len(m.reserved)+2)
+	o := make([]run, 0, len(m.vm.foreign)+len(m.reserved)+len(m.ownStack)+2)
 	o = append(o, run{lo: stubLo, hi: stubHi})
 	o = append(o, m.vm.foreign...)
 	o = append(o, m.reserved...)
+	for _, r := range m.ownStack {
+		o = append(o, run{lo: r.lo, hi: alignUp(r.hi)})
+	}
 	if m.stackLo != 0 {
 		o = append(o, run{lo: m.stackLo - min(m.stackLo, stackGuardGap()), hi: m.stackLo})
 	}
