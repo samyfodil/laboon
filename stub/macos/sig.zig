@@ -1314,7 +1314,11 @@ fn x64SaveCtx(rax: u64, rip: u64) void {
     tl.switch_ctx.rip = rip;
 }
 
+// A sigreturn or sigsuspend delivers here from inside the serve, kicks still
+// open: they close before doSwitch clears busy, or a kick in between would
+// take the stub's own frame for the guest's.
 fn x64Deliver() void {
+    closeKicks();
     doSwitch(g_sigmc);
     g_sig_delivered = true;
 }
