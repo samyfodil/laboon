@@ -28,11 +28,12 @@ type epoll struct {
 }
 
 // pendEv is a ready event: the guest fd, the description it was registered
-// with, and its events.
+// with, its events and the registration's data.
 type pendEv struct {
-	gfd int
-	d   *dfile
-	ev  uint32
+	gfd  int
+	d    *dfile
+	ev   uint32
+	data uint64
 }
 
 // kevBufs holds kevent result buffers for epollWait, which would otherwise
@@ -265,21 +266,21 @@ func (g *dguest) epollDeliver(ep *epoll, evAddr uint64, evs []pendEv, fit int) i
 		ep.mu.Unlock()
 		return sErr(lxEFAULT)
 	}
-	if err := g.writeMem(evAddr, ep.encode(evs)); err != nil {
+	if err := g.writeMem(evAddr, encodeEvents(evs)); err != nil {
 		return sErr(lxEFAULT)
 	}
 	return int64(len(evs))
 }
 
-// encode lays out evs as struct epoll_event, with each one's data.
-func (ep *epoll) encode(evs []pendEv) []byte {
-	ep.mu.Lock()
-	defer ep.mu.Unlock()
+// encodeEvents lays out evs as struct epoll_event. Each carries the data its
+// registration had when it was taken: one deleted since still reports, as on
+// Linux, where the delete waits for the wait's copy-out.
+func encodeEvents(evs []pendEv) []byte {
 	out := make([]byte, 0, len(evs)*epollEventSize)
 	for _, p := range evs {
 		var b [epollEventSize]byte
 		put32(b[:], p.ev)
-		put64(b[epollEventSize-8:], ep.interest[p.gfd].data)
+		put64(b[epollEventSize-8:], p.data)
 		out = append(out, b[:]...)
 	}
 	return out
@@ -296,9 +297,11 @@ func (ep *epoll) takePending(max int) []pendEv {
 	var out []pendEv
 	kept := ep.pending[:0]
 	for _, p := range ep.pending {
-		if r, ok := ep.interest[p.gfd]; !ok || r.d != p.d {
+		r, ok := ep.interest[p.gfd]
+		if !ok || r.d != p.d {
 			continue
 		}
+		p.data = r.data
 		if len(out) < max {
 			out = append(out, p)
 		} else {
@@ -387,14 +390,15 @@ func (ep *epoll) collect(kev []unix.Kevent_t, max int) []pendEv {
 	if len(order) > max {
 		for _, gfd := range order[max:] {
 			if r := ep.interest[gfd]; r.events&(lxEpollEt|lxEpollOneshot) != 0 {
-				ep.pending = append(ep.pending, pendEv{gfd: gfd, d: r.d, ev: ready[gfd]})
+				ep.pending = append(ep.pending, pendEv{gfd: gfd, d: r.d, ev: ready[gfd], data: r.data})
 			}
 		}
 		order = order[:max]
 	}
 	out := make([]pendEv, 0, len(order))
 	for _, gfd := range order {
-		out = append(out, pendEv{gfd: gfd, d: ep.interest[gfd].d, ev: ready[gfd]})
+		r := ep.interest[gfd]
+		out = append(out, pendEv{gfd: gfd, d: r.d, ev: ready[gfd], data: r.data})
 	}
 	return out
 }

@@ -29,9 +29,10 @@ type epoll struct {
 // edge-triggered or oneshot event once, so an event that does not fit the
 // guest's maxevents must be kept rather than dropped.
 type pendEv struct {
-	gfd int
-	id  uint32
-	ev  uint32
+	gfd  int
+	id   uint32
+	ev   uint32
+	data uint64
 }
 
 type epollReg struct {
@@ -332,21 +333,21 @@ func (g *dguest) epollDeliver(ep *epoll, evAddr uint64, evs []pendEv, fit int) i
 		ep.mu.Unlock()
 		return sErr(lxEFAULT)
 	}
-	if err := g.putOut(evAddr, ep.encode(evs)); err != nil {
+	if err := g.putOut(evAddr, encodeEvents(evs)); err != nil {
 		return sErr(lxEFAULT)
 	}
 	return int64(len(evs))
 }
 
-// encode lays out evs as struct epoll_event, with each one's data.
-func (ep *epoll) encode(evs []pendEv) []byte {
-	ep.mu.Lock()
-	defer ep.mu.Unlock()
+// encodeEvents lays out evs as struct epoll_event. Each carries the data its
+// registration had when it was taken: one deleted since still reports, as on
+// Linux, where the delete waits for the wait's copy-out.
+func encodeEvents(evs []pendEv) []byte {
 	out := make([]byte, 0, len(evs)*epollEventSize)
 	for _, p := range evs {
 		var b [epollEventSize]byte
 		put32(b[:], p.ev)
-		put64(b[epollEventSize-8:], ep.interest[p.gfd].data)
+		put64(b[epollEventSize-8:], p.data)
 		out = append(out, b[:]...)
 	}
 	return out
@@ -391,14 +392,15 @@ func (ep *epoll) collect(hev []unix.EpollEvent, max int) []pendEv {
 		// losing the wakeup. A level-triggered fd re-reports on its own.
 		for _, gfd := range order[max:] {
 			if r := ep.interest[gfd]; r.events&(lxEpollEt|lxEpollOneshot) != 0 {
-				ep.pending = append(ep.pending, pendEv{gfd: gfd, id: r.id, ev: ready[gfd]})
+				ep.pending = append(ep.pending, pendEv{gfd: gfd, id: r.id, ev: ready[gfd], data: r.data})
 			}
 		}
 		order = order[:max]
 	}
 	out := make([]pendEv, 0, len(order))
 	for _, gfd := range order {
-		out = append(out, pendEv{gfd: gfd, id: ep.interest[gfd].id, ev: ready[gfd]})
+		r := ep.interest[gfd]
+		out = append(out, pendEv{gfd: gfd, id: r.id, ev: ready[gfd], data: r.data})
 	}
 	return out
 }
@@ -418,6 +420,7 @@ func (ep *epoll) takePending(max int) []pendEv {
 		if !ok || r.id != p.id {
 			continue
 		}
+		p.data = r.data
 		if len(out) < max {
 			out = append(out, p)
 		} else {
