@@ -718,15 +718,17 @@ func serveLoop(g *dguest, cfg Config) (int, error) {
 			g.traceEnd(call, int64(id))
 
 		case lxExecve, lxExecveat:
-			g.traceEntry(gnr, ga)
+			call := g.traceStart(gnr, ga)
 			var ok bool
 			if gnr == lxExecve {
 				ok = g.execve(lxAtFdcwd, ga[0], ga[1], ga[2], 0)
 			} else {
 				ok = g.execve(int64(int32(ga[0])), ga[1], ga[2], ga[3], int64(int32(ga[4])))
 			}
-			if !ok {
-				g.traceEnd(sysName(gnr), int64(ch.page.ret))
+			if ok {
+				g.traceEnd(call, 0)
+			} else {
+				g.traceEnd(call, int64(ch.page.ret))
 				ch.reply(repResult) // failed: errno already in page.ret, guest continues
 			}
 			// On success the new program's first syscall is the next

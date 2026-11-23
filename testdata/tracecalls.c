@@ -1,5 +1,5 @@
-// A few file calls for the syscall trace to show: an open that fails, a file
-// written and read back, and an exit status.
+// A few calls for the syscall trace to show: an open and an exec that fail, a
+// file written and read back, and an exit status.
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
@@ -14,5 +14,7 @@ int main(void) {
 	if (lseek(fd, 0, SEEK_SET) != 0 || read(fd, b, sizeof b) != 10 || memcmp(b, "trace-data", 10))
 		return 4;
 	close(fd);
+	char *argv[] = {"nope", 0};
+	execve("/no/such/prog", argv, argv + 1);
 	return 7;
 }
