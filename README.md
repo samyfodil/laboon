@@ -18,6 +18,11 @@
 </p>
 <p align="center"><sub>Ten <code>alpine:3.20</code> container starts on an Apple M4, warm image, recorded one side at a time: Docker Desktop 29.5.2 in 1.95 s, laboon 0.2.0 in 0.18 s.</sub></p>
 
+<p align="center">
+  <img src="docs/assets/laboon-desktop.gif" alt="An XFCE desktop running inside laboon: the cursor opens the Applications menu, types a command into the application finder, and Chromium loads github.com/samyfodil/laboon" width="100%">
+</p>
+<p align="center"><sub>An E2B-style desktop inside laboon on Linux, with no VM: XFCE on Xvfb in <code>accetto/ubuntu-vnc-xfce-chromium-g3</code>, driven by <code>xdotool</code> and recorded by <code>ffmpeg</code> in the same sandbox. Chromium runs with <code>--no-sandbox</code>.</sub></p>
+
 laboon runs unmodified Linux binaries and OCI containers with the guest's
 machine code executing natively on the host CPU. It intercepts only syscall
 instructions: a supervisor emulates the Linux ABI, with no second kernel or
@@ -343,11 +348,6 @@ This writes a screenshot after clicking the Applications menu. The example
 uses a prebuilt XFCE image, enables networking, and installs missing capture
 or desktop tools as needed. Its image pull, package setup, and desktop startup
 are separate from the small-container startup measurements above.
-
-<p align="center">
-  <img src="docs/assets/laboon-desktop.gif" alt="An XFCE desktop running inside laboon: the cursor opens the Applications menu, types a command into the application finder, and Chromium loads github.com/samyfodil/laboon" width="100%">
-</p>
-<p align="center"><sub>An E2B-style desktop inside laboon on Linux, with no VM: XFCE on Xvfb in <code>accetto/ubuntu-vnc-xfce-chromium-g3</code>, driven by <code>xdotool</code> and recorded by <code>ffmpeg</code> in the same sandbox. Chromium runs with <code>--no-sandbox</code>.</sub></p>
 
 ## Building and contributing
 
