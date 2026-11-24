@@ -156,6 +156,7 @@ func (n *testDirNode) SetAttr(u AttrUpdate) error {
 	}
 	return nil
 }
+
 // Readlink is the link's target with slashes, as a guest path is: Windows
 // keeps a link made to "/x" as "\x".
 func (n *testDirNode) Readlink() (string, error) {

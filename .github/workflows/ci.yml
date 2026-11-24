@@ -69,12 +69,13 @@ jobs:
           sh stub/macos/build.sh
           sh stub/windows/build.sh
       - name: Test
-        # The rewriter and vfs unit tests run no guest and are fast and
-        # hermetic. The guest-execution suites (sandbox, build, the root
-        # package) are validated on real hardware by the gates (macos/gate,
-        # windows/m*/run.sh); on GitHub's shared runners they are slow and can
-        # hang, so CI relies on the build job to compile every target instead.
-        run: go test -timeout 15m ./internal/rewrite/... ./internal/vfs/... ./internal/oci/...
+        # The rewriter, namespace, filesystem and oci unit tests run no guest
+        # and are fast and hermetic. The guest-execution suites (sandbox, build,
+        # the root package) are validated on real hardware by the gates
+        # (macos/gate, windows/m*/run.sh); on GitHub's shared runners they are
+        # slow and can hang, so CI relies on the build job to compile every
+        # target instead.
+        run: go test -timeout 15m ./internal/rewrite/... ./internal/namespace/... ./core/... ./filesystems/... ./oci/...
 
   build:
     name: build all targets

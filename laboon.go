@@ -22,8 +22,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/samyfodil/laboon/oci"
 	"github.com/samyfodil/laboon/internal/sandbox"
+	"github.com/samyfodil/laboon/oci"
 )
 
 // ErrKilled reports that the backstop killed the guest for a syscall the
