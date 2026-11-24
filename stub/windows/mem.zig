@@ -66,6 +66,9 @@ extern "ntdll" fn NtProtectVirtualMemory(proc: HANDLE, base: *usize, size: *usiz
 extern "ntdll" fn NtMapViewOfSectionEx(sec: HANDLE, proc: HANDLE, base: *usize, off: ?*i64, size: *usize, typ: u32, prot: u32, params: ?*anyopaque, n: u32) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtUnmapViewOfSectionEx(proc: HANDLE, base: usize, flags: u32) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtClose(h: HANDLE) callconv(win.WINAPI) NTSTATUS;
+extern "ntdll" fn NtCreateEvent(h: *HANDLE, access: u32, attr: ?*anyopaque, typ: u32, initial: u8) callconv(win.WINAPI) NTSTATUS;
+extern "ntdll" fn NtSetEvent(h: HANDLE, prev: ?*i32) callconv(win.WINAPI) NTSTATUS;
+extern "ntdll" fn NtWaitForSingleObject(h: HANDLE, alertable: u8, timeout: ?*const i64) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtQueryVirtualMemory(proc: HANDLE, base: usize, class: u32, info: *MemInfo, len: usize, ret: ?*usize) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtFlushVirtualMemory(proc: HANDLE, base: *usize, size: *usize, iosb: *[2]usize) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtFlushInstructionCache(proc: HANDLE, base: usize, size: usize) callconv(win.WINAPI) NTSTATUS;
@@ -170,7 +173,6 @@ var nareas: usize = 0;
 var brk_base: u64 = 0;
 var brk_limit: u64 = 0;
 var brk_cur: u64 = 0;
-var lock: u32 = 0;
 var legacy = false;
 
 fn neg(e: u64) u64 {
@@ -2659,8 +2661,15 @@ fn accessible(a: u64, n: u64, write: bool) bool {
     return true;
 }
 
-// The lock is the thread's again when it holds it already: a copy into guest
-// memory, under the lock, can fault into wxFault on the same thread.
+// The lock guards the region table: 0 free, 1 held, 2 held with a thread
+// asleep on lock_ev (auto-reset, made by the first to sleep). A thread that
+// finds it held spins a little, then sleeps: spinning on, a crowd of threads
+// (thousands exiting, each unmapping its stack) would keep a preempted holder
+// off the processors. The lock is the thread's again when it holds it
+// already: a copy into guest memory, under the lock, can fault into wxFault
+// on the same thread.
+var lock: u32 = 0;
+var lock_ev: HANDLE = 0;
 var lock_owner: u32 = 0;
 var lock_depth: u32 = 0;
 
@@ -2670,16 +2679,55 @@ fn acquire() void {
         lock_depth += 1;
         return;
     }
-    while (@cmpxchgWeak(u32, &lock, 0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    if (!tryLock()) {
+        // The event is in place before the lock says a thread sleeps, so the
+        // holder that sees it saying so finds the event to set.
+        const ev = lockEvent();
+        while (@atomicRmw(u32, &lock, .Xchg, 2, .acq_rel) != 0) {
+            if (ev != 0) _ = NtWaitForSingleObject(ev, 0, null) else std.atomic.spinLoopHint();
+        }
+    }
     @atomicStore(u32, &lock_owner, me, .monotonic);
     lock_depth = 1;
+}
+
+fn tryLock() bool {
+    var i: u32 = 0;
+    while (i < 100) : (i += 1) {
+        if (@atomicLoad(u32, &lock, .monotonic) == 0 and @cmpxchgWeak(u32, &lock, 0, 1, .acquire, .monotonic) == null) return true;
+        std.atomic.spinLoopHint();
+    }
+    return false;
+}
+
+fn lockEvent() HANDLE {
+    const ev = @atomicLoad(HANDLE, &lock_ev, .acquire);
+    if (ev != 0) return ev;
+    var h: HANDLE = 0;
+    if (NtCreateEvent(&h, 0x1f0003, null, 1, 0) < 0) return 0; // EVENT_ALL_ACCESS, SynchronizationEvent
+    if (@cmpxchgStrong(HANDLE, &lock_ev, 0, h, .acq_rel, .acquire)) |won| {
+        _ = NtClose(h);
+        return won;
+    }
+    return h;
 }
 
 fn releaseLock() void {
     lock_depth -= 1;
     if (lock_depth != 0) return;
     @atomicStore(u32, &lock_owner, 0, .monotonic);
-    @atomicStore(u32, &lock, 0, .release);
+    if (@atomicRmw(u32, &lock, .Xchg, 0, .acq_rel) == 2) {
+        const ev = @atomicLoad(HANDLE, &lock_ev, .acquire);
+        if (ev != 0) _ = NtSetEvent(ev, null);
+    }
+}
+
+// cloned gives a fork child, whose only thread holds the lock (lockAll), the
+// lock as its own: the parent's sleepers and its event are not the child's.
+pub fn cloned() void {
+    lock_ev = 0;
+    @atomicStore(u32, &lock, 1, .release);
+    lock_owner = @truncate(root.arch.tebLoad(0x48));
 }
 
 // The memory syscalls' numbers: x86-64's own, or asm-generic on arm64.

@@ -295,6 +295,7 @@ fn doFork(t: *sig.Trap, ch: *stub.Chan) u64 {
     // find taken for good; it resumes them once LC_FORKED reports.
     _ = stub.request(LC_FORK_QUIESCE, .{ 0, 0, 0, 0, 0, 0 });
     const st = RtlCloneUserProcess(0x2, null, null, 0, &info); // RTL_CLONE_PROCESS_FLAGS_INHERIT_HANDLES
+    if (st == 0x129) stub.mem.cloned();
     stub.mem.unlockAll();
     if (st == 0x129) { // STATUS_PROCESS_CLONED: the child
         arch.threadInit(); // the clone's thread starts with tpidr_el0 = 0 (arm64)
