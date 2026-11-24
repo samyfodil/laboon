@@ -28,6 +28,15 @@ static char *map(void *hint, size_t n, int flags) {
 
 // report writes where two consecutive mmaps land and where the program is,
 // for the parent.
+// beyond reports whether the page below top lies past what a fixed mapping
+// may reach.
+static int beyond(unsigned long top, long pg) {
+	void *q = mmap((void *)(top - pg), pg, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+	if (q != MAP_FAILED)
+		munmap(q, pg);
+	return q == MAP_FAILED && errno == ENOMEM;
+}
+
 static int report(void) {
 	unsigned long w[3] = {(unsigned long)map(0, MB, 0), (unsigned long)map(0, MB, 0), (unsigned long)&report};
 	return write(1, w, sizeof w) != sizeof w;
@@ -69,16 +78,21 @@ int main(int argc, char **argv) {
 	unsigned long sp = (unsigned long)&pg;
 #ifdef __x86_64__
 	// STACK_TOP is the task size, 0x7ffffffff000 unless the system keeps the
-	// top of the space (Rosetta does): the end of what a fixed mapping may
-	// reach, beyond which it fails with ENOMEM.
+	// top of the space (Rosetta keeps a large part of it, Windows the last
+	// 64 KiB): the end of what a fixed mapping may reach, beyond which it
+	// fails with ENOMEM. Found to the gigabyte, then to the page.
 	unsigned long stop = 0x7ffffffff000UL, reach = 1UL << 34;
-	for (;;) {
-		void *q = mmap((void *)(stop - pg), pg, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-		if (q != MAP_FAILED)
-			munmap(q, pg);
-		if (q != MAP_FAILED || errno != ENOMEM || stop <= sp)
-			break;
+	while (beyond(stop, pg) && stop > sp)
 		stop -= 1UL << 30;
+	if (stop != 0x7ffffffff000UL) {
+		unsigned long hi = stop + (1UL << 30);
+		while (hi - stop > (unsigned long)pg) {
+			unsigned long mid = stop + ((hi - stop) / 2 & ~(pg - 1UL));
+			if (beyond(mid, pg))
+				hi = mid;
+			else
+				stop = mid;
+		}
 	}
 #else
 	// STACK_TOP is the task size, one of those an arm64 kernel offers with
