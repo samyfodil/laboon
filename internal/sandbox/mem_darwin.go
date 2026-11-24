@@ -93,7 +93,11 @@ func init() {
 			return 0
 		}
 		if a[4] != 0 {
-			return int64(len(libSites(g.cfg.Cache, a[1], a[2], d)))
+			n := len(libSites(g.cfg.Cache, a[1], a[2], d))
+			if g.run != nil && g.run.x64 {
+				n += fsRoomUnits * len(libFSSites(g.cfg.Cache, a[1], a[2], d))
+			}
+			return int64(n)
 		}
 		g.rewriteLibSites(a[0], a[1], a[2], d)
 		return 0

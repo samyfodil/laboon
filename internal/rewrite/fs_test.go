@@ -100,6 +100,46 @@ func TestPatchFSRun(t *testing.T) {
 	}
 }
 
+// TestPatchFSRipRun: glibc's initial-exec TLS access loads the variable's
+// offset from the GOT and reads %fs:[reg] (mov rbx, [rip+x]; mov r12d,
+// fs:[rbx]). The RIP-relative load moves into the island with its
+// displacement re-encoded, so it still reads the GOT slot.
+func TestPatchFSRipRun(t *testing.T) {
+	code := []byte{
+		0x48, 0x8b, 0x1d, 0x00, 0x10, 0x00, 0x00, // mov rbx, [rip+0x1000]
+		0x64, 0x44, 0x8b, 0x23, // mov r12d, fs:[rbx]
+		0xc3,
+	}
+	const vaddr, base = 0x401000, 0x300000
+	const got uint64 = vaddr + 7 + 0x1000
+	for _, sites := range [][]FSSite{AnalyzeFS(code), AnalyzeEntriesFS(code, []int{0}, nil).FS} {
+		c := bytes.Clone(code)
+		if len(sites) != 1 || sites[0] != (FSSite{7, 4, 7, 0}) {
+			t.Fatalf("sites = %v", sites)
+		}
+		w := New(base, 4096, 0)
+		w.SegmentSlot(0x1678)
+		if left := w.PatchFS(c, vaddr, sites); w.FS != 1 || len(left) != 0 {
+			t.Fatalf("fs = %d left = %#x", w.FS, left)
+		}
+		tr := w.Trampolines()
+		p := int(vaddr + 5 + uint64(int32(binary.LittleEndian.Uint32(c[1:]))) - base)
+		in, err := x86asm.Decode(tr[p:], 64)
+		m, ok := in.Args[1].(x86asm.Mem)
+		if err != nil || in.Op != x86asm.MOV || in.Args[0] != x86asm.RBX || !ok || m.Base != x86asm.RIP {
+			t.Fatalf("moved load %q", x86asm.IntelSyntax(in, 0, nil))
+		}
+		if at := base + uint64(p) + uint64(in.Len) + uint64(m.Disp); at != got {
+			t.Fatalf("moved load reads %#x, want %#x", at, got)
+		}
+	}
+	far := New(vaddr+(3<<30), 4096, 0)
+	far.SegmentSlot(0x1678)
+	if left := far.PatchFS(bytes.Clone(code), vaddr, AnalyzeFS(code)); far.FS != 0 || len(left) != 1 {
+		t.Fatalf("an island out of the load's reach: fs = %d left = %#x", far.FS, left)
+	}
+}
+
 // TestPatchFSCave: an %fs instruction too short for the jmp, right after a
 // call (Go's systemstack: a return lands on it), reaches its island through
 // the padding after the function; only its own bytes change.

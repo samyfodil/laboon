@@ -78,6 +78,7 @@ func (d *Descender) Run() []Site {
 // queuing the targets of direct branches as it goes.
 func (d *Descender) trace(off int) {
 	t := tail{long: -1}
+	ft := tail{long: -1} // the runs an %fs site may steal, which take RIP-relative code too (fsMove)
 	for off >= 0 && off < len(d.code) && !d.visited[off] {
 		// endbr64/endbr32 (CET function prologues) are the 4-byte no-op
 		// f3 0f 1e fa/fb; skip them whole (the 0f 1e form is easy to
@@ -87,6 +88,7 @@ func (d *Descender) trace(off int) {
 				d.visited[off+i] = true
 			}
 			t.long = -1
+			ft.long = -1
 			off += n
 			continue
 		}
@@ -105,7 +107,7 @@ func (d *Descender) trace(off int) {
 			d.sites = append(d.sites, Site{Off: uint32(off), Steal: steal})
 		}
 		if d.FS && in.fsMem {
-			d.fsSites = append(d.fsSites, fsSite(off, in, &t))
+			d.fsSites = append(d.fsSites, fsSite(off, in, &ft))
 		}
 		if in.relOK {
 			d.AddEntry(off + in.len + in.rel)
@@ -115,6 +117,7 @@ func (d *Descender) trace(off int) {
 			return
 		}
 		t.add(in, off)
+		ft.add(fsMove(in), off)
 		off += in.len
 	}
 }

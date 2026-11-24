@@ -142,6 +142,7 @@ const LC_CODEFILE: u64 = 0x4c430006; // (open-file id): this stub maps that file
 const LC_SYNCFILE: u64 = 0x4c430007; // (open-file id): msync of its MAP_SHARED mapping; write the backing back to the file
 const LC_UNMAPFILE: u64 = 0x4c430008; // (open-file id): this stub's last MAP_SHARED mapping of that non-host file is gone
 pub const LC_REWRITE: u64 = 0x4c430002; // (base, len, file off, guest fd, count only): rewrite, or count, a text range's sites
+pub const LC_FS_PATCH: u64 = 0x4c430039; // (text, len, file off, guest fd, area, area len | tp << 32): move x86-64 %fs sites to islands in area
 const LC_SHMAT: u64 = 0x4c430003; // (shmid) -> stub fd | pages << 32
 const LC_SHMATTACHED: u64 = 0x4c430004; // (shmid) -> attachment cookie
 const LC_SHMGONE: u64 = 0x4c430005; // (cookie): its last range is unmapped
@@ -1408,6 +1409,13 @@ fn rewrite(r: u64, n: u64, off: u64, gfd: u64) void {
     _ = root.hostCall(LC_REWRITE, .{ r, n, off, gfd, 0, 0 });
     cur_room = null;
     const rm = room orelse return;
+    if (!tstate.arm64) {
+        // The text has not run yet: every %fs site, a short one too, can move
+        // to an island now (lcFsPatch), where a fault would find few later.
+        const at = rm.area(0) + rm.used[0];
+        const k = root.hostCall(LC_FS_PATCH, .{ r, n, off, gfd, at, (rm.size - rm.used[0]) | @as(u64, root.g_tp_key * 8) << 32 });
+        if (!isErr(k)) rm.used[0] += k;
+    }
     for (0..2) |i| {
         const done = rdUp(rm.used[i]);
         if (done > from[i]) _ = sys(SYS_mprotect, rm.area(i) + from[i], done - from[i], PROT_READ | PROT_EXEC, 0, 0, 0);

@@ -25,6 +25,7 @@ type x86inst struct {
 	fsMem      bool // a %fs-segment memory operand
 	ripMem     bool // a RIP-relative memory operand (not relocatable)
 	dispAt     int  // where its 32-bit displacement starts, ripMem
+	relocRip   bool // not movable only for its RIP-relative operand, in a legacy encoding
 	destAX     bool // destination is the AX/EAX/RAX accumulator (scavenge heuristic)
 }
 
@@ -450,6 +451,7 @@ func x86classify(in *x86inst, op byte, is0F, is3A bool, modReg int, code []byte,
 	}
 	if is3A {
 		in.movable = !in.ripMem
+		in.relocRip = in.ripMem
 		return
 	}
 	if is0F {
@@ -464,6 +466,7 @@ func x86classify(in *x86inst, op byte, is0F, is3A bool, modReg int, code []byte,
 		// Not movable: SYSCALL, UD2, UD1, SYSENTER, multi-byte NOP, Jcc.
 		nm := op == 0x05 || op == 0x0b || op == 0xb9 || op == 0x34 || op == 0x1f || (op >= 0x80 && op <= 0x8f)
 		in.movable = !nm && !in.ripMem
+		in.relocRip = !nm && in.ripMem
 		return
 	}
 	switch op {
@@ -511,6 +514,7 @@ func x86classify(in *x86inst, op byte, is0F, is3A bool, modReg int, code []byte,
 		nm = true
 	}
 	in.movable = !nm && !in.ripMem
+	in.relocRip = !nm && in.ripMem
 }
 
 // x86decodeVex decodes a VEX/EVEX instruction starting at code[p] (p past the

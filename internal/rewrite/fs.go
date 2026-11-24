@@ -50,10 +50,56 @@ func AnalyzeFS(code []byte) []FSSite {
 		if in.fsMem {
 			sites = append(sites, fsSite(off, in, &t))
 		}
-		t.add(in, off)
+		t.add(fsMove(in), off)
 		off += in.len
 	}
 	return sites
+}
+
+// fsMove is in as a run moved into an %fs island takes it: a legacy
+// RIP-relative instruction moves too, its displacement re-encoded for where
+// the island puts it (relocRun).
+func fsMove(in x86inst) x86inst {
+	if in.relocRip {
+		in.movable = true
+	}
+	return in
+}
+
+// fsRunOK reports whether b is a run AnalyzeFS would have an %fs site steal.
+func fsRunOK(b []byte) bool {
+	t := tail{long: -1}
+	for off := 0; off < len(b); {
+		in := x86decode(b[off:])
+		if !in.ok {
+			return false
+		}
+		t.add(fsMove(in), off)
+		off += in.len
+	}
+	return t.long == 0 && t.end == len(b)
+}
+
+// relocRun re-encodes the RIP-relative displacements of the run b, which
+// stood at from, for its copy at to. It reports false if one no longer
+// reaches its target.
+func relocRun(b []byte, from, to uint64) bool {
+	for off := 0; off < len(b); {
+		in := x86decode(b[off:])
+		if !in.ok {
+			return false
+		}
+		if in.ripMem {
+			at := b[off+in.dispAt:]
+			d := int64(int32(binary.LittleEndian.Uint32(at))) + int64(from) - int64(to)
+			if d != int64(int32(d)) {
+				return false
+			}
+			binary.LittleEndian.PutUint32(at, uint32(int32(d)))
+		}
+		off += in.len
+	}
+	return true
 }
 
 // fsSite records the %fs instruction in at off, with the run before it a jmp
@@ -68,7 +114,7 @@ func fsSite(off int, in x86inst, t *tail) FSSite {
 
 // FS memoizes AnalyzeFS by code content.
 func (c *Cache) FS(code []byte) []FSSite {
-	offs, _ := c.Offsets("fs-sites-2", code, func() ([]uint32, error) {
+	offs, _ := c.Offsets("fs-sites-3", code, func() ([]uint32, error) {
 		var o []uint32
 		for _, s := range AnalyzeFS(code) {
 			o = append(o, s.Off, uint32(s.Len)|uint32(s.Steal)<<8)
@@ -120,7 +166,7 @@ func (w *Rewriter) PatchFS(code []byte, vaddr uint64, sites []FSSite) (left []ui
 			ok = w.fsJmp(code, vaddr, off, off, n)
 		case run > 0 && run <= off:
 			r := code[off-run : off]
-			ok = runOK(r) && !anyInst(r, hasFS) && w.fsJmp(code, vaddr, off-run, off, n)
+			ok = fsRunOK(r) && !anyInst(r, hasFS) && w.fsJmp(code, vaddr, off-run, off, n)
 		case s.Cave != 0:
 			ok = w.fsCave(code, vaddr, off, n, off+int(s.Cave))
 		}
@@ -367,6 +413,9 @@ func (w *Rewriter) fsIsland(code []byte, vaddr uint64, ins, off, n int) (uint64,
 	used[e.base], used[e.index] = true, true
 	back := addr + uint64(len(b))
 	t := append([]byte(nil), code[ins:off]...)
+	if !relocRun(t, vaddr+uint64(ins), w.base+uint64(len(w.tramp))) {
+		return 0, false
+	}
 	dst, isLoad := -1, false
 	has66 := false
 	for _, p := range e.prefixes {

@@ -77,25 +77,8 @@ func (g *dguest) rewriteLibSites(base, length, offset uint64, d *dfile) {
 // file offset, which a linker may put at another distance from the image
 // start than its vaddr (lld's separate code segments, for one).
 func libSites(cache *rewrite.Cache, length, offset uint64, d *dfile) []uint64 {
-	// A non-host file has no host fd; its content is in the materialized mapf
-	// (mmapFd) the stub mapped, so read the ELF from whichever backs the mapping.
-	var ef io.ReaderAt
-	var fi os.FileInfo
-	var err error
-	switch {
-	case d.f != nil:
-		ef = d.f
-		fi, err = hostfs.FileStat(d.f)
-	case d.mapf != nil:
-		ef = d.mapf
-		fi, err = hostfs.FileStat(d.mapf)
-	case d.vf != nil:
-		ef = d.vf
-		fi, err = d.vf.Stat()
-	default:
-		return nil
-	}
-	if err != nil {
+	ef, fi, ok := libFile(d)
+	if !ok {
 		return nil
 	}
 	sites, err := computeSitesFile(cache, ef, fi)
@@ -120,6 +103,79 @@ func libSites(cache *rewrite.Cache, length, offset uint64, d *dfile) []uint64 {
 			if o := p.Off + (v - p.Vaddr); o >= offset && o < offset+length {
 				in = append(in, o)
 			}
+		}
+	}
+	return in
+}
+
+// libFile is what backs a library mapping of d. A non-host file has no host
+// fd; its content is in the materialized mapf (mmapFd) the stub mapped.
+func libFile(d *dfile) (io.ReaderAt, os.FileInfo, bool) {
+	var ef io.ReaderAt
+	var fi os.FileInfo
+	var err error
+	switch {
+	case d.f != nil:
+		ef = d.f
+		fi, err = hostfs.FileStat(d.f)
+	case d.mapf != nil:
+		ef = d.mapf
+		fi, err = hostfs.FileStat(d.mapf)
+	case d.vf != nil:
+		ef = d.vf
+		fi, err = d.vf.Stat()
+	default:
+		return nil, nil, false
+	}
+	return ef, fi, err == nil
+}
+
+// libFSSites is the x86-64 %fs-relative instructions of d's text that fall
+// in the bytes [offset, offset+length) of a mapping of it, as offsets in that
+// range. They come from the descent plan of the whole image (analyzeImageFS),
+// so data in the text is never taken for an instruction.
+func libFSSites(cache *rewrite.Cache, length, offset uint64, d *dfile) []rewrite.FSSite {
+	ef, fi, ok := libFile(d)
+	if !ok {
+		return nil
+	}
+	f, err := elf.NewFile(ef)
+	if err != nil {
+		return nil
+	}
+	base := imageBase(f)
+	compute := func() (rewrite.Plan, error) { return analyzeImageFS(f, base) }
+	var plan rewrite.Plan
+	if id, ok := infoIdentity(fi); ok {
+		plan, err = cache.ByID(imageSalt, id, nil, compute)
+	} else {
+		var b []byte
+		if b, err = io.ReadAll(io.NewSectionReader(ef, 0, 1<<62)); err == nil {
+			plan, err = cache.Memo(imageSalt, b, compute)
+		}
+	}
+	if err != nil {
+		return nil
+	}
+	var in []rewrite.FSSite
+	for _, p := range f.Progs {
+		if p.Type != elf.PT_LOAD || p.Flags&elf.PF_X == 0 {
+			continue
+		}
+		for _, s := range plan.FS {
+			v := base + uint64(s.Off)
+			if v < p.Vaddr || v+uint64(s.Len) > p.Vaddr+p.Filesz {
+				continue
+			}
+			o := p.Off + (v - p.Vaddr)
+			if o < offset || o+uint64(s.Len) > offset+length {
+				continue
+			}
+			if o-uint64(s.Steal) < offset {
+				s.Steal = 0 // the run before it is outside this mapping
+			}
+			s.Off = uint32(o - offset)
+			in = append(in, s)
 		}
 	}
 	return in
