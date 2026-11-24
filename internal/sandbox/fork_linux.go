@@ -550,6 +550,11 @@ func (g *dguest) vforkExec() error {
 	ch.page.args = [6]uint64{}
 	ch.reply(repHost)
 	ch.awaitGone()
+	// The stack chunks the child is known to have are those mapped before the
+	// fork: another thread of the parent may map one while the child announces.
+	g.mp.mu.Lock()
+	chunks := maps.Clone(g.mp.stackChunks)
+	g.mp.mu.Unlock()
 	if r := g.mp.hopP.Load().call(ch, hopFork, slotsAddr+uint64(g.slot*slotSize), hopReqAddr(h.idx), 0, 0); r < 0 {
 		fs.freeHop(h)
 		return errExited
@@ -564,6 +569,7 @@ func (g *dguest) vforkExec() error {
 	ospid := int(ch.page.args[0])
 	old := g.mp
 	m := old.forkCopy(fs)
+	m.stackChunks = chunks
 	m.pid.Store(int64(ospid))
 	m.hopPend = h
 	fs.adoptHop(ospid, h)
