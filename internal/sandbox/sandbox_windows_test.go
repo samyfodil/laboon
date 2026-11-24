@@ -464,6 +464,30 @@ func TestWindowsHostPipes(t *testing.T) {
 			t.Fatalf("exit %d stdout %q", code, out.String())
 		}
 	})
+	// A read of the harness's own pending on the stdin pipe holds its file
+	// object, as a shell holds the stdin it shares with laboon; the watcher a
+	// zero-timeout poll then starts waits behind it where no cancel reaches,
+	// and the run must end anyway. The read starts once the guest has filled
+	// stdout, after the run has set its stdio up, and the guest polls once
+	// stdout is drained.
+	t.Run("stdin-shared-pending-read", func(t *testing.T) {
+		r, w := pipe()
+		or, ow := pipe()
+		var errb bytes.Buffer
+		codec := make(chan int, 1)
+		go func() { codec <- run(r, ow, &errb, "m3io", "stdin-poll0") }()
+		for n, _ := pipeAvail(or); n < 4096; n, _ = pipeAvail(or) {
+			runtime.Gosched()
+		}
+		go r.Read(make([]byte, 64<<10))
+		for pipeRoom(w) > 0 { // until the harness's read is pending
+			runtime.Gosched()
+		}
+		out := <-readAll(or)
+		if code := <-codec; code != 0 || errb.String() != "stdin-poll0 ok\n" || len(out) != 8192 {
+			t.Fatalf("exit %d stderr %q, %d bytes written", code, errb.String(), len(out))
+		}
+	})
 }
 
 // pipeRoom is the write quota the pipe end w reports.

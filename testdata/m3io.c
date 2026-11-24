@@ -182,6 +182,22 @@ static int stdin_poll(void) {
 	return !ok;
 }
 
+// stdin_poll0: fd 0 is a host pipe the harness keeps a read of its own
+// pending on, from once this has filled fd 1 (a pipe of PIPE_BUF bytes) until
+// it drains it. Then a zero-timeout poll finds stdin empty (as Rust's runtime
+// checks its stdio), and the run still ends once this exits.
+static int stdin_poll0(void) {
+	char b[8192];
+	memset(b, 'p', sizeof b);
+	ssize_t w = write(1, b, sizeof b);
+	struct pollfd f = {.fd = 0, .events = POLLIN};
+	int r = poll(&f, 1, 0);
+	int ok = w == sizeof b && r == 0;
+	fprintf(stderr, "stdin-poll0 %s\n", ok ? "ok" : "FAIL");
+	if (!ok) fprintf(stderr, "write %zd poll %d revents %#x\n", w, r, f.revents);
+	return !ok;
+}
+
 // stdout_nonblock: fd 1 is a host pipe of PIPE_BUF bytes the harness reads
 // only once this has said "drain" on stderr. Non-blocking, the first write
 // fills the pipe and the second is taken while the pipe is full; the third
@@ -303,6 +319,7 @@ int main(int argc, char **argv) {
 	if (!strcmp(mode, "stdout-nonblock")) return stdout_nonblock();
 	if (!strcmp(mode, "stdin-read-intr")) return stdin_intr();
 	if (!strcmp(mode, "stdin-poll")) return stdin_poll();
+	if (!strcmp(mode, "stdin-poll0")) return stdin_poll0();
 	if (!strcmp(mode, "pipe-read-kill")) return pipe_intr(0, 1);
 	if (!strcmp(mode, "pipe-write-kill")) return pipe_intr(1, 1);
 	if (!strcmp(mode, "pipe-waits")) return pipe_waits();

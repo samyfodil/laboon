@@ -70,6 +70,7 @@ type pipeEnd struct {
 	watching bool           // read end: the watcher's zero-byte read is in flight
 	peeking  int            // FIONREAD peeks in flight: the watcher is not armed meanwhile
 	closing  bool           // the last reference is gone
+	handed   bool           // shutdown left closing the end to the watcher's read in flight
 	started  bool           // the watcher's goroutine has started
 	stopped  bool           // and has ended
 	watchTh  windows.Handle // the watcher's thread, which a cancel names
@@ -180,24 +181,23 @@ func (p *pipeEnd) release() {
 	}
 }
 
-// shutdown stops the watcher, cancelling its read until it has left (a cancel
-// before the read is pending finds nothing and is retried), and closes the end.
+// shutdown stops the watcher and closes the end. A watcher read in flight is
+// cancelled and left to close the end as it returns: no cancel reaches a read
+// still waiting behind another process's request on the file object (a shell
+// reading the stdin it shares with us), so nothing can wait for it to leave.
 func (p *pipeEnd) shutdown() {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.closing = true
 	p.cond.Broadcast()
-	for p.started && !p.stopped {
-		if !p.watching {
-			p.cond.Wait()
-			continue
-		}
-		th := p.watchTh
-		p.mu.Unlock()
-		procCancelSynchronousIo.Call(uintptr(th))
-		runtime.Gosched()
-		p.mu.Lock()
+	for p.started && !p.stopped && !p.watching {
+		p.cond.Wait()
 	}
-	p.mu.Unlock()
+	if p.started && !p.stopped {
+		p.handed = true
+		procCancelSynchronousIo.Call(uintptr(p.watchTh)) // under p.mu: the watcher closes its thread handle only with it held
+		return
+	}
 	p.closeHandles()
 }
 
@@ -247,6 +247,9 @@ func (p *pipeEnd) watcher() {
 		if th != 0 {
 			windows.CloseHandle(th)
 		}
+		if p.handed {
+			p.closeHandles()
+		}
 		p.stopped = true
 		p.cond.Broadcast()
 		p.mu.Unlock()
@@ -271,6 +274,9 @@ func (p *pipeEnd) watcher() {
 		err := windows.ReadFile(p.h, nil, &n, nil)
 		p.mu.Lock()
 		p.watching = false
+		if p.closing {
+			return
+		}
 		if err == windows.ERROR_OPERATION_ABORTED {
 			continue
 		}
