@@ -94,12 +94,12 @@ func TestWindowsBusybox(t *testing.T) {
 // TestWindowsStubConfined checks that a stub that has reached its handshake
 // runs in an AppContainer inside its job.
 func TestWindowsStubConfined(t *testing.T) {
-	sec, err := windows.CreateFileMapping(windows.InvalidHandle, nil, windows.PAGE_READWRITE, 0, slotsLen, nil)
+	sec, err := windows.CreateFileMapping(windows.InvalidHandle, nil, windows.PAGE_READWRITE, 0, chunkLen, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(sec)
-	view, err := windows.MapViewOfFile(sec, windows.FILE_MAP_WRITE, 0, 0, slotsLen)
+	view, err := windows.MapViewOfFile(sec, windows.FILE_MAP_WRITE, 0, 0, chunkLen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestWindowsStubConfined(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sp.close()
-	mem := unsafe.Slice((*byte)(*(*unsafe.Pointer)(unsafe.Pointer(&view))), slotsLen)
+	mem := unsafe.Slice((*byte)(*(*unsafe.Pointer)(unsafe.Pointer(&view))), slotSize)
 	ch := &hostChan{channel: newChannel(mem, 0, 0, nil, nil), evStub: evStub, evSup: evSup, proc: sp.proc}
 	if err := ch.wait(); err != nil || ch.page.kind != msgReady {
 		t.Fatalf("handshake: %v kind %d", err, ch.page.kind)

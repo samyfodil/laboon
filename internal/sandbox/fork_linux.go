@@ -60,7 +60,7 @@ func (m *memProc) forkCopy(fs *dfs) *memProc {
 	c.used = m.used
 	c.brk, c.brkLo = m.brk, m.brkLo
 	c.stackChunks = maps.Clone(m.stackChunks) // a fork inherits the stub's mappings
-	c.forkShMaps(m, fs) // the child inherits the shared mappings; keep their backings live
+	c.forkShMaps(m, fs)                       // the child inherits the shared mappings; keep their backings live
 	return c
 }
 

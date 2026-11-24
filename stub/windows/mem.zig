@@ -53,6 +53,7 @@ const std = @import("std");
 const win = std.os.windows;
 const root = @import("root");
 const ool = @import("ool.zig");
+const blocks = @import("blocks.zig");
 
 const NTSTATUS = i32;
 const HANDLE = usize;
@@ -2702,8 +2703,7 @@ const RD = switch (@import("builtin").cpu.arch) {
 // (wroteMaps): munmap, mprotect, mremap, a fixed mapping, brk, SysV attach
 // and detach.
 pub const OUT_TAG: u64 = 2 << 62;
-const Span = struct { lo: u64 = 0, hi: u64 = 0, gen: u64 = std.math.maxInt(u64) };
-var wspan: [root.MAX_SLOTS]Span = [_]Span{.{}} ** root.MAX_SLOTS;
+pub const Span = struct { lo: u64 = 0, hi: u64 = 0, gen: u64 = std.math.maxInt(u64) };
 var wgen: u64 = 0;
 
 fn wroteMaps() void {
@@ -2754,7 +2754,7 @@ fn vecPrefix(iov: u64, cnt: u64) ?u64 {
 // of its pages.
 fn writablePrefix(a: u64, n: u64) u64 {
     const end = a +| n;
-    const s = &wspan[root.curSlot()];
+    const s = &blocks.mine().wspan;
     const g = @atomicLoad(u64, &wgen, .acquire);
     if (g == s.gen and a >= s.lo and end <= s.hi) return n;
     acquire();

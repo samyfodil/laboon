@@ -17,6 +17,7 @@ const std = @import("std");
 const win = std.os.windows;
 const root = @import("stub.zig");
 const mem = @import("mem.zig");
+const blocks = @import("blocks.zig");
 
 extern "ntdll" fn NtProtectVirtualMemory(proc: usize, base: *usize, size: *usize, prot: u32, old: *u32) callconv(win.WINAPI) i32;
 extern "ntdll" fn NtFlushInstructionCache(proc: usize, base: usize, size: usize) callconv(win.WINAPI) i32;
@@ -35,7 +36,7 @@ const PAGE_EXECUTE_READ: u32 = 0x20;
 // and the holds on memory while they run (mem.zig), 0 for none. One that
 // stands for the single guest instruction at start (one) maps every pc of it
 // there.
-const Slot = struct {
+pub const Slot = struct {
     page: u64 = 0,
     start: u64 = 0,
     n: u32 = 0,
@@ -47,7 +48,6 @@ const Slot = struct {
 };
 
 pub const Holds = [2]u64;
-var slots: [root.MAX_SLOTS]Slot = [_]Slot{.{}} ** root.MAX_SLOTS;
 
 // pageFor is slot sl's page, in reach of a RIP-relative displacement at pc
 // if near.
@@ -82,7 +82,7 @@ fn place(page: u64, code: []const u8) bool {
 // into slot s's page and returns where the thread resumes to run them; null
 // if one cannot run out of line.
 pub fn runA64(s: usize, words: []const u32, start: u64, hold: u64) ?u64 {
-    const sl = &slots[s];
+    const sl = &blocks.at(s).ool;
     if (words.len == 0 or words.len > MAX) return null;
     const page = pageFor(sl, start, false) orelse return null;
     var out: [2 * MAX + 1]u32 = undefined;
@@ -122,7 +122,7 @@ pub fn runA64(s: usize, words: []const u32, start: u64, hold: u64) ?u64 {
 // resumes; the guest goes on after start once they ran, and a signal among
 // them sees start.
 pub fn runFor(s: usize, words: []const u32, start: u64) ?u64 {
-    const sl = &slots[s];
+    const sl = &blocks.at(s).ool;
     if (words.len == 0 or words.len > MAX) return null;
     const page = pageFor(sl, start, false) orelse return null;
     var out: [MAX + 1]u32 = undefined;
@@ -142,7 +142,7 @@ pub fn runFor(s: usize, words: []const u32, start: u64) ?u64 {
 // RIP-relative displacement at at (0: none), into slot s's page and returns
 // where the thread resumes to run it, hold kept meanwhile; null if it cannot.
 pub fn runX64(s: usize, code: []const u8, at: u32, start: u64, hold: u64) ?u64 {
-    const sl = &slots[s];
+    const sl = &blocks.at(s).ool;
     if (code.len == 0 or code.len > 15) return null;
     const page = pageFor(sl, start, at != 0) orelse return null;
     var out: [16]u8 = undefined;
@@ -230,7 +230,7 @@ pub fn callOf(code: []const u8, start: u64, regs: *const [16]u64, load: *const f
 // pushed where it pushes it, the thread going on at its target. hold is kept
 // meanwhile.
 pub fn runCall(s: usize, c: Call, start: u64, hold: u64) ?u64 {
-    const sl = &slots[s];
+    const sl = &blocks.at(s).ool;
     const page = pageFor(sl, start, false) orelse return null;
     var out: [16]u8 = .{ 0xff, 0x35, 2, 0, 0, 0, EXIT_X64, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // push qword [rip+2]; int3; its return address
     std.mem.writeInt(u64, out[8..16], c.ret, .little);
@@ -250,7 +250,7 @@ pub const Exit = struct { target: u64, holds: Holds };
 // exit takes the trap at pc ending what slot s ran; null if pc is no exit
 // of it.
 pub fn exit(s: usize, pc: u64) ?Exit {
-    const sl = &slots[s];
+    const sl = &blocks.at(s).ool;
     if (sl.page == 0 or pc < sl.page or sl.nexit == 0) return null;
     const k: ?u64 = if (arm) blk: {
         const i = (pc - sl.page) / 4;
@@ -267,24 +267,24 @@ pub fn exit(s: usize, pc: u64) ?Exit {
 // into page that it ran again in place last (tried): a thread ran the page
 // again before the store landed. Each fault asks once.
 pub fn lost(s: usize, pc: u64, page: u64) bool {
-    const sl = &slots[s];
+    const sl = &blocks.at(s).ool;
     defer sl.tried = .{ 0, 0 };
     return sl.tried[0] == pc and sl.tried[1] == page;
 }
 
 pub fn tried(s: usize, pc: u64, page: u64) void {
-    slots[s].tried = .{ pc, page };
+    blocks.at(s).ool.tried = .{ pc, page };
 }
 
 // inSlot reports whether pc is in what slot s runs.
 pub fn inSlot(s: usize, pc: u64) bool {
-    const sl = &slots[s];
+    const sl = &blocks.at(s).ool;
     return sl.page != 0 and sl.nexit != 0 and pc >= sl.page and pc < sl.page + PAGE;
 }
 
 // addHold has what slot s runs keep hold id too, and reports whether it can.
 pub fn addHold(s: usize, id: u64) bool {
-    const sl = &slots[s];
+    const sl = &blocks.at(s).ool;
     if (sl.nexit == 0) return false;
     for (&sl.holds) |*h| {
         if (h.* != 0) continue;
@@ -297,7 +297,7 @@ pub fn addHold(s: usize, id: u64) bool {
 // dropHolds gives up the holds what slot s runs keeps, to let go: it goes on
 // without them.
 pub fn dropHolds(s: usize) Holds {
-    const sl = &slots[s];
+    const sl = &blocks.at(s).ool;
     const h = sl.holds;
     sl.holds = .{ 0, 0 };
     return h;
@@ -308,7 +308,7 @@ pub fn dropHolds(s: usize) Holds {
 // the guest's at the same offset; an exit, the target it leads to. It gives
 // up what the slot ran (the guest resumes at that pc), and its holds.
 pub fn leave(s: usize, pc: u64) struct { pc: u64, holds: Holds } {
-    const sl = &slots[s];
+    const sl = &blocks.at(s).ool;
     const none = Holds{ 0, 0 };
     if (sl.page == 0 or pc < sl.page or sl.nexit == 0) return .{ .pc = pc, .holds = none };
     const off = pc - sl.page;

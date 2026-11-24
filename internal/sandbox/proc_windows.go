@@ -603,6 +603,13 @@ func serveChild(child *dguest) {
 		endWinProcess(child, 0, errExited)
 		return
 	}
+	if err := w.run.adoptStub(w.sp.proc, w.st.chanBase); err != nil {
+		w.tracef("[lc] [%d] fork child: channel: %v\n", child.pid, err)
+		windows.TerminateProcess(w.sp.proc, 128+9)
+		fs.setKillSig(child.tgid, lxSigkill)
+		endWinProcess(child, 0, errExited)
+		return
+	}
 	winRegisterThread(fs.sigs(), child.pid, uint32(ch.page.args[1]), w.st)
 	w.tracef("[lc] [%d] fork child checked in\n", child.pid)
 	child.ptraceChildStart()

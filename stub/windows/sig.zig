@@ -25,6 +25,7 @@ const std = @import("std");
 const win = std.os.windows;
 const futex = @import("futex.zig");
 const stub = @import("stub.zig");
+const blocks = @import("blocks.zig");
 
 // The architecture half: the guest register file, the CONTEXT moves and the
 // Linux rt_sigframe layout.
@@ -51,7 +52,7 @@ const HANDLE = usize;
 const NTSTATUS = i32;
 
 pub const SLOT_SIZE: usize = 4096;
-pub const MAX_SLOTS: usize = 256;
+pub const MAX_SLOTS: usize = stub.MAX_SLOTS;
 pub const AREA_OFF: usize = SLOT_SIZE * MAX_SLOTS;
 pub const STRIDE: usize = 0x4000;
 pub const AREA_LEN: usize = STRIDE * MAX_SLOTS;
@@ -217,7 +218,7 @@ const STATUS_IN_PAGE_ERROR: u32 = 0xC0000006;
 
 // ---- per-thread state ------------------------------------------------------
 
-const Tls = struct {
+pub const Tls = struct {
     slot: usize = 0,
     rec: *Thread = undefined,
     ready: bool = false,
@@ -285,7 +286,6 @@ pub fn faultLeave() void {
     if (tl().ready) @atomicStore(u32, &thr().in_handler, 0, .seq_cst);
 }
 
-var tls_blocks: [MAX_SLOTS]Tls = [_]Tls{.{}} ** MAX_SLOTS;
 var g_area: [*]u8 = undefined;
 var g_slots_base: usize = 0;
 pub var g_restorer: u64 = 0;
@@ -308,7 +308,7 @@ fn procAt(slot: usize) *Proc {
 }
 
 fn tl() *Tls {
-    return &tls_blocks[stub.curSlot()];
+    return &blocks.mine().tls;
 }
 
 fn thr() *Thread {
@@ -360,7 +360,7 @@ fn buildRestorer() void {
 }
 
 pub fn startThread(slot: usize, os_tid: u32) void {
-    const s = &tls_blocks[slot];
+    const s = &blocks.at(slot).tls;
     s.slot = slot;
     s.rec = thrAt(slot);
     s.os_tid = os_tid;
@@ -592,14 +592,13 @@ fn dispatchAll(c: *Ctx) void {
 
 // A stable guest context for the entire return, including kernel restoration.
 // The injector rewinds only the assembly commit range (or arm64 resume slot).
-const Return = extern struct {
+pub const Return = extern struct {
     th: *Thread,
     pr: *Proc,
     target: u64,
     _pad: u64 = 0,
     c: Ctx,
 };
-var returns: [MAX_SLOTS]Return = undefined;
 
 comptime {
     std.debug.assert(@offsetOf(Return, "c") == 32);
@@ -607,7 +606,7 @@ comptime {
 
 pub fn stageReturn(c: *const Ctx) void {
     setBusy(1);
-    const r = &returns[stub.curSlot()];
+    const r = &blocks.mine().ret;
     r.c = c.*;
     r.th = thr();
     @atomicStore(u32, &r.th.in_handler, 0, .seq_cst); // a fault handler's hold ends with its context
@@ -783,10 +782,9 @@ fn pendingAfter(t: *const Trap, r: u64) noreturn {
 // resumeCtx ends syscall nr, whose trap state was copied to c (a vfork
 // parent, which left the guest stack), with result r; pending signals are
 // delivered on the way out as afterSyscall does.
-var resume_frames: [MAX_SLOTS]Frame = undefined;
 
 pub fn resumeCtx(c: *Ctx, nr: u64, r: u64) noreturn {
-    const t = A.trapFromCtx(c, nr, &resume_frames[tl().slot]);
+    const t = A.trapFromCtx(c, nr, &blocks.mine().resume_frame);
     A.setResult(c, afterSyscall(&t, r));
     continueWith(c);
 }
@@ -794,9 +792,12 @@ pub fn resumeCtx(c: *Ctx, nr: u64, r: u64) noreturn {
 // forkChild sets up a fork child's only thread: the other threads, their
 // events (not inheritable) and futex waits are the parent's.
 pub fn forkChild(slot: usize, os_tid: u32, stub_sp: u64, win_stack: [3]u64) void {
-    for (&tls_blocks) |*b| b.* = .{};
+    for (0..blocks.count()) |c| {
+        const k = blocks.chunk(c) orelse continue;
+        for (k[0..blocks.CHUNK]) |*b| b.tls = .{};
+    }
     @atomicStore(u32, &g_threads, 1, .seq_cst);
-    tls_blocks[slot].win_stack = win_stack;
+    blocks.at(slot).tls.win_stack = win_stack;
     startThread(slot, os_tid);
     setThread(false, 0);
     setStubSp(stub_sp);
@@ -1122,15 +1123,17 @@ pub fn park(deadline: i64) void {
 // again.
 pub fn futexWake(addr: u64, n: u32) u32 {
     var woke: u32 = 0;
-    const self = tl().slot;
-    var i: usize = 0;
-    while (i < MAX_SLOTS and woke < n) : (i += 1) {
-        if (i == self) continue;
-        const w = &tls_blocks[i];
-        if (!w.ready or w.event == 0) continue;
-        if (@cmpxchgStrong(u64, &w.futex, addr, 0, .seq_cst, .seq_cst) != null) continue;
-        _ = NtSetEvent(w.event, null);
-        woke += 1;
+    const self = tl();
+    for (0..blocks.count()) |c| {
+        const k = blocks.chunk(c) orelse continue;
+        for (k[0..blocks.CHUNK]) |*b| {
+            if (woke == n) return woke;
+            const w = &b.tls;
+            if (w == self or !w.ready or w.event == 0) continue;
+            if (@cmpxchgStrong(u64, &w.futex, addr, 0, .seq_cst, .seq_cst) != null) continue;
+            _ = NtSetEvent(w.event, null);
+            woke += 1;
+        }
     }
     return woke;
 }

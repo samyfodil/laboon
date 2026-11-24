@@ -67,6 +67,13 @@ fn encB(from: u64, to: u64) ?u32 {
 }
 
 fn allocNear(addr: u64, prot: u32) ?u64 {
+    // Deep inside the guest's mappings (a JVM's 240 MiB code cache) the host
+    // has nothing free in range: take a page of the areas they live in.
+    return near(addr, 0x1000, MEM_COMMIT | MEM_RESERVE, prot) orelse stub.mem.stubPage(addr, prot);
+}
+
+// near allocates size bytes at a free 64 KiB granule in branch range of addr.
+fn near(addr: u64, size: usize, typ: u32, prot: u32) ?u64 {
     var k: u64 = 1;
     while (k < 2000) : (k += 1) {
         const down = (addr & ~@as(u64, 0xffff)) -% k * 0x10000;
@@ -74,13 +81,11 @@ fn allocNear(addr: u64, prot: u32) ?u64 {
         for ([2]u64{ down, up }) |a| {
             if (a < 0x10000 or a >= 1 << 47) continue;
             var b: usize = a;
-            var s: usize = 0x1000;
-            if (NtAllocateVirtualMemory(SELF, &b, 0, &s, MEM_COMMIT | MEM_RESERVE, prot) >= 0) return b;
+            var s: usize = size;
+            if (NtAllocateVirtualMemory(SELF, &b, 0, &s, typ, prot) >= 0) return b;
         }
     }
-    // Deep inside the guest's mappings (a JVM's 240 MiB code cache) the host
-    // has nothing free in range: take a page of the areas they live in.
-    return stub.mem.stubPage(addr, prot);
+    return null;
 }
 
 // imported returns the function an import thunk (adrp x16, IAT page; ldr
@@ -248,41 +253,73 @@ fn writeIsland(at: u64, back: u64) void {
 
 // ---- resume slots ----------------------------------------------------------
 //
-// One 16-byte slot per channel slot in each resume page; a page is allocated
-// near the first target out of every existing page's reach.
+// A resume page holds a 16-byte slot for each of a group of GROUP channel
+// slots, which only that group's threads use. Pages come in spans: a 64 KiB
+// reservation near the first target out of every span's reach, serving SPAN
+// groups from g0, with a group's page committed when one of its threads first
+// resumes there. Deep inside the guest's mappings a span is a single page of
+// the areas (stubPage), for one group.
 
 const MRS_X18_TPIDR: u32 = 0xd53bd052;
 const LDR_X18_AUX: u32 = 0xf9400000 | (stub.SLOT_AUX / 8) << 10 | 18 << 5 | 18;
-const MAX_PAGES = 64;
-var resume_pages: [MAX_PAGES]u64 = [_]u64{0} ** MAX_PAGES;
+const GROUP = 0x1000 / 16;
+const SPAN = 16;
+const MAX_SPANS = 256;
+const Span = struct { base: u64 = 0, g0: usize = 0, n: usize = 0, live: u32 = 0 };
+var spans = [_]Span{.{}} ** MAX_SPANS;
+var nspans: usize = 0; // published, with every field but live final
 var resume_lock: u32 = 0;
 
-fn resumePage(pc: u64, off: u64) u64 {
-    for (&resume_pages) |*p| {
-        const v = @atomicLoad(u64, p, .acquire);
-        if (v == 0) break;
-        if (encB(v + off + 8, pc) != null) return v;
+// spanPage is group g's page of span s, if s serves g and its slot off
+// reaches pc.
+fn spanPage(s: *const Span, pc: u64, g: usize, off: u64) ?u64 {
+    if (g < s.g0 or g >= s.g0 + s.n) return null;
+    const p = s.base + (g - s.g0) * 0x1000;
+    return if (encB(p + off + 8, pc) != null) p else null;
+}
+
+fn resumePage(pc: u64, g: usize, off: u64) u64 {
+    for (spans[0..@atomicLoad(usize, &nspans, .acquire)]) |*s| {
+        const p = spanPage(s, pc, g, off) orelse continue;
+        if (@atomicLoad(u32, &s.live, .acquire) & @as(u32, 1) << @intCast(g - s.g0) != 0) return p;
+        break;
     }
     while (@cmpxchgWeak(u32, &resume_lock, 0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     defer @atomicStore(u32, &resume_lock, 0, .release);
-    for (&resume_pages) |*p| {
-        const v = @atomicLoad(u64, p, .acquire);
-        if (v != 0) {
-            if (encB(v + off + 8, pc) != null) return v;
-            continue;
+    for (spans[0..nspans]) |*s| {
+        const p = spanPage(s, pc, g, off) orelse continue;
+        const bit = @as(u32, 1) << @intCast(g - s.g0);
+        if (s.live & bit == 0) {
+            var b: usize = p;
+            var n: usize = 0x1000;
+            if (NtAllocateVirtualMemory(SELF, &b, 0, &n, MEM_COMMIT, PAGE_EXECUTE_READWRITE) < 0) stub.die(0xE0000024);
+            _ = @atomicRmw(u32, &s.live, .Or, bit, .release);
         }
-        const n = allocNear(pc, PAGE_EXECUTE_READWRITE) orelse break;
-        @atomicStore(u64, p, n, .release);
-        return n;
+        return p;
     }
-    stub.die(0xE0000024);
+    if (nspans == MAX_SPANS) stub.die(0xE0000024);
+    const s = &spans[nspans];
+    const g0 = g - g % SPAN;
+    if (near(pc, SPAN * 0x1000, MEM_RESERVE, PAGE_EXECUTE_READWRITE)) |b| {
+        s.* = .{ .base = b, .g0 = g0, .n = SPAN };
+        var c: usize = b + (g - g0) * 0x1000;
+        var n: usize = 0x1000;
+        if (NtAllocateVirtualMemory(SELF, &c, 0, &n, MEM_COMMIT, PAGE_EXECUTE_READWRITE) < 0) stub.die(0xE0000024);
+        s.live = @as(u32, 1) << @intCast(g - g0);
+    } else {
+        const b = stub.mem.stubPage(pc, PAGE_EXECUTE_READWRITE) orelse stub.die(0xE0000024);
+        s.* = .{ .base = b, .g0 = g, .n = 1, .live = 1 };
+    }
+    @atomicStore(usize, &nspans, nspans + 1, .release);
+    return spanPage(s, pc, g, off) orelse stub.die(0xE0000025);
 }
 
 // resumeSlot readies this thread's slot to enter the guest at pc with the
 // guest's x18 = x18 and returns its address.
 pub fn resumeSlot(pc: u64, x18: u64) u64 {
-    const off = 16 * (stub.curSlot() & 0xff);
-    const s: [*]u32 = @ptrFromInt(resumePage(pc, off) + off);
+    const slot = stub.curSlot();
+    const off = 16 * (slot % GROUP);
+    const s: [*]u32 = @ptrFromInt(resumePage(pc, slot / GROUP, off) + off);
     tebStore(stub.SLOT_AUX, x18);
     s[0] = MRS_X18_TPIDR;
     s[1] = LDR_X18_AUX;

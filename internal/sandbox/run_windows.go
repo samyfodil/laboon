@@ -77,23 +77,16 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 		r.cache = defaultCache()
 	}
 
-	// One section holds every process's channel slots, signal records and
-	// copy windows; each stub maps it whole (and a fork child inherits the
-	// view).
-	sec, err := windows.CreateFileMapping(windows.InvalidHandle, nil, windows.PAGE_READWRITE, 0, chanLen, nil)
+	// One region holds every process's channel slots, signal records and
+	// copy windows, a chunk of slots at a time (chanmap_windows.go); every
+	// stub sees all of it, and a fork child inherits its parent's.
+	chans, err := newChanMap()
 	if err != nil {
-		return 0, fmt.Errorf("channel section: %w", err)
+		return 0, fmt.Errorf("channel: %w", err)
 	}
-	defer windows.CloseHandle(sec)
-	r.sec = sec
-	view, err := windows.MapViewOfFile(sec, windows.FILE_MAP_WRITE, 0, 0, chanLen)
-	if err != nil {
-		return 0, err
-	}
-	defer windows.UnmapViewOfFile(view)
-	// view is memory outside the Go heap; read it as a pointer without
-	// a uintptr conversion vet would flag.
-	mem := unsafe.Slice((*byte)(*(*unsafe.Pointer)(unsafe.Pointer(&view))), chanLen)
+	defer chans.close()
+	r.chans = chans
+	mem := chans.mem()
 
 	tmp, err := os.MkdirTemp("", "lc-run-")
 	if err != nil {
@@ -110,6 +103,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 		return 0, err
 	}
 	defer fs.close()
+	fs.backSlot = chans.back
 	if cfg.RootFS == nil {
 		if prog, err = fs.bindProgram(prog); err != nil {
 			return 0, fmt.Errorf("laboon: program: %w", err)
@@ -230,7 +224,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 type procRun struct {
 	cfg   Config
 	cache *rewrite.Cache
-	sec   windows.Handle
+	chans *chanMap
 	job   windows.Handle
 	futex futexTable // futexes on shared memory, across the run's stubs
 	pool  stubPool
@@ -253,7 +247,7 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 		sp = pooled.sp
 	} else {
 		var err error
-		if sp, err = startStub(r.job, []windows.Handle{r.sec, ch.evStub, ch.evSup}, uint64(dg.slot*slotSize)); err != nil {
+		if sp, err = startStub(r.job, []windows.Handle{r.chans.section(dg.slot), ch.evStub, ch.evSup}, uint64(dg.slot*slotSize)); err != nil {
 			return nil, err
 		}
 	}
@@ -290,6 +284,9 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 	}
 	if pg.kind != msgReady {
 		return w, errProtocol
+	}
+	if err := r.adoptStub(sp.proc, pg.args[1]); err != nil {
+		return w, err
 	}
 	w.entry = pg.args[0]
 	w.exitEntry = pg.args[5]

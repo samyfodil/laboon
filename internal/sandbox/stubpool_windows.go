@@ -76,11 +76,11 @@ func (r *procRun) startPooled(fs *dfs) *pooledStub {
 		return nil
 	}
 	ps := &pooledStub{ch: ch, slot: idx}
-	if ps.sp, err = startStub(r.job, []windows.Handle{r.sec, ch.evStub, ch.evSup}, uint64(idx*slotSize)); err != nil {
+	if ps.sp, err = startStub(r.job, []windows.Handle{r.chans.section(idx), ch.evStub, ch.evSup}, uint64(idx*slotSize)); err != nil {
 		ps.release(fs)
 		return nil
 	}
-	if ch.setProc(ps.sp.proc) != nil || ch.wait() != nil || pg.kind != msgReady {
+	if ch.setProc(ps.sp.proc) != nil || ch.wait() != nil || pg.kind != msgReady || r.adoptStub(ps.sp.proc, pg.args[1]) != nil {
 		windows.TerminateProcess(ps.sp.proc, 1)
 		ps.sp.close()
 		ps.release(fs)

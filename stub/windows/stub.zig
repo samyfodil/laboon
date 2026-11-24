@@ -35,6 +35,7 @@ pub fn ensureService() void {
 }
 const sig = @import("sig.zig");
 const thread = @import("thread.zig");
+const blocks = @import("blocks.zig");
 
 pub const arch = switch (builtin.cpu.arch) {
     .x86_64 => @import("x86_64.zig"),
@@ -60,6 +61,32 @@ pub const SLOT_SIZE: usize = 4096;
 // (sandbox/chanwin.go).
 const WIN_OFF: usize = MAX_SLOTS * SLOT_SIZE + MAX_SLOTS * 0x4000;
 const WIN_SIZE: usize = 256 << 10;
+
+// The channel region is a placeholder reservation with each chunk of
+// CHAN_CHUNK slots mapped in from a section of its own
+// (sandbox/chanmap_windows.go): the stub maps its own slot's chunk, from the
+// section it starts with, and the supervisor maps the rest.
+const CHAN_CHUNK: usize = 64;
+const CHAN_LEN: usize = WIN_OFF + WIN_SIZE * MAX_SLOTS;
+
+// mapChunk maps chunk c's channel pages, signal records and windows from sec
+// into the region at base, each part in a placeholder split out for it.
+fn mapChunk(sec: HANDLE, base: usize, c: usize) bool {
+    const s = CHAN_CHUNK * SLOT_SIZE;
+    const g = CHAN_CHUNK * sig.STRIDE;
+    const w = CHAN_CHUNK * WIN_SIZE;
+    const parts = [_][3]usize{ .{ c * s, 0, s }, .{ sig.AREA_OFF + c * g, s, g }, .{ WIN_OFF + c * w, s + g, w } };
+    for (parts) |p| {
+        var lo = base + p[0];
+        var n = p[2];
+        _ = NtFreeVirtualMemory(SELF, &lo, &n, 0x8000 | 0x2); // MEM_RELEASE|MEM_PRESERVE_PLACEHOLDER: split it out
+        lo = base + p[0];
+        n = p[2];
+        var off: i64 = @intCast(p[1]);
+        if (NtMapViewOfSectionEx(sec, SELF, &lo, &off, &n, 0x4000, 0x04, null, 0) < 0) return false; // MEM_REPLACE_PLACEHOLDER
+    }
+    return true;
+}
 
 const MSG_READY: u64 = 1;
 const MSG_SYSCALL: u64 = 2;
@@ -125,12 +152,14 @@ pub const HANDLE = usize;
 pub const SELF: HANDLE = ~@as(usize, 0);
 
 extern "ntdll" fn NtClose(h: HANDLE) callconv(win.WINAPI) NTSTATUS;
-extern "ntdll" fn NtMapViewOfSection(section: HANDLE, process: HANDLE, base: *usize, zero_bits: usize, commit: usize, offset: ?*i64, size: *usize, inherit: u32, alloc: u32, protect: u32) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtWaitForSingleObject(h: HANDLE, alertable: u8, timeout: ?*const i64) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtSetEvent(h: HANDLE, prev: ?*i32) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn NtTerminateProcess(h: HANDLE, status: NTSTATUS) callconv(win.WINAPI) NTSTATUS;
 extern "ntdll" fn RtlAddVectoredExceptionHandler(first: u32, handler: *const fn (*win.EXCEPTION_POINTERS) callconv(win.WINAPI) i32) callconv(win.WINAPI) ?*anyopaque;
 extern "ntdll" fn NtAllocateVirtualMemory(proc: HANDLE, base: *usize, zero_bits: usize, size: *usize, typ: u32, prot: u32) callconv(win.WINAPI) NTSTATUS;
+extern "ntdll" fn NtAllocateVirtualMemoryEx(proc: HANDLE, base: *usize, size: *usize, typ: u32, prot: u32, params: ?*anyopaque, n: u32) callconv(win.WINAPI) NTSTATUS;
+extern "ntdll" fn NtFreeVirtualMemory(proc: HANDLE, base: *usize, size: *usize, typ: u32) callconv(win.WINAPI) NTSTATUS;
+extern "ntdll" fn NtMapViewOfSectionEx(sec: HANDLE, proc: HANDLE, base: *usize, off: ?*i64, size: *usize, typ: u32, prot: u32, params: ?*anyopaque, n: u32) callconv(win.WINAPI) NTSTATUS;
 
 pub fn curSlot() usize {
     return (arch.tebLoad(SLOT_CHAN) - chan_base) / SLOT_SIZE;
@@ -147,12 +176,11 @@ pub fn allocRWX(base: *usize, size: *usize) ?usize {
 // The linker is always told to keep _tls_index; the stub has no TLS directory.
 export var _tls_index: u32 = 0;
 
-// One auto-reset event pair per channel slot: a shared pair would lose a
-// wakeup when more than one guest thread waits. The supervisor wakes the stub
-// thread of a slot by its evStub, the stub wakes the supervisor by its evSup.
-pub const MAX_SLOTS = 256;
-var ev_stub: [MAX_SLOTS]HANDLE = [_]HANDLE{0} ** MAX_SLOTS;
-var ev_sup: [MAX_SLOTS]HANDLE = [_]HANDLE{0} ** MAX_SLOTS;
+// The slot index space: PID_MAX_LIMIT, as many threads as Linux can ever
+// have (sandbox/slots_windows.go). One auto-reset event pair per slot, in its
+// block: a shared pair would lose a wakeup when more than one guest thread
+// waits.
+pub const MAX_SLOTS: usize = 1 << 22;
 pub var chan_base: usize = 0;
 
 // window is ch's slot window, in the stub.
@@ -173,8 +201,9 @@ fn slotIdx(ch: *Chan) usize {
 // setSlotEvents records a newly created thread's channel events (the arch half
 // reads them from the slot and calls this before the thread's first exchange).
 pub fn setSlotEvents(idx: usize, es: HANDLE, ep: HANDLE) void {
-    ev_stub[idx] = es;
-    ev_sup[idx] = ep;
+    const b = blocks.at(idx);
+    b.ev_stub = es;
+    b.ev_sup = ep;
 }
 var image_lo: usize = 0;
 var image_hi: usize = 0;
@@ -230,7 +259,7 @@ fn exchangeOnce(ch: *Chan) void {
     @atomicStore(u32, &ch.state, ST_REQ, .seq_cst);
     var woke: i64 = 0;
     if (@atomicLoad(u32, &ch.sup_sleep, .seq_cst) != 0) {
-        _ = NtSetEvent(ev_sup[idx], null);
+        _ = NtSetEvent(blocks.at(idx).ev_sup, null);
         woke = sig.nowNs();
     }
     defer if (woke != 0) noteWake(sig.nowNs() - woke);
@@ -242,7 +271,7 @@ fn exchangeOnce(ch: *Chan) void {
     while (true) {
         @atomicStore(u32, &ch.stub_sleep, 1, .seq_cst);
         if (@atomicLoad(u32, &ch.state, .seq_cst) == ST_REP) break;
-        _ = NtWaitForSingleObject(ev_stub[idx], 1, null);
+        _ = NtWaitForSingleObject(blocks.at(idx).ev_stub, 1, null);
     }
     @atomicStore(u32, &ch.stub_sleep, 0, .seq_cst);
 }
@@ -365,7 +394,7 @@ pub fn exchangePub(ch: *Chan) void {
 
 pub fn postReq(ch: *Chan) void {
     @atomicStore(u32, &ch.state, ST_REQ, .seq_cst);
-    if (@atomicLoad(u32, &ch.sup_sleep, .seq_cst) != 0) _ = NtSetEvent(ev_sup[slotIdx(ch)], null);
+    if (@atomicLoad(u32, &ch.sup_sleep, .seq_cst) != 0) _ = NtSetEvent(blocks.at(slotIdx(ch)).ev_sup, null);
 }
 
 // ownCode reports whether pc is the stub's own.
@@ -464,10 +493,14 @@ pub fn vehUnlock() void {
 // forkReset gives a fork child's only thread its slot idx and the slot's
 // events (inherited); the parent's other events are not the child's.
 pub fn forkReset(idx: usize, es: HANDLE, ep: HANDLE) void {
-    @memset(&ev_stub, 0);
-    @memset(&ev_sup, 0);
-    ev_stub[idx] = es;
-    ev_sup[idx] = ep;
+    for (0..blocks.count()) |c| {
+        const k = blocks.chunk(c) orelse continue;
+        for (k[0..blocks.CHUNK]) |*b| {
+            b.ev_stub = 0;
+            b.ev_sup = 0;
+        }
+    }
+    setSlotEvents(idx, es, ep);
 }
 
 pub export fn wWinMainCRTStartup() callconv(win.WINAPI) noreturn {
@@ -475,14 +508,17 @@ pub export fn wWinMainCRTStartup() callconv(win.WINAPI) noreturn {
     cmdArgs(&h);
     const off = h[3];
     const idx = off / SLOT_SIZE;
-    if (idx >= MAX_SLOTS) die(0xE0000002);
-    ev_stub[idx] = h[1];
-    ev_sup[idx] = h[2];
+    if (!blocks.ensure(idx)) die(0xE0000002);
+    setSlotEvents(idx, h[1], h[2]);
     imageRange();
     var base: usize = 0;
-    var size: usize = 0;
-    // ViewShare: a fork child keeps the channel at the same address.
-    if (NtMapViewOfSection(h[0], SELF, &base, 0, 0, null, &size, 1, 0, 0x04) < 0) die(0xE0000003);
+    var size: usize = CHAN_LEN;
+    // A fork child keeps the region at the same address. It is a terabyte:
+    // an arm64 guest's 39-bit task window could not hold it, so there it goes
+    // top-down, above the window.
+    const top_down: u32 = if (builtin.cpu.arch == .aarch64) 0x100000 else 0; // MEM_TOP_DOWN
+    if (NtAllocateVirtualMemoryEx(SELF, &base, &size, 0x2000 | 0x40000 | top_down, 0x01, null, 0) < 0) die(0xE0000003); // MEM_RESERVE|MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS
+    if (!mapChunk(h[0], base, idx / CHAN_CHUNK)) die(0xE0000003);
     chan_base = base;
     claimTls();
     arch.tebStore(SLOT_CHAN, base + off);
@@ -503,14 +539,14 @@ pub export fn wWinMainCRTStartup() callconv(win.WINAPI) noreturn {
         // fields) and reports ready there.
         const noff = ch.args[0];
         const ni = noff / SLOT_SIZE;
-        if (noff % SLOT_SIZE != 0 or ni >= MAX_SLOTS) die(0xE0000006);
-        _ = NtClose(ev_stub[si]);
-        _ = NtClose(ev_sup[si]);
-        ev_stub[si] = 0;
-        ev_sup[si] = 0;
+        if (noff % SLOT_SIZE != 0 or !blocks.ensure(ni)) die(0xE0000006);
+        const old = blocks.at(si);
+        _ = NtClose(old.ev_stub);
+        _ = NtClose(old.ev_sup);
+        old.ev_stub = 0;
+        old.ev_sup = 0;
         ch = @ptrFromInt(base + noff);
-        ev_stub[ni] = ch.stdio;
-        ev_sup[ni] = ch.pinfo;
+        setSlotEvents(ni, ch.stdio, ch.pinfo);
         si = ni;
         arch.tebStore(SLOT_CHAN, base + noff);
     }

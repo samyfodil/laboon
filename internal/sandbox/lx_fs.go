@@ -79,17 +79,19 @@ type dfs struct {
 	shared  map[core.NodeID]*shBacking // the one MAP_SHARED backing per non-host file, keyed by vnode (sharedback.go)
 	sharedN atomic.Int64               // number of live backings; zero makes every read/write skip the lookup
 
-	slots     indexPool
-	hops      hopTable              // each stub process's host-op entry (Linux)
-	exited    map[int]chan struct{} // host pid -> closed once that stub process has ended (watchStub)
-	nextPid   int
-	initNs    *pidns          // the host pid namespace (id 0, identity)
-	nextNsID  int             // next pid-namespace id
-	procs     map[int]*dproc  // by guest pid
-	pt        map[int]*pstate // processes (thread groups) by tgid, live and zombie
-	tracing   ptraceBackend
-	run       *runInfo // what starting another stub process needs
-	tmp       []string // temp files to delete at end of run (exec sites)
+	slots    indexPool
+	backed   int                   // slots taken so far: [0, backed) (takeSlot)
+	backSlot func(int) bool        // backs a slot's pages of the shared region, nil where they back themselves
+	hops     hopTable              // each stub process's host-op entry (Linux)
+	exited   map[int]chan struct{} // host pid -> closed once that stub process has ended (watchStub)
+	nextPid  int
+	initNs   *pidns          // the host pid namespace (id 0, identity)
+	nextNsID int             // next pid-namespace id
+	procs    map[int]*dproc  // by guest pid
+	pt       map[int]*pstate // processes (thread groups) by tgid, live and zombie
+	tracing  ptraceBackend
+	run      *runInfo // what starting another stub process needs
+	tmp      []string // temp files to delete at end of run (exec sites)
 
 	top     *hostfs.Layer        // the writable upper layer: the durable metadata sidecar and whiteout markers (the overlay backend does the copy-up)
 	ns      *namespace.Namespace // the shared overlay view (no pseudo mounts); a guest uses its own g.ns built from fs.overlay
@@ -128,17 +130,19 @@ type dproc struct {
 func newDfs(rootFS core.FileSystem, upper string, mem []byte, done <-chan struct{}, tmp string) (*dfs, error) {
 	fs := &dfs{
 		mem: mem, done: done, tmpDir: tmp,
-		slots:     indexPool{limit: maxSlots},
-		exited:    map[int]chan struct{}{},
-		nextPid:   2, // pid 1 is the main process
-		initNs:    newInitNs(),
-		nextNsID:  1,
-		procs:     map[int]*dproc{},
-		pt:        map[int]*pstate{},
+		slots:    indexPool{limit: maxSlots},
+		exited:   map[int]chan struct{}{},
+		nextPid:  2, // pid 1 is the main process
+		initNs:   newInitNs(),
+		nextNsID: 1,
+		procs:    map[int]*dproc{},
+		pt:       map[int]*pstate{},
 	}
 	fs.cond = sync.NewCond(&fs.mu)
 	fs.ov.store = core.NewMetaStore() // inode-keyed guest metadata, shared with the overlay backend
-	fs.slots.take()                   // slot 0 is the main process
+	if fs.takeSlot() != 0 {           // slot 0 is the main process
+		return nil, errors.New("sandbox: no memory for the channel")
+	}
 	// A host-directory root is a host path behind the FileSystem: it runs the
 	// confined host-overlay path below, not the generic-backend path.
 	root, isHost := HostRootPath(rootFS)
@@ -461,10 +465,25 @@ func (fs *dfs) addTmp(path string) {
 func (fs *dfs) allocSlot() int {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	i := fs.slots.take()
+	i := fs.takeSlot()
 	if i >= 0 {
 		// No stub runs on it yet: clear a stDead its last user left.
 		atomic.StoreUint32(&(*chanPage)(unsafe.Pointer(&fs.mem[i*slotSize])).state, 0)
+	}
+	return i
+}
+
+// takeSlot takes the lowest free slot, its pages of the shared region backed
+// (backSlot), or -1. The slots taken so far are [0, fs.backed): a slot past
+// them is the next one. fs.mu held, or fs not yet shared.
+func (fs *dfs) takeSlot() int {
+	i := fs.slots.take()
+	if i >= fs.backed {
+		if fs.backSlot != nil && !fs.backSlot(i) {
+			fs.slots.put(i)
+			return -1
+		}
+		fs.backed = i + 1
 	}
 	return i
 }

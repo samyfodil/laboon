@@ -9,6 +9,7 @@ const win = std.os.windows;
 const stub = @import("stub.zig");
 const sig = @import("sig.zig");
 const futex = @import("futex.zig");
+const blocks = @import("blocks.zig");
 const arch = stub.arch;
 
 const HANDLE = usize;
@@ -161,7 +162,7 @@ fn sleepTo(deadline: i64, rem: u64, absolute: bool) u64 {
 
 // ---- clone / threads -------------------------------------------------------
 
-const Handoff = struct {
+pub const Handoff = struct {
     chan: u64,
     tls: u64,
     ctid: u64,
@@ -170,8 +171,6 @@ const Handoff = struct {
     flags: u64,
     frame: sig.Frame,
 };
-
-var handoffs: [sig.MAX_SLOTS]Handoff = undefined;
 
 // doClone posts clone, fork, vfork or clone3 to the supervisor, which
 // allocates the slot, the pid and the signal records and replies:
@@ -202,7 +201,10 @@ fn doClone(t: *sig.Trap) u64 {
     const tls = ch.args[4];
     const ctid = ch.args[5];
     const idx = off / stub.SLOT_SIZE;
-    const h = &handoffs[idx];
+    const vfork = flags & CLONE_VFORK != 0;
+    const traced = ch.null_fds & stub.WIN_TRACED != 0; // as the supervisor saw it when it replied
+    if (!blocks.ensure(idx)) return cloneFailed(off, vfork, traced);
+    const h = &blocks.at(idx).handoff;
     h.chan = stub.chan_base + off;
     h.tls = if (flags & CLONE_SETTLS != 0) tls else arch.tebLoad(stub.SLOT_TP);
     h.ctid = if (flags & CLONE_CHILD_CLEARTID != 0) ctid else 0;
@@ -213,22 +215,9 @@ fn doClone(t: *sig.Trap) u64 {
     if (flags & CLONE_PARENT_SETTID != 0) @as(*u32, @ptrFromInt(ptid)).* = @truncate(tid);
     if (flags & CLONE_CHILD_SETTID != 0) @as(*u32, @ptrFromInt(ctid)).* = @truncate(tid);
 
-    const vfork = flags & CLONE_VFORK != 0;
-    const traced = ch.null_fds & stub.WIN_TRACED != 0; // as the supervisor saw it when it replied
     var th: HANDLE = 0;
-    if (NtCreateThreadEx(&th, THREAD_ALL_ACCESS, null, CURRENT_PROCESS, &lc_thread_start, h, if (vfork) 1 else 0, 0, 0, 0, null) < 0) {
-        const cc: *stub.Chan = @ptrFromInt(stub.chan_base + off);
-        cc.kind = 2;
-        cc.nr = NR_THREAD_GONE;
-        cc.args[0] = 0;
-        stub.postReq(cc);
-        if (vfork) {
-            _ = stub.request(NR_VFORK_WAIT, .{ 0, 0, 0, 0, 0, 0 });
-        } else if (traced) {
-            _ = stub.request(NR_FORKED, .{ 0, 0, 0, 0, 0, 0 });
-        }
-        return EAGAIN;
-    }
+    if (NtCreateThreadEx(&th, THREAD_ALL_ACCESS, null, CURRENT_PROCESS, &lc_thread_start, h, if (vfork) 1 else 0, 0, 0, 0, null) < 0)
+        return cloneFailed(off, vfork, traced);
     _ = sig.addThreads(1);
     if (vfork) vforkPark(t, tid, th);
     _ = NtClose(th);
@@ -238,30 +227,39 @@ fn doClone(t: *sig.Trap) u64 {
     return tid;
 }
 
+// cloneFailed gives back the slot at off, whose thread could not start.
+fn cloneFailed(off: u64, vfork: bool, traced: bool) u64 {
+    const cc: *stub.Chan = @ptrFromInt(stub.chan_base + off);
+    cc.kind = 2;
+    cc.nr = NR_THREAD_GONE;
+    cc.args[0] = 0;
+    stub.postReq(cc);
+    if (vfork) {
+        _ = stub.request(NR_VFORK_WAIT, .{ 0, 0, 0, 0, 0, 0 });
+    } else if (traced) {
+        _ = stub.request(NR_FORKED, .{ 0, 0, 0, 0, 0, 0 });
+    }
+    return EAGAIN;
+}
+
 // vforkPark holds a vfork parent until its child execs or exits. The child
 // runs on the parent's stack, where this call's frames live, so the parent
 // first copies its trap state out and moves to its stub stack; only then is
 // the child (created suspended) let go.
-var vfork_ctx: [sig.MAX_SLOTS]sig.Ctx = undefined;
-var vfork_th: [sig.MAX_SLOTS]HANDLE = undefined;
-var vfork_tid: [sig.MAX_SLOTS]u64 = undefined;
-var vfork_nr: [sig.MAX_SLOTS]u64 = undefined;
+pub const Vfork = struct { ctx: sig.Ctx, th: HANDLE, tid: u64, nr: u64 };
 
 fn vforkPark(t: *const sig.Trap, tid: u64, th: HANDLE) noreturn {
-    const idx = stub.curSlot();
-    vfork_ctx[idx] = sig.ctxFromTrap(t);
-    vfork_tid[idx] = tid;
-    vfork_nr[idx] = t.nr;
-    vfork_th[idx] = th;
-    arch.onStubStack(&lc_vfork_wait, &vfork_ctx[idx]);
+    const v = &blocks.mine().vfork;
+    v.* = .{ .ctx = sig.ctxFromTrap(t), .th = th, .tid = tid, .nr = t.nr };
+    arch.onStubStack(&lc_vfork_wait, &v.ctx);
 }
 
 fn lc_vfork_wait(c: *sig.Ctx) callconv(.C) noreturn {
-    const idx = stub.curSlot();
-    _ = NtResumeThread(vfork_th[idx], null);
-    _ = NtClose(vfork_th[idx]);
+    const v = &blocks.mine().vfork;
+    _ = NtResumeThread(v.th, null);
+    _ = NtClose(v.th);
     _ = stub.request(NR_VFORK_WAIT, .{ 0, 0, 0, 0, 0, 0 });
-    sig.resumeCtx(c, vfork_nr[idx], vfork_tid[idx]);
+    sig.resumeCtx(c, v.nr, v.tid);
 }
 
 // doFork clones the stub with RtlCloneUserProcess. The child has only the
@@ -284,6 +282,13 @@ fn doFork(t: *sig.Trap, ch: *stub.Chan) u64 {
     const win_stack = sig.winStack(); // the clone's thread is this one, on the same OS stack
     var info = std.mem.zeroes(CloneInfo);
     info.length = @sizeOf(CloneInfo);
+    // The child's block, in place before the clone: the child has the
+    // parent's chunks.
+    if (!blocks.ensure(idx)) {
+        _ = NtClose(es);
+        _ = NtClose(ep);
+        return stub.request(LC_FORKED, .{ 0, 0xC0000017, 0, 0, 0, 0 }); // STATUS_NO_MEMORY
+    }
     stub.mem.lockAll(); // no other thread is mid-way through the region table
     // The supervisor suspends this process's other threads where none holds
     // ntdll's vectored-handler list lock, which the child would otherwise
