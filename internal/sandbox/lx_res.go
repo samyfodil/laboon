@@ -45,7 +45,7 @@ func defaultRlimits() [rlimCount]rlimit {
 	}
 	r[rlimitStack] = rlimit{8 << 20, rlimInf}
 	r[4] = rlimit{0, rlimInf}                 // CORE
-	r[6] = rlimit{maxSlots - 1, maxSlots - 1} // NPROC: the channel slot pool
+	r[6] = rlimit{rlimInf, rlimInf}           // NPROC: the host's own limit applies
 	r[rlimitNofil] = rlimit{1024, 524288}     // NOFILE
 	r[8] = rlimit{8 << 20, 8 << 20}           // MEMLOCK
 	r[11] = rlimit{127516, 127516}            // SIGPENDING

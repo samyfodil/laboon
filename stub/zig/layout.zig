@@ -1,1 +1,1 @@
-pub const STUB_BASE: u64 = 0x6f0000000000;
+pub const STUB_BASE: u64 = 0x6c0000000000;

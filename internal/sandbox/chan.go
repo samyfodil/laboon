@@ -27,14 +27,14 @@ const (
 // to that base once the stub reports it at ready (stubwin_linux.go). A process
 // uses one stub, so one window.
 var (
-	stubLo    uint64 = 0x6f0000000000
-	stubHi    uint64 = 0x6f2000000000
-	slotsAddr uint64 = 0x6f1000000000 // SLOTS_ADDR in stub.zig
+	stubLo    uint64 = 0x6c0000000000
+	stubHi    uint64 = 0x700000000000
+	slotsAddr uint64 = 0x6c1000000000 // slotsAddr() in stub.zig
 )
 
 // stubWinSize is the window's extent (stub.WIN_SIZE): code + the channel,
 // signal/exec stacks and tid table that sit at fixed offsets above the base.
-const stubWinSize = 0x2000000000
+const stubWinSize = 0x40000000000
 
 // wait blocks until the stub posts a request. It spins first (catching a
 // request without the cost of a park) and then parks on the futex. How long it

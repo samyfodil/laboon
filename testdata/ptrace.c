@@ -178,8 +178,8 @@ static void debugger(pid_t child, int use_mem, int different_ns) {
     CHECK(lseek(fd, (uintptr_t)mem_area, SEEK_SET) == (uintptr_t)mem_area);
     CHECK(write(fd, b, sizeof(b)) == sizeof(b));
     errno = 0;
-    CHECK(pread(fd, b, 8, 0x6f0000000000UL) == -1 && errno == EIO);
-    CHECK(pwrite(fd, b, 8, 0x6f1000000000UL) == -1 && errno == EIO);
+    CHECK(pread(fd, b, 8, 0x6c0000000000UL) == -1 && errno == EIO);
+    CHECK(pwrite(fd, b, 8, 0x6c1000000000UL) == -1 && errno == EIO);
 #if defined(__x86_64__)
     void *pc = (void *)debug_add;
     errno = 0;

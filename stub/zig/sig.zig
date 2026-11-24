@@ -56,6 +56,15 @@ pub const Thread = extern struct {
     wake_at: u64, // ticks when either side last woke the other on this slot
     scratch_top: u64, // top of this thread's service stack (%gs:stubScratchTop)
     guest_gs: u64, // the guest's virtual %gs base: the stub owns the real %gs
+    spin: Spinner, // the adaptive spin of this thread's waits (stub.zig)
+};
+
+pub const Spinner = extern struct {
+    budget: u64, // spin budget, ticks
+    mean: u64, // EWMA of caught-reply latency
+    mad: u64, // EWMA of its absolute deviation
+    inited: bool,
+    _pad: [7]u8,
 };
 
 // Rec is the shared signal record of a thread. The pending sets themselves,
@@ -82,7 +91,7 @@ pub const Proc = extern struct {
 
 comptime {
     std.debug.assert(REC_OFF + @sizeOf(Thread) <= XFER_OFF); // see sandbox/mmap_linux.go
-    std.debug.assert(@sizeOf(Thread) == 80); // stubLocalLen in sandbox/fork_linux.go
+    std.debug.assert(@sizeOf(Thread) == 112); // stubLocalLen in sandbox/fork_linux.go
     std.debug.assert(XFER_OFF + 256 <= stub.SLOT_SIZE);
     std.debug.assert(@offsetOf(Rec, "mask") == 8);
     std.debug.assert(@offsetOf(Rec, "ss_flags") == 48);

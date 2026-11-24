@@ -41,9 +41,9 @@ const PATH_MAX: u64 = 4096;
 // struct epoll_event is packed on x86-64 only.
 const EPOLL_EVENT: u32 = if (builtin.cpu.arch == .x86_64) 12 else 16;
 
-// The argument areas, indexed like the slots (window offset 0x12).
+// The argument areas, indexed like the slots (window offset 0x130_).
 pub inline fn areasAddr() u64 {
-    return stub.winBase + 0x1200000000;
+    return stub.winBase + 0x13000000000;
 }
 
 // The slots' windows follow the slots and their signal areas, as in the memfd.

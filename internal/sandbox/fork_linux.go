@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"maps"
 	"slices"
 	"sync/atomic"
 
@@ -21,7 +22,7 @@ const (
 
 // stubLocalLen is the size of the stub's own per-thread state in a slot page
 // (struct Thread in stub/zig/sig.zig).
-const stubLocalLen = 80
+const stubLocalLen = 112
 
 // resetStubLocal clears the stub's own state in slot idx for a new thread:
 // what the slot's last thread left (a held unmap, say) is not the new one's.
@@ -58,6 +59,7 @@ func (m *memProc) forkCopy(fs *dfs) *memProc {
 	c.lay = m.lay
 	c.used = m.used
 	c.brk, c.brkLo = m.brk, m.brkLo
+	c.stackChunks = maps.Clone(m.stackChunks) // a fork inherits the stub's mappings
 	c.forkShMaps(m, fs) // the child inherits the shared mappings; keep their backings live
 	return c
 }
@@ -82,6 +84,16 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 	if h == nil {
 		fs.freeSlot(idx)
 		return fail(lxEAGAIN)
+	}
+	// The child's thread runs on its slot's stacks as the fork returns: map
+	// them here, before forkCopy, so the child inherits them and knows it.
+	g.mp.mu.Lock()
+	mapped := g.mapSlotStacks(idx)
+	g.mp.mu.Unlock()
+	if !mapped {
+		fs.freeHop(h)
+		fs.freeSlot(idx)
+		return fail(lxENOMEM)
 	}
 	gpid := fs.allocPid()
 	// stop ends the child's waits once its stub is gone (watchStub).
@@ -250,8 +262,11 @@ func (g *dguest) cloneThread(r cloneReq, cfg Config) int {
 		return fail(lxEAGAIN)
 	}
 	g.mp.mu.Lock()
-	bstack := g.host(unix.SYS_MMAP, 0, bootstrapStack, unix.PROT_READ|unix.PROT_WRITE,
-		unix.MAP_PRIVATE|unix.MAP_ANONYMOUS, ^uint64(0), 0)
+	bstack := int64(-1)
+	if g.mapSlotStacks(idx) {
+		bstack = g.host(unix.SYS_MMAP, 0, bootstrapStack, unix.PROT_READ|unix.PROT_WRITE,
+			unix.MAP_PRIVATE|unix.MAP_ANONYMOUS, ^uint64(0), 0)
+	}
 	if bstack >= 0 {
 		g.reserve(uint64(bstack), bootstrapStack)
 	}
@@ -389,8 +404,11 @@ func (g *dguest) cloneVMProc(r cloneReq, cfg Config) int {
 		return fail(lxEAGAIN)
 	}
 	g.mp.mu.Lock()
-	bstack := g.host(unix.SYS_MMAP, 0, bootstrapStack, unix.PROT_READ|unix.PROT_WRITE,
-		unix.MAP_PRIVATE|unix.MAP_ANONYMOUS, ^uint64(0), 0)
+	bstack := int64(-1)
+	if g.mapSlotStacks(idx) {
+		bstack = g.host(unix.SYS_MMAP, 0, bootstrapStack, unix.PROT_READ|unix.PROT_WRITE,
+			unix.MAP_PRIVATE|unix.MAP_ANONYMOUS, ^uint64(0), 0)
+	}
 	if bstack >= 0 {
 		g.reserve(uint64(bstack), bootstrapStack)
 	}

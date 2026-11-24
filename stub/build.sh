@@ -19,7 +19,7 @@ set -e
 cd "$(dirname "$0")"
 ZIG=${ZIG:-/tmp/zig-linux-x86_64-0.13.0/zig}
 
-STUB_PRIMARY=0x6f0000000000
+STUB_PRIMARY=0x6c0000000000
 
 common="-fno-unwind-tables -fno-stack-protector -fno-strip"
 

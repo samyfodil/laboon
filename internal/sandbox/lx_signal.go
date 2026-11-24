@@ -100,8 +100,10 @@ const (
 	// alone shares memory with none: stub/macos/wx.zig).
 	sigRunOff = 0x2000
 	// sigRunMemCap is Config.MaxBytes, which the macOS stubs enforce
-	// together: each publishes what its process has mapped at spMem.
-	sigRunMemCap = sigRunOff + 8
+	// together: each publishes what its process has mapped at spMem, and
+	// keeps sigRunMemUsed, the sum of those, by adding what it changed.
+	sigRunMemCap  = sigRunOff + 8
+	sigRunMemUsed = sigRunOff + 16
 
 	stProc    = 4
 	stMask    = 8
@@ -287,6 +289,14 @@ func (sr *sigRun) p64(off int) *uint64 { return (*uint64)(unsafe.Pointer(&sr.are
 func (sr *sigRun) ld(off int) uint64   { return atomic.LoadUint64(sr.p64(off)) }
 func (sr *sigRun) st(off int, v uint64) {
 	atomic.StoreUint64(sr.p64(off), v)
+}
+
+// dropMem takes the process leading slot out of the memory the run has
+// mapped. The swap pairs with the stubs' (setProcMem), so the run's sum stays
+// the sum of the records whichever comes first.
+func (sr *sigRun) dropMem(slot int) {
+	old := atomic.SwapUint64(sr.p64(pOff(slot)+spMem), 0)
+	atomic.AddUint64(sr.p64(sigRunMemUsed), -old)
 }
 
 func newSigThread(tid, tgid, slot int) *sigThread {
@@ -519,7 +529,7 @@ func (g *dguest) sigFork(child *dguest) {
 		return
 	}
 	sr.st(pOff(child.slot)+spPending, 0)
-	sr.st(pOff(child.slot)+spMem, 0)
+	sr.dropMem(child.slot)
 	o := tOff(g.slot)
 	ss := [3]uint64{sr.ld(o + stSsSp), sr.ld(o + stSsSize), uint64(atomic.LoadUint32(sr.p32(o + stSsFlags)))}
 	sr.initThread(child.slot, child.slot, child.pid, child.pid, sr.ld(o+stMask), ss)

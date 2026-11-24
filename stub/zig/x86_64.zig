@@ -70,7 +70,7 @@ pub inline fn ticks() u64 {
 }
 
 inline fn tidsAddr() u64 {
-    return stub.winBase + 0x1800000000;
+    return stub.winBase + 0x16000000000;
 }
 const MAX_TID: u64 = 4 << 20; // PID_MAX_LIMIT
 
@@ -313,8 +313,10 @@ comptime {
         \\  cmp %r9, %rax
         \\  jb .Lhspin
         \\.Lhpark:
+        \\  movabs $0x400000004, %rdx
+        \\  add %r12, %rdx
         \\  mov $1, %eax
-        \\  xchg %eax, 0x100004(%r12)
+        \\  xchg %eax, (%rdx)
         \\  mov (%r12), %eax
         \\  cmp %r14d, %eax
         \\  jne .Lhwoke
@@ -325,8 +327,10 @@ comptime {
         \\  xor %r10d, %r10d
         \\  syscall
         \\.Lhwoke:
+        \\  movabs $0x400000004, %rdx
+        \\  add %r12, %rdx
         \\  xor %eax, %eax
-        \\  xchg %eax, 0x100004(%r12)
+        \\  xchg %eax, (%rdx)
         \\  mov (%r12), %eax
         \\  cmp %r14d, %eax
         \\  je .Lhpark
@@ -387,15 +391,17 @@ comptime {
         \\  mov 56(%r12), %r9
         \\  syscall
         \\.Lhreply:
-        \\  mov %rax, 0x100008(%r12)
+        \\  movabs $0x400000000, %rdx
+        \\  add %r12, %rdx
+        \\  mov %rax, 8(%rdx)
         \\  mov (%r12), %ecx
         \\  mov %ecx, %r14d
-        \\  xchg %ecx, 0x100000(%r12)
+        \\  xchg %ecx, (%rdx)
         \\  mov 4(%r12), %eax
         \\  test %eax, %eax
         \\  jz .Lhwait
         \\  mov $202, %eax
-        \\  lea 0x100000(%r12), %rdi
+        \\  mov %rdx, %rdi
         \\  mov $1, %esi
         \\  mov $1, %edx
         \\  syscall
@@ -424,7 +430,7 @@ comptime {
 }
 
 comptime {
-    if (stub.FORK_FLAGS != 0x8011 or stub.HOP_FORK != ~@as(u64, 0)) @compileError("lc_hop_loop's constants moved");
+    if (stub.FORK_FLAGS != 0x8011 or stub.HOP_FORK != ~@as(u64, 0) or stub.HOP_REP != 0x400000000) @compileError("lc_hop_loop's constants moved");
 }
 
 // forkChildOn runs stub.zig lc_fork_child(cs, req, ctx, stack, cap) on the

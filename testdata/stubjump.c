@@ -13,7 +13,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 
-#define STUB_BASE 0x6f0000000000ul // stub/zig/layout.zig
+#define STUB_BASE 0x6c0000000000ul // stub/zig/layout.zig
 
 typedef long (*gadget_fn)(long, long, long, long, long, long, long);
 

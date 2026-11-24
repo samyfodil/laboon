@@ -37,7 +37,7 @@ const (
 
 	// hopWinOff is where the request pages are in the stub's window
 	// (stub.zig hopReqAddr).
-	hopWinOff = 0x1600000000
+	hopWinOff = 0x15000000000
 )
 
 // hopReqAddr is where a stub maps hop entry idx's request page.
@@ -67,7 +67,7 @@ type hop struct {
 
 // hopTable is the run's hop entries: which are taken, and whose they are.
 type hopTable struct {
-	used  []bool
+	pool  indexPool
 	byPid map[int]*hop // by stub host pid
 }
 
@@ -197,23 +197,20 @@ func (fs *dfs) allocHop() *hop {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	t := &fs.hops
-	if t.used == nil {
-		t.used = make([]bool, maxSlots)
+	if t.byPid == nil {
+		t.pool.limit = maxSlots
 		t.byPid = map[int]*hop{}
 	}
-	for i, used := range t.used {
-		if used {
-			continue
-		}
-		t.used[i] = true
-		h := &hop{idx: i,
-			req: (*hopReq)(unsafe.Pointer(&fs.mem[hopReqOff+i*slotSize])),
-			rep: (*hopRep)(unsafe.Pointer(&fs.mem[hopRepOff+i*slotSize]))}
-		*h.req = hopReq{}
-		*h.rep = hopRep{}
-		return h
+	i := t.pool.take()
+	if i < 0 {
+		return nil
 	}
-	return nil
+	h := &hop{idx: i,
+		req: (*hopReq)(unsafe.Pointer(&fs.mem[hopReqOff+i*slotSize])),
+		rep: (*hopRep)(unsafe.Pointer(&fs.mem[hopRepOff+i*slotSize]))}
+	*h.req = hopReq{}
+	*h.rep = hopRep{}
+	return h
 }
 
 // adoptHop records that stub process ospid runs hop h.
@@ -226,7 +223,7 @@ func (fs *dfs) adoptHop(ospid int, h *hop) {
 // freeHop returns an entry no stub process ever ran a thread on.
 func (fs *dfs) freeHop(h *hop) {
 	fs.mu.Lock()
-	fs.hops.used[h.idx] = false
+	fs.hops.pool.put(h.idx)
 	fs.mu.Unlock()
 }
 
@@ -238,7 +235,7 @@ func (fs *dfs) hopGone(ospid int, reaped bool) {
 	h := fs.hops.byPid[ospid]
 	if reaped && h != nil {
 		delete(fs.hops.byPid, ospid)
-		fs.hops.used[h.idx] = false
+		fs.hops.pool.put(h.idx)
 	}
 	fs.mu.Unlock()
 	if h != nil {

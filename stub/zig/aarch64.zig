@@ -41,7 +41,7 @@ pub const guest = [_]stub.SYS{
 };
 
 inline fn tidsAddr() u64 {
-    return stub.winBase + 0x1800000000;
+    return stub.winBase + 0x16000000000;
 }
 const MAX_TID: u64 = 4 << 20; // PID_MAX_LIMIT
 
@@ -276,7 +276,8 @@ comptime {
         \\  mov x22, x20
         \\  mov x23, xzr
         \\  mov x24, xzr
-        \\  add x25, x19, #0x100, lsl #12
+        \\  movz x25, #4, lsl #32
+        \\  add x25, x19, x25
         \\  add x26, x25, #4
         \\  add x27, x19, #4
         \\.Lhwait:
@@ -378,7 +379,7 @@ comptime {
 }
 
 comptime {
-    if (stub.FORK_FLAGS != 0x8011 or stub.HOP_FORK != ~@as(u64, 0)) @compileError("lc_hop_loop's constants moved");
+    if (stub.FORK_FLAGS != 0x8011 or stub.HOP_FORK != ~@as(u64, 0) or stub.HOP_REP != 0x400000000) @compileError("lc_hop_loop's constants moved");
 }
 
 // forkChildOn runs stub.zig lc_fork_child(cs, req, ctx, stack, cap) on the

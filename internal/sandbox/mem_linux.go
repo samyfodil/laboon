@@ -47,6 +47,8 @@ type memProc struct {
 	used       int64
 	brk, brkLo uint64
 
+	stackChunks map[int]bool // the slot stack chunks the stub process has mapped (stacks_linux.go)
+
 	// The initial stack's true bounds (exec sets them). The host kernel may
 	// merge this anonymous mapping with adjacent ones in /proc/<pid>/maps, so
 	// self-maps carves it back out as a distinct [stack] region: musl's

@@ -12,7 +12,7 @@ import "golang.org/x/sys/unix"
 
 // specialPark is where they wait, an offset in the stub's window that
 // stub.zig leaves free.
-const specialPark = 0x1400000000
+const specialPark = 0x16800000000
 
 // specialMap is one special mapping: where it is, and off, where it sits in
 // their block.

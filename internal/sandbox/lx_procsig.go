@@ -11,7 +11,7 @@ func init() {
 		sr := fs.sigs()
 		sr.mu.Lock()
 		if p := sr.procs[pid]; p != nil {
-			sr.st(pOff(p.slot)+spMem, 0) // its memory no longer counts against the cap
+			sr.dropMem(p.slot) // its memory no longer counts against the cap
 			delete(sr.procs, pid)
 			sr.countProcs()
 			for _, t := range p.threads {

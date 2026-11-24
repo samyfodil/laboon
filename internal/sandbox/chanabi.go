@@ -137,7 +137,6 @@ func markDead(pg *chanPage) {
 
 const (
 	slotSize = 4096
-	maxSlots = 256
 	slotsLen = slotSize * maxSlots
 )
 

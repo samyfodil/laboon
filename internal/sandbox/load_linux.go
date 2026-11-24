@@ -238,8 +238,8 @@ func align4(n uint32) uint32 { return (n + 3) &^ 3 }
 // An ancestor's window is already mapped, so its candidate is rejected and the
 // next is tried: no depth cap but address space.
 const (
-	stubWinTop   = 0x6f0000000000
-	stubWinFloor = 0x570000000000
+	stubWinTop   = 0x6c0000000000
+	stubWinFloor = 0x580000000000
 )
 
 // claimWindow finds a free high window in the stub's process for a nested

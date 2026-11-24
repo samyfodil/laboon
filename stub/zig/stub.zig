@@ -40,14 +40,14 @@ pub fn nr(s: SYS) u64 {
 // The stub's private window -- channel slots, per-slot signal/exec stacks, and
 // (per arch) the tid->slot table -- sits at winBase, a base chosen AT RUN TIME,
 // not baked in. winBase is the stub's own load base (&__ehdr_start): the
-// top-level stub is an ET_EXEC linked at STUB_BASE (0x6f...), and a nested stub
+// top-level stub is an ET_EXEC linked at STUB_BASE (0x6c...), and a nested stub
 // is a PIE the outer's loader places at a free high window, so every nesting
 // level gets a window clear of its outer's and one relocatable stub serves all
 // depths. The offsets below are fixed; only winBase moves. The supervisor
 // learns winBase from the ready handshake. STUB_BASE is the top-level base and
 // the first window the outer's loader tries for a nested stub.
 pub const STUB_BASE: u64 = @import("layout.zig").STUB_BASE;
-pub const WIN_SIZE: u64 = 0x2000000000; // 128 GiB reserved per stub window
+pub const WIN_SIZE: u64 = 0x40000000000; // 4 TiB of address space per stub window
 pub var winBase: u64 = STUB_BASE;
 
 // fsgsbase is set when the kernel lets user code read the thread pointer
@@ -92,18 +92,24 @@ pub inline fn slotsAddr() u64 {
     return winBase + 0x1000000000;
 }
 pub const SLOT_SIZE: u64 = 4096;
-pub const MAX_SLOTS: u64 = 256;
+// MAX_SLOTS is the slot index space: PID_MAX_LIMIT, as many threads as Linux
+// can ever have. The shared regions indexed by slot are mapped whole (memfd
+// pages cost nothing until touched); the private per-slot stacks are mapped
+// STACK_CHUNK slots at a time, by the supervisor through the hop thread, once
+// a thread of this process is to run on a slot of that chunk (stackChunk).
+pub const MAX_SLOTS: u64 = 1 << 22;
+pub const STACK_CHUNK: u64 = 64;
 // One alternate signal stack per channel slot, indexed like the slots. It is
 // large enough for the signal frame with SVE and SME state.
 pub inline fn altsAddr() u64 {
-    return winBase + 0x1c00000000;
+    return winBase + 0x1b000000000;
 }
 pub const ALT_SIZE: u64 = 128 << 10;
 // One per-slot stack for servicing an execve's address-space teardown. It
 // lives in the stub window (never a guest mapping), so unmapping every old
 // guest VMA cannot pull it out from under the stub.
 pub inline fn execsAddr() u64 {
-    return winBase + 0x1a00000000;
+    return winBase + 0x17000000000;
 }
 pub const EXEC_SIZE: u64 = 64 << 10;
 
@@ -114,9 +120,21 @@ pub const EXEC_SIZE: u64 = 64 << 10;
 // by a servicing frame underflowing into a neighbor. It lives in the stub
 // window, never a guest mapping.
 pub inline fn scratchAddr() u64 {
-    return winBase + 0x1e00000000;
+    return winBase + 0x23000000000;
 }
 pub const SCRATCH_SIZE: u64 = 64 << 10;
+
+// mapStackChunk maps chunk c of the three per-slot stack arrays. The
+// supervisor maps the others through the hop thread (sandbox/stacks_linux.go).
+fn mapStackChunk(c: u64) bool {
+    const flags = 0x02 | 0x10 | 0x20 | 0x4000; // PRIVATE|FIXED|ANONYMOUS|NORESERVE
+    const arrays = [_][2]u64{ .{ altsAddr(), ALT_SIZE }, .{ execsAddr(), EXEC_SIZE }, .{ scratchAddr(), SCRATCH_SIZE } };
+    inline for (arrays) |a| {
+        const at = a[0] + c * STACK_CHUNK * a[1];
+        if (sys(nr(.mmap), at, STACK_CHUNK * a[1], PROT_RW, flags, ~@as(u64, 0), 0) != at) return false;
+    }
+    return true;
+}
 
 // slotBySp is the slot of the thread running on stack pointer sp when sp is in
 // one of the stacks indexed like the slots -- the service stack (a trampoline),
@@ -151,17 +169,20 @@ const WIN_BYTES: u64 = 256 << 10; // sandbox/chanwin.go winSize
 const HOP_OFF: u64 = sig.AREA_LEN + MAX_SLOTS * WIN_BYTES;
 // The syscall argument areas (args.zig) follow the hop pages in the memfd.
 const ARGS_OFF: u64 = HOP_OFF + 2 * MAX_SLOTS * SLOT_SIZE;
-// The window offsets taken so far: 0x10 slots, 0x12 argument areas (args.zig),
-// 0x16 hop, 0x18 the tid table (arch), 0x1a exec stacks, 0x1c alternate
-// stacks, 0x1e service stacks.
+// The window offsets, each region MAX_SLOTS entries long: 0x010_ slots, their
+// signal areas and windows (to 0x124_), 0x130_ argument areas (args.zig),
+// 0x150_ hop request and reply pages, 0x158_ the hop stack, 0x160_ the tid
+// table (arch), 0x168_ left free for the guest's parked vDSO (sandbox/
+// vdso_linux.go specialPark), 0x170_ exec stacks, 0x1b0_ alternate stacks,
+// 0x230_ service stacks (to 0x270_), all within WIN_SIZE.
 pub inline fn hopReqAddr() u64 {
-    return winBase + 0x1600000000;
+    return winBase + 0x15000000000;
 }
 pub inline fn hopRepAddr() u64 {
     return hopReqAddr() + MAX_SLOTS * SLOT_SIZE;
 }
 pub inline fn hopStackAddr() u64 {
-    return winBase + 0x1610000000;
+    return winBase + 0x15800000000;
 }
 const HOP_STACK_SIZE: u64 = 64 << 10;
 
@@ -178,7 +199,7 @@ pub const HOP_FORK: u64 = ~@as(u64, 0);
 
 comptime {
     if (@offsetOf(HopReq, "sup_sleep") != 4 or @offsetOf(HopReq, "nr") != 8 or @offsetOf(HopReq, "args") != 16 or
-        @offsetOf(HopRep, "hop_sleep") != 4 or @offsetOf(HopRep, "ret") != 8 or HOP_REP != 0x100000)
+        @offsetOf(HopRep, "hop_sleep") != 4 or @offsetOf(HopRep, "ret") != 8 or HOP_REP != 0x400000000)
         @compileError("lc_hop_loop's offsets moved");
 }
 
@@ -343,18 +364,12 @@ fn wakeSup(ch: *Chan) void {
     _ = sys(nr(.futex), @intFromPtr(&ch.state), FUTEX_WAKE, 1, 0, 0, 0);
 }
 
-const Spinner = struct {
-    budget: u64 = 0, // spin budget, ticks
-    mean: u64 = 0, // EWMA of caught-reply latency
-    mad: u64 = 0, // EWMA of its absolute deviation
-    inited: bool = false,
-};
-var spinners: [MAX_SLOTS]Spinner = [_]Spinner{.{}} ** MAX_SLOTS;
+// A slot's spinner is in its thread record (sig.Thread), which the supervisor
+// clears for each new thread on the slot.
+const Spinner = sig.Spinner;
 
 fn spinnerOf(ch: *Chan) ?*Spinner {
-    const slot = (@intFromPtr(ch) - slotsAddr()) / SLOT_SIZE;
-    if (slot >= MAX_SLOTS) return null;
-    return &spinners[slot];
+    return &sig.recOf(ch).spin;
 }
 
 // The spin budget never exceeds cap: the park cost for a reply the waiter just
@@ -849,9 +864,7 @@ export fn stub_main(sp: u64) callconv(.C) noreturn {
     if (sys(nr(.mmap), args.areasAddr(), MAX_SLOTS * args.AREA_SIZE, PROT_RW, MAP_SHARED | MAP_FIXED, 3, ARGS_OFF) != args.areasAddr())
         die(136);
     const flags = 0x02 | 0x10 | 0x20 | 0x4000; // PRIVATE|FIXED|ANONYMOUS|NORESERVE
-    if (sys(nr(.mmap), altsAddr(), MAX_SLOTS * ALT_SIZE, PROT_RW, flags, ~@as(u64, 0), 0) != altsAddr()) die(124);
-    if (sys(nr(.mmap), execsAddr(), MAX_SLOTS * EXEC_SIZE, PROT_RW, flags, ~@as(u64, 0), 0) != execsAddr()) die(125);
-    if (sys(nr(.mmap), scratchAddr(), MAX_SLOTS * SCRATCH_SIZE, PROT_RW, flags, ~@as(u64, 0), 0) != scratchAddr()) die(126);
+    if (!mapStackChunk(0)) die(124); // slot 0, the first process's
     if (sys(nr(.mmap), hopStackAddr(), HOP_STACK_SIZE, PROT_RW, flags, ~@as(u64, 0), 0) != hopStackAddr()) die(133);
 
     // Keep stdio (0,1,2) so stdio read/write can be served in-process,

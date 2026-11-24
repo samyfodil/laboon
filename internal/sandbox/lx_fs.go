@@ -79,7 +79,7 @@ type dfs struct {
 	shared  map[core.NodeID]*shBacking // the one MAP_SHARED backing per non-host file, keyed by vnode (sharedback.go)
 	sharedN atomic.Int64               // number of live backings; zero makes every read/write skip the lookup
 
-	usedSlots []bool
+	slots     indexPool
 	hops      hopTable              // each stub process's host-op entry (Linux)
 	exited    map[int]chan struct{} // host pid -> closed once that stub process has ended (watchStub)
 	nextPid   int
@@ -128,7 +128,7 @@ type dproc struct {
 func newDfs(rootFS core.FileSystem, upper string, mem []byte, done <-chan struct{}, tmp string) (*dfs, error) {
 	fs := &dfs{
 		mem: mem, done: done, tmpDir: tmp,
-		usedSlots: make([]bool, maxSlots),
+		slots:     indexPool{limit: maxSlots},
 		exited:    map[int]chan struct{}{},
 		nextPid:   2, // pid 1 is the main process
 		initNs:    newInitNs(),
@@ -138,7 +138,7 @@ func newDfs(rootFS core.FileSystem, upper string, mem []byte, done <-chan struct
 	}
 	fs.cond = sync.NewCond(&fs.mu)
 	fs.ov.store = core.NewMetaStore() // inode-keyed guest metadata, shared with the overlay backend
-	fs.usedSlots[0] = true            // slot 0 is the main process
+	fs.slots.take()                   // slot 0 is the main process
 	// A host-directory root is a host path behind the FileSystem: it runs the
 	// confined host-overlay path below, not the generic-backend path.
 	root, isHost := HostRootPath(rootFS)
@@ -461,15 +461,12 @@ func (fs *dfs) addTmp(path string) {
 func (fs *dfs) allocSlot() int {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	for i := 1; i < maxSlots; i++ {
-		if !fs.usedSlots[i] {
-			fs.usedSlots[i] = true
-			// No stub runs on it yet: clear a stDead its last user left.
-			atomic.StoreUint32(&(*chanPage)(unsafe.Pointer(&fs.mem[i*slotSize])).state, 0)
-			return i
-		}
+	i := fs.slots.take()
+	if i >= 0 {
+		// No stub runs on it yet: clear a stDead its last user left.
+		atomic.StoreUint32(&(*chanPage)(unsafe.Pointer(&fs.mem[i*slotSize])).state, 0)
 	}
-	return -1
+	return i
 }
 
 // releaseSlot frees g's slot once its serve loop is done, unless g led a
@@ -482,7 +479,7 @@ func (fs *dfs) releaseSlot(g *dguest) {
 
 func (fs *dfs) freeSlot(i int) {
 	fs.mu.Lock()
-	fs.usedSlots[i] = false
+	fs.slots.put(i)
 	fs.mu.Unlock()
 }
 
