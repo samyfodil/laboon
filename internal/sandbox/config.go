@@ -32,6 +32,17 @@ func discarded(w io.Writer) bool {
 	return w == nil || w == io.Discard
 }
 
+// sameWriter reports whether a and b are one writer; a writer of a type
+// that cannot be compared is never the same as another.
+func sameWriter(a, b io.Writer) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+	return a == b
+}
+
 // Config describes one run.
 type Config struct {
 	Args []string // argv; Args[0] is the program name seen by the guest

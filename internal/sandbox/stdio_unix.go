@@ -100,15 +100,6 @@ func newStdio(cfg Config) (*stdio, error) {
 	return s, nil
 }
 
-func sameWriter(a, b io.Writer) (same bool) {
-	defer func() {
-		if recover() != nil {
-			same = false
-		}
-	}()
-	return a == b
-}
-
 // finish closes our ends of the pipes and copies out the guest's output. It
 // runs once the guest is gone, every stub and every serve loop with it, so no
 // one writes to the pipes any more and what they hold is all the output

@@ -72,6 +72,10 @@ func stdioFiles(cfg *Config) ([3]*os.File, func(), error) {
 			}(v.(io.Reader))
 			continue
 		}
+		if i == 2 && sameWriter(cfg.Stdout, cfg.Stderr) {
+			files[2] = files[1] // one pipe keeps the order of the two streams
+			continue
+		}
 		op, w, err := newOutPipe(copyPipeCap)
 		if err != nil {
 			closeAll()
