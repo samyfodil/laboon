@@ -13,6 +13,11 @@
 
 **Run untrusted Linux programs and containers safely, with no VM, on Linux, macOS, and Windows.**
 
+<p align="center">
+  <img src="docs/assets/laboon-vs-docker.gif" alt="Ten alpine container starts side by side on a Mac: Docker Desktop takes 1.95 s, laboon 0.18 s" width="100%">
+</p>
+<p align="center"><sub>Ten <code>alpine:3.20</code> container starts on an Apple M4, warm image, recorded one side at a time: Docker Desktop 29.5.2 in 1.95 s, laboon 0.2.0 in 0.18 s.</sub></p>
+
 laboon runs unmodified Linux binaries and OCI containers with the guest's
 machine code executing natively on the host CPU. It intercepts only syscall
 instructions: a supervisor emulates the Linux ABI, with no second kernel or
