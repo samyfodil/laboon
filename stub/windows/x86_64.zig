@@ -540,7 +540,7 @@ pub fn onException(ep: *win.EXCEPTION_POINTERS) callconv(win.WINAPI) i32 {
     sig.faultEnter();
     if (guest) sig.noteDirt(asm volatile ("mov %%rsp, %[v]"
         : [v] "=r" (-> u64),
-    ));
+    ), c.Rsp);
     const r = if (guest) lc_on_stub(@ptrCast(ep), &faultHandleOnStub) else faultHandle(ep);
     sig.faultLeave();
     // A guest fault's resume goes through the return gate so it wipes the

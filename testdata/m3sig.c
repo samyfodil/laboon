@@ -179,6 +179,55 @@ static void t_fault(void) {
 	signal(SIGSEGV, SIG_DFL);
 }
 
+// A fault whose handler runs on an alternate stack just above the faulting
+// thread's (as a Go goroutine's and its gsignal stack can lie) leaves the
+// faulting frames, live above the sp, as they were.
+static char above_mem[96 << 10] __attribute__((aligned(4096)));
+static sigjmp_buf above_jb;
+static void on_segv_above(int s, siginfo_t *si, void *uc) {
+	(void)s;
+	(void)si;
+	(void)uc;
+	siglongjmp(above_jb, 1);
+}
+
+static void *fault_above(void *arg) {
+	(void)arg;
+	stack_t ss = {.ss_sp = above_mem + (64 << 10), .ss_size = 32 << 10};
+	sigaltstack(&ss, NULL);
+	volatile uint64_t live[8];
+	for (int i = 0; i < 8; i++)
+		live[i] = 0x5a5a0000u + i;
+	volatile int *bad = (int *)16;
+	int jumped = 0;
+	if (sigsetjmp(above_jb, 1) == 0)
+		*bad = 1;
+	else
+		jumped = 1;
+	int ok = jumped;
+	for (int i = 0; i < 8; i++)
+		ok &= live[i] == 0x5a5a0000u + i;
+	ss.ss_flags = SS_DISABLE;
+	sigaltstack(&ss, NULL);
+	return (void *)(intptr_t)ok;
+}
+
+static void t_fault_altstack(void) {
+	struct sigaction sa = {0};
+	sa.sa_sigaction = on_segv_above;
+	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+	sigaction(SIGSEGV, &sa, NULL);
+	pthread_attr_t a;
+	pthread_attr_init(&a);
+	pthread_attr_setstack(&a, above_mem, 64 << 10);
+	pthread_t th;
+	void *ok = NULL;
+	if (pthread_create(&th, &a, fault_above, NULL) == 0)
+		pthread_join(th, &ok);
+	check("segv-altstack-above", ok != NULL);
+	signal(SIGSEGV, SIG_DFL);
+}
+
 static void t_timer(void) {
 	reset();
 	handle_info(SIGRTMIN, 0);
@@ -392,6 +441,7 @@ int main(void) {
 	// exercise is covered by t_timer, t_sigtimedwait and t_fp.
 	t_altstack();
 	t_fault();
+	t_fault_altstack();
 	t_timer();
 	t_sigtimedwait();
 	t_fp();

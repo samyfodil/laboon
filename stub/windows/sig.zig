@@ -99,12 +99,13 @@ pub const Thread = extern struct {
     return_retry: u64,
     return_tail: u64,
     return_tail_end: u64,
-    // dirt_lo: the floor of the guest-stack region a fault handler left below
-    // the guest sp (the kernel's exception frame; the handler's own ran on the
-    // stub stack). The return gate wipes [dirt_lo, resume sp) so the guest sees
-    // virgin memory below its sp, as on Linux. Stub-only; the supervisor never
-    // reads it. (lx_signal.go mirrors only the fields above.)
+    // [dirt_lo, dirt_hi): the guest-stack region a fault handler left below the
+    // faulting sp, dirt_hi (the kernel's exception frame; the handler's own ran
+    // on the stub stack). The return gate wipes it so the guest sees virgin
+    // memory below its sp, as on Linux. Stub-only; the supervisor never reads
+    // them. (lx_signal.go mirrors only the fields above.)
     dirt_lo: u64,
+    dirt_hi: u64,
 };
 
 pub const Proc = extern struct {
@@ -132,6 +133,7 @@ comptime {
     std.debug.assert(@offsetOf(Thread, "return_tail") == 112);
     std.debug.assert(@offsetOf(Thread, "return_tail_end") == 120);
     std.debug.assert(@offsetOf(Thread, "dirt_lo") == 128);
+    std.debug.assert(@offsetOf(Thread, "dirt_hi") == 136);
     std.debug.assert(@offsetOf(Proc, "pending") == 8);
     std.debug.assert(@sizeOf(Thread) <= PROC_OFF);
     std.debug.assert(@sizeOf(Proc) <= STRIDE - PROC_OFF);
@@ -254,12 +256,14 @@ fn setBusy(on: u32) void {
     @atomicStore(u32, &thr().busy, on, .seq_cst);
 }
 
-// noteDirt records that a fault handler is about to run from stub-stack sp rsp
-// (the floor, minus a margin for the handoff thunk's own frame): the kernel's
-// exception frame lies between here and the guest sp, and the return gate wipes
-// it. clearDirt cancels that when the resume will not pass promptly through the
-// gate (an out-of-line slot, a crash), so a stale floor never wipes live stack.
-pub fn noteDirt(rsp: u64) void {
+// noteDirt records that a fault handler is about to run from rsp (the floor,
+// minus a margin for the handoff thunk's own frame) for a guest that faulted
+// at sp: the kernel's exception frame lies between the two, and the return gate
+// wipes it. clearDirt cancels that when the resume will not pass promptly
+// through the gate (an out-of-line slot, a crash), so a stale floor never
+// wipes live stack.
+pub fn noteDirt(rsp: u64, sp: u64) void {
+    thr().dirt_hi = sp;
     thr().dirt_lo = rsp -% 64;
 }
 
@@ -631,15 +635,17 @@ export fn lc_return_prepare() callconv(win.WINAPI) *Return {
     const r: *Return = @ptrFromInt(stub.arch.tebLoad(stub.SLOT_CONT));
     // Leave the guest stack below its sp as Linux does: zero what a fault
     // handler's kernel exception frame dirtied. The guest's own live data is at
-    // or above the resume sp (top); [dirt_lo, top) is committed (the kernel just
-    // wrote there) and dead until the guest grows into it, except its red zone,
-    // which Linux leaves virgin too. dispatchAll below rebuilds any sigframe in
-    // this range afterwards.
+    // or above the faulting sp (dirt_hi); [dirt_lo, dirt_hi) is committed (the
+    // kernel just wrote there) and dead until the guest grows into it, except
+    // its red zone, which Linux leaves virgin too. A handler frame built since
+    // lies at the resume sp and above, so the wipe stops below both sps: a
+    // frame on an alternate stack above the guest's leaves the guest's live
+    // stack alone. dispatchAll below builds any further sigframe afterwards.
     const dl = r.th.dirt_lo;
     if (dl != 0) {
         r.th.dirt_lo = 0;
-        const top = A.sp(&r.c);
-        if (dl < top and top - dl <= 64 << 10) @memset(@as([*]u8, @ptrFromInt(dl))[0 .. top - dl], 0);
+        const hi = @min(A.sp(&r.c), r.th.dirt_hi);
+        if (dl < hi and hi - dl <= 64 << 10) @memset(@as([*]u8, @ptrFromInt(dl))[0 .. hi - dl], 0);
     }
     if (interrupted()) dispatchAll(&r.c);
     // A restarted syscall whose site traps is served here, as the trap would
