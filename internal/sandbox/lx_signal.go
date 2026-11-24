@@ -423,8 +423,8 @@ func (g *dguest) dequeue(allow uint64) (int, sigInfo) {
 // procSlot is the slot of g's process record, from the supervisor's own
 // registry (the area's copy is guest-writable).
 func (g *dguest) procSlot() int {
-	if p := g.sigs().proc(g.tgid); p != nil {
-		return p.slot
+	if slot, ok := g.sigs().procSlot(g.tgid); ok {
+		return slot
 	}
 	return g.slot
 }
@@ -464,11 +464,17 @@ func (sr *sigRun) status(tid, tgid int) [5]uint64 {
 	if sr == nil {
 		return out
 	}
-	p := sr.proc(tgid)
+	sr.mu.Lock()
+	p := sr.procs[tgid]
+	var slot int
+	if p != nil {
+		slot = p.slot
+	}
+	sr.mu.Unlock()
 	if p == nil {
 		return out
 	}
-	out[1] = sr.ld(pOff(p.slot) + spPending)
+	out[1] = sr.ld(pOff(slot) + spPending)
 	if t := sr.thread(tid); t != nil {
 		o := tOff(t.slot)
 		out[0] = sr.ld(o + stPending)
@@ -500,6 +506,17 @@ func (sr *sigRun) proc(tgid int) *sigProc {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	return sr.procs[tgid]
+}
+
+// procSlot is the slot of process tgid's record, read under the lock an exec's
+// takeover moves it under (sigTakeOver).
+func (sr *sigRun) procSlot(tgid int) (int, bool) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	if p := sr.procs[tgid]; p != nil {
+		return p.slot, true
+	}
+	return 0, false
 }
 
 func (sr *sigRun) thread(tid int) *sigThread {
