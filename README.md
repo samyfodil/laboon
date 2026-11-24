@@ -344,6 +344,11 @@ uses a prebuilt XFCE image, enables networking, and installs missing capture
 or desktop tools as needed. Its image pull, package setup, and desktop startup
 are separate from the small-container startup measurements above.
 
+<p align="center">
+  <img src="docs/assets/laboon-desktop.gif" alt="An XFCE desktop running inside laboon: the cursor opens the Applications menu, types a command into the application finder, and Chromium loads github.com/samyfodil/laboon" width="100%">
+</p>
+<p align="center"><sub>An E2B-style desktop inside laboon on Linux, with no VM: XFCE on Xvfb in <code>accetto/ubuntu-vnc-xfce-chromium-g3</code>, driven by <code>xdotool</code> and recorded by <code>ffmpeg</code> in the same sandbox. Chromium runs with <code>--no-sandbox</code>.</sub></p>
+
 ## Building and contributing
 
 From the repository root, the Go toolchain builds the CLI using the committed
