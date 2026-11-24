@@ -69,14 +69,14 @@ threadlocal var flipped: Fault = .{};
 // flip handles a fault that is only this thread's JIT view being the wrong
 // one (see the top of this file), switching it; false if the fault is real.
 // f may be replaced by the earlier fault it turns out to be.
-pub fn flip(f: *Fault, mc: *std.c.mcontext_t, slot: usize) bool {
+pub fn flip(f: *Fault, mc: *std.c.mcontext_t) bool {
     const ec = f.esr >> 26;
     if (ec == EC_IABT_LOWER and write_mode) {
         setWrite(false);
         if (flipped.pc == f.pc) {
             const d = flipped;
             flipped.pc = 0;
-            if (storeOutOfLine(d, mc, slot)) return true;
+            if (storeOutOfLine(d, mc)) return true;
             f.* = d;
             return false;
         }
@@ -96,13 +96,13 @@ pub fn flip(f: *Fault, mc: *std.c.mcontext_t, slot: usize) bool {
 }
 
 // storeOutOfLine runs the store at f.pc out of line (ool.zig) in write mode,
-// the thread in slot slot, when f.far is memory the guest may write: the
+// on this thread, when f.far is memory the guest may write: the
 // guest goes on after it once it has run, back in execute mode (sig.zig). A
 // store exclusive's monitor is lost to the fault: its window runs instead,
 // from its load exclusive, when running it again changes nothing but what
 // the load reads (ool.rerunnable); no trap can mark the load exclusive in a
 // page the guest reads as it wrote it.
-fn storeOutOfLine(f: Fault, mc: *std.c.mcontext_t, slot: usize) bool {
+fn storeOutOfLine(f: Fault, mc: *std.c.mcontext_t) bool {
     if (!mem.writable(f.far)) return false;
     const w = @as(*const u32, @ptrFromInt(f.pc)).*;
     var words: [ool.MAX]u32 = undefined;
@@ -118,7 +118,7 @@ fn storeOutOfLine(f: Fault, mc: *std.c.mcontext_t, slot: usize) bool {
         if (!ool.rerunnable(words[0..n])) return false;
     }
     setWrite(true);
-    if (ool.run(slot, mc, words[0..n], start, true, 0)) return true;
+    if (ool.run(mc, words[0..n], start, true, 0)) return true;
     setWrite(false);
     return false;
 }

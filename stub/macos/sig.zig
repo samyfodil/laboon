@@ -294,8 +294,11 @@ const CtxX64 = extern struct {
 
 var g_area: [*]u8 = undefined;
 // g_ports holds each live guest thread's Mach thread port by slot, for the
-// router to kick it.
+// router to kick it. It is zero-fill memory, backed only where a slot was
+// used; g_ports_hi bounds the slots this process has used, raised before a
+// port is stored, so the router's scan follows the threads it has had.
 var g_ports: [chan.MAX_SLOTS]u32 = [_]u32{0} ** chan.MAX_SLOTS;
+var g_ports_hi: usize = 0;
 // g_restorer is the sigreturn trampoline used when a handler has none.
 pub var g_restorer: u64 = 0;
 
@@ -368,17 +371,23 @@ pub fn procMem(slot: usize) u64 {
     return @atomicLoad(u64, &procAt(slot).mem, .acquire);
 }
 
+// runMemUsed is what every stub process of the run has mapped, the sum of
+// their records (sigRunOff + 16).
+fn runMemUsed() *u64 {
+    return @ptrCast(@alignCast(g_area + 0x2000 + 16));
+}
+
+// setProcMem publishes n as what the process leading slot has mapped, and
+// adds the change to the run's sum. The swap pairs with the supervisor's
+// (sandbox/lx_signal.go dropMem), so the sum stays the records' sum.
 pub fn setProcMem(slot: usize, n: u64) void {
-    @atomicStore(u64, &procAt(slot).mem, n, .release);
+    const old = @atomicRmw(u64, &procAt(slot).mem, .Xchg, n, .acq_rel);
+    _ = @atomicRmw(u64, runMemUsed(), .Add, n -% old, .acq_rel);
 }
 
 // othersMem is what every stub process but the one leading slot has mapped.
 pub fn othersMem(slot: usize) u64 {
-    var n: u64 = 0;
-    for (0..chan.MAX_SLOTS) |s| {
-        if (s != slot) n +|= procMem(s);
-    }
-    return n;
+    return @atomicLoad(u64, runMemUsed(), .acquire) -| procMem(slot);
 }
 
 fn thrAt(slot: usize) *Thread {
@@ -597,7 +606,8 @@ pub fn startThread(slot: usize) void {
         if (@intFromPtr(p) != std.math.maxInt(usize)) tl.alt = @intFromPtr(p);
     }
     setAltStack();
-    @atomicStore(u32, &g_ports[slot], pthread_mach_thread_np(pthread_self()), .release);
+    _ = @atomicRmw(usize, &g_ports_hi, .Max, slot + 1, .seq_cst);
+    @atomicStore(u32, &g_ports[slot], pthread_mach_thread_np(pthread_self()), .seq_cst);
     var id: u64 = 0;
     _ = pthread_threadid_np(0, &id);
     @atomicStore(u64, &tl.rec.host_tid, id, .release);
@@ -609,6 +619,7 @@ fn setAltStack() void {
 }
 
 pub fn endThread() void {
+    ool.drop();
     @atomicStore(u32, &g_ports[tl.slot], 0, .release);
     @atomicStore(u64, &tl.rec.host_tid, 0, .release);
     tl.ready = false;
@@ -879,8 +890,8 @@ fn fromMc(c: *Ctx, mc: *const std.c.mcontext_t) void {
         c.x[29] = mc.ss.fp;
         c.x[30] = mc.ss.lr;
         c.sp = mc.ss.sp;
-        c.pc = ool.guestPc(tl.slot, mc.ss.pc); // run out of line: the guest's own
-        for (ool.release(tl.slot, mc.ss.pc)) |h| wx.letGo(h);
+        c.pc = ool.guestPc(mc.ss.pc); // run out of line: the guest's own
+        for (ool.release(mc.ss.pc)) |h| wx.letGo(h);
         c.pstate = mc.ss.cpsr & 0xf0000000;
         c.v = mc.ns.q;
         c.fpsr = mc.ns.fpsr;
@@ -904,8 +915,8 @@ fn fromMc(c: *Ctx, mc: *const std.c.mcontext_t) void {
         c.r13 = mc.ss.r13;
         c.r14 = mc.ss.r14;
         c.r15 = mc.ss.r15;
-        c.rip = ool.guestPc(tl.slot, mc.ss.rip);
-        for (ool.release(tl.slot, mc.ss.rip)) |h| wx.letGo(h);
+        c.rip = ool.guestPc(mc.ss.rip);
+        for (ool.release(mc.ss.rip)) |h| wx.letGo(h);
         c.rflags = mc.ss.rflags;
         // Darwin's float_state is the FXSAVE image behind an 8-byte reserved
         // prefix (fcw onward is 512 bytes); Linux's _fpstate is FXSAVE-shaped
@@ -1622,8 +1633,8 @@ fn pthreadKill(port: u32, sig: c_int) void {
 }
 
 fn onRoute(_: c_int, _: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) void {
-    for (0..chan.MAX_SLOTS) |i| {
-        const port = @atomicLoad(u32, &g_ports[i], .acquire);
+    for (0..@atomicLoad(usize, &g_ports_hi, .seq_cst)) |i| {
+        const port = @atomicLoad(u32, &g_ports[i], .seq_cst);
         if (port == 0) continue;
         if (tl.ready and i == tl.slot) {
             kickSelf(ctx);
@@ -1816,7 +1827,7 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
                 return;
             }
         }
-        if (ool.exit(tl.slot, mc)) |e| {
+        if (ool.exit(mc)) |e| {
             if (e.jit) jit.initThread(); // back to execute mode
             for (e.holds) |h| wx.letGo(h);
             return;
@@ -1877,20 +1888,20 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
         const far = if (tstate.arm64) mc.es.far else mc.es.faultvaddr;
         const esr = if (tstate.arm64) mc.es.esr else x86Esr(mc.es.err, far);
         const page = far & ~@as(u64, tstate.page - 1);
-        var st: wx.Step = .{ .from_slot = ool.inSlot(tl.slot, pc), .own = !tl.ready or tl.busy, .lost = ool.lost(tl.slot, pc, page) };
+        var st: wx.Step = .{ .from_slot = ool.inSlot(pc), .own = !tl.ready or tl.busy, .lost = ool.lost(pc, page) };
         const v = wx.fault(esr, far, pc, &st);
         if (v == .handled) return;
         if (v == .retry) {
-            ool.tried(tl.slot, pc, page);
+            ool.tried(pc, page);
             return;
         }
         if (v == .step and step(mc, &st)) return;
         if (v == .attach) {
-            if (!ool.addHold(tl.slot, st.hold)) wx.letGo(st.hold);
+            if (!ool.addHold(st.hold)) wx.letGo(st.hold);
             return;
         }
         if (v == .wait or v == .hot or v == .cool) {
-            for (ool.dropHolds(tl.slot)) |h| wx.letGo(h);
+            for (ool.dropHolds()) |h| wx.letGo(h);
             const was = tl.busy;
             setBusy(&tl, true); // a kick meanwhile waits for the fault's retry
             switch (v) {
@@ -1909,7 +1920,7 @@ fn onFault(dsig_in: c_int, si: *std.c.siginfo_t, ctx: ?*anyopaque) callconv(.C) 
         }
         if (tstate.arm64 and v == .other) {
             var f: jit.Fault = .{ .pc = mc.ss.pc, .esr = mc.es.esr, .far = mc.es.far, .dsig = dsig, .code = si.code };
-            if (jit.flip(&f, mc, tl.slot)) return;
+            if (jit.flip(&f, mc)) return;
             dsig = f.dsig;
             si.code = f.code;
             mc.es.esr = f.esr;
@@ -1982,10 +1993,10 @@ fn step(mc: *std.c.mcontext_t, st: *const wx.Step) bool {
         mc.ss.pc += 4;
         return true;
     }
-    if (ool.run(tl.slot, mc, st.words[0..st.n], st.start, false, st.hold)) return true;
+    if (ool.run(mc, st.words[0..st.n], st.start, false, st.hold)) return true;
     wx.letGo(st.hold);
     if (st.again) return true;
-    return st.n > 1 and ool.run(tl.slot, mc, st.words[0..1], st.start, false, 0);
+    return st.n > 1 and ool.run(mc, st.words[0..1], st.start, false, 0);
 }
 
 // runX64 runs the x86-64 instruction at pc out of line, as decoded by the
@@ -1997,7 +2008,7 @@ fn runX64(mc: *std.c.mcontext_t, pc: u64, hold: u64) bool {
     if (n == 0 or n > 15) return false;
     var code: [15]u8 = undefined;
     @memcpy(code[0..n], @as([*]const u8, @ptrFromInt(pc))[0..n]);
-    return ool.runX64(tl.slot, mc, code[0..n], @intCast((r >> 8) & 0xff), pc, hold);
+    return ool.runX64(mc, code[0..n], @intCast((r >> 8) & 0xff), pc, hold);
 }
 
 // x86Esr gives an x86-64 page fault (its error code err, at far) the shape of

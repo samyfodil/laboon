@@ -58,7 +58,8 @@ pub const ST_REP: u32 = 2;
 pub const ST_DEAD: u32 = 3;
 
 pub const SLOT_SIZE: usize = 4096;
-pub const MAX_SLOTS: usize = 256;
+pub const MAX_SLOTS: usize = 1 << 22; // PID_MAX_LIMIT, sandbox/slots_darwin.go
+
 
 // SPIN mirrors the Linux stub: poll before falling back to os_sync sleep. The
 // hot path never sleeps; see PERF.md (spin round-trip ~90-100 ns on the M4).

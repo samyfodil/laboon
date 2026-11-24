@@ -25,9 +25,9 @@ const PAGE: usize = tstate.page;
 const X86 = !tstate.arm64;
 const EXIT: u32 = 0xd4200000 | (0x5e << 5); // brk #0x5e
 
-// A thread's page, by its slot, and what it last ran: n instructions from
-// guest address start, the exits after them (exits[0] where the last leads,
-// the rest the targets of the branches leaving them).
+// A thread's page and what it last ran: n instructions from guest address
+// start, the exits after them (exits[0] where the last leads, the rest the
+// targets of the branches leaving them).
 const Slot = struct {
     page: usize = 0,
     start: u64 = 0,
@@ -44,14 +44,20 @@ pub const Holds = [2]u64;
 // Exit is how what a slot ran ended: in a MAP_JIT region's write mode, and
 // the holds it kept, to let go.
 pub const Exit = struct { jit: bool, holds: Holds };
-var slots: [chan.MAX_SLOTS]Slot = [_]Slot{.{}} ** chan.MAX_SLOTS;
+threadlocal var mine: Slot = .{};
 
-// run makes the thread in slot s resume at a copy of words, the guest's
+// drop lets go of the thread's page as it ends.
+pub fn drop() void {
+    if (mine.page != 0) _ = munmap(@ptrFromInt(mine.page), PAGE);
+    mine = .{};
+}
+
+// run makes the thread resume at a copy of words, the guest's
 // instructions at start as they ran; false if one cannot run out of line.
 // jit: the thread is in a MAP_JIT region's write mode while they run (exit
 // reports it, for jit.zig to switch back).
-pub fn run(s: usize, mc: *std.c.mcontext_t, words: []const u32, start: u64, jit: bool, hold: u64) bool {
-    const sl = &slots[s];
+pub fn run(mc: *std.c.mcontext_t, words: []const u32, start: u64, jit: bool, hold: u64) bool {
+    const sl = &mine;
     if (words.len == 0 or words.len > MAX) return false;
     if (sl.page == 0) {
         const p = mmap(null, PAGE, 3, 0x1002, -1, 0) orelse return false; // MAP_PRIVATE|MAP_ANON
@@ -93,12 +99,12 @@ pub fn run(s: usize, mc: *std.c.mcontext_t, words: []const u32, start: u64, jit:
     return true;
 }
 
-// runX64 makes the thread in slot s resume at a copy of code, the guest's
+// runX64 makes the thread resume at a copy of code, the guest's
 // x86-64 instruction at start, its RIP-relative displacement at at (0: none),
 // an int3 after it; false if it cannot run out of line. A copy with a
 // displacement runs from a page within its reach.
-pub fn runX64(s: usize, mc: *std.c.mcontext_t, code: []const u8, at: u32, start: u64, hold: u64) bool {
-    const sl = &slots[s];
+pub fn runX64(mc: *std.c.mcontext_t, code: []const u8, at: u32, start: u64, hold: u64) bool {
+    const sl = &mine;
     if (code.len == 0 or code.len > 15 or (at != 0 and at + 4 > code.len)) return false;
     if (sl.page != 0 and at != 0 and !near(sl.page, start)) {
         _ = munmap(@ptrFromInt(sl.page), PAGE);
@@ -143,11 +149,11 @@ fn near(page: u64, pc: u64) bool {
     return far <= (1 << 31) - 2 * PAGE;
 }
 
-// exit takes the trap ending what slot s ran, at mc's pc: the guest resumes
+// exit takes the trap ending what the thread ran, at mc's pc: the guest resumes
 // where it leads. null if pc is no exit of it. An x86-64 int3 reports the pc
 // past it.
-pub fn exit(s: usize, mc: *std.c.mcontext_t) ?Exit {
-    const sl = &slots[s];
+pub fn exit(mc: *std.c.mcontext_t) ?Exit {
+    const sl = &mine;
     const pc = tstate.pc(mc);
     if (sl.page == 0 or pc < sl.page or sl.nexit == 0) return null;
     if (X86) {
@@ -167,38 +173,38 @@ pub fn exit(s: usize, mc: *std.c.mcontext_t) ?Exit {
     return .{ .jit = sl.jit, .holds = sl.holds };
 }
 
-// release takes the holds slot s keeps from it, when pc is in what it runs:
+// release takes the holds the thread keeps from it, when pc is in what it runs:
 // a signal delivered there leaves it for the guest's own pc (guestPc).
-pub fn release(s: usize, pc: u64) Holds {
-    const sl = &slots[s];
-    if (!inSlot(s, pc)) return .{ 0, 0 };
+pub fn release(pc: u64) Holds {
+    const sl = &mine;
+    if (!inSlot(pc)) return .{ 0, 0 };
     defer sl.holds = .{ 0, 0 };
     return sl.holds;
 }
 
-// lost reports whether the thread in slot s faults again on the store at pc
+// lost reports whether the thread faults again on the store at pc
 // into page that it ran again in place last (tried): a thread ran the page
 // again before the store landed. Each fault asks once.
-pub fn lost(s: usize, pc: u64, page: u64) bool {
-    const sl = &slots[s];
+pub fn lost(pc: u64, page: u64) bool {
+    const sl = &mine;
     defer sl.tried = .{ 0, 0 };
     return sl.tried[0] == pc and sl.tried[1] == page;
 }
 
-pub fn tried(s: usize, pc: u64, page: u64) void {
-    slots[s].tried = .{ pc, page };
+pub fn tried(pc: u64, page: u64) void {
+    mine.tried = .{ pc, page };
 }
 
-// inSlot reports whether pc is in what slot s runs.
-pub fn inSlot(s: usize, pc: u64) bool {
-    const sl = &slots[s];
+// inSlot reports whether pc is in what the thread runs.
+pub fn inSlot(pc: u64) bool {
+    const sl = &mine;
     if (sl.nexit == 0) return false;
     return sl.page != 0 and pc >= sl.page and pc < sl.page + if (X86) sl.n + 1 else 4 * (sl.n + sl.nexit);
 }
 
-// addHold has what slot s runs keep hold id too, and reports whether it can.
-pub fn addHold(s: usize, id: u64) bool {
-    const sl = &slots[s];
+// addHold has what the thread runs keep hold id too, and reports whether it can.
+pub fn addHold(id: u64) bool {
+    const sl = &mine;
     if (sl.nexit == 0) return false;
     for (&sl.holds) |*h| {
         if (h.* != 0) continue;
@@ -208,19 +214,19 @@ pub fn addHold(s: usize, id: u64) bool {
     return false;
 }
 
-// dropHolds gives up the holds what slot s runs keeps, to let go: it goes on
+// dropHolds gives up the holds what the thread runs keeps, to let go: it goes on
 // without them.
-pub fn dropHolds(s: usize) Holds {
-    const sl = &slots[s];
+pub fn dropHolds() Holds {
+    const sl = &mine;
     defer sl.holds = .{ 0, 0 };
     return sl.holds;
 }
 
-// guestPc is the guest's pc for pc, the thread in slot s's, as a signal
+// guestPc is the guest's pc for pc, this thread's, as a signal
 // delivered there must see it: an instruction of the copy not run yet is the
 // guest's at the same offset; an exit, the target it leads to.
-pub fn guestPc(s: usize, pc: u64) u64 {
-    const sl = &slots[s];
+pub fn guestPc(pc: u64) u64 {
+    const sl = &mine;
     if (sl.page == 0 or pc < sl.page) return pc;
     if (X86) {
         if (sl.nexit == 0 or pc > sl.page + sl.n + 1) return pc;

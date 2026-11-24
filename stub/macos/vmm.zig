@@ -386,6 +386,7 @@ pub const Vmm = struct {
     // stop (kickRunning).
     pub fn run(v: *Vmm, ch: *chan.Chan) Error!Exit {
         const run_at = &g_running[slotIndex(ch)];
+        _ = @atomicRmw(usize, &g_running_hi, .Max, slotIndex(ch) + 1, .seq_cst);
         while (true) {
             @atomicStore(u64, run_at, v.vcpu + 1, .seq_cst);
             if (deliverable(sigThreadRec(ch)) != 0 and !v.inVector()) {
@@ -1548,8 +1549,11 @@ comptime {
 }
 
 // g_running holds, per channel slot, the vcpu its thread runs guest code on,
-// plus one (0: none).
+// plus one (0: none). It is zero-fill memory, backed only where a slot was
+// used; g_running_hi bounds the slots used here, raised before a run
+// publishes its vcpu, so kickRunning's scan follows the threads there were.
 var g_running = [_]u64{0} ** chan.MAX_SLOTS;
+var g_running_hi: usize = 0;
 
 fn deliverable(thr: *SigThread) u64 {
     const proc = sigProcRec(thr.proc);
@@ -1559,7 +1563,7 @@ fn deliverable(thr: *SigThread) u64 {
 // kickRunning stops the vcpus running guest code for threads a signal waits
 // for, for their run loops to deliver it (the supervisor's kick).
 pub fn kickRunning() void {
-    for (&g_running, 0..) |*r, i| {
+    for (g_running[0..@atomicLoad(usize, &g_running_hi, .seq_cst)], 0..) |*r, i| {
         const vc = @atomicLoad(u64, r, .seq_cst);
         if (vc == 0) continue;
         const thr: *SigThread = @ptrFromInt(@intFromPtr(g_chan_base) + TRACE_AREA_OFF + i * TRACE_SIG_STRIDE);
@@ -2158,17 +2162,23 @@ fn runMemCap() u64 {
     return @atomicLoad(u64, @as(*const u64, @ptrFromInt(@intFromPtr(g_chan_base) + TRACE_AREA_OFF + 0x2000 + 8)), .acquire);
 }
 
-fn publishMem() void {
-    if (runMemCap() == 0) return;
-    @atomicStore(u64, &sigProcRec(@intCast(g_acct)).mem, mappedIn(0, std.math.maxInt(u64)), .release);
+// runMemUsed is the run's sum of what its processes have mapped (sigRunOff +
+// 16), which publishMem keeps by adding what it changes.
+fn runMemUsed() *u64 {
+    return @ptrFromInt(@intFromPtr(g_chan_base) + TRACE_AREA_OFF + 0x2000 + 16);
 }
 
+fn publishMem() void {
+    if (runMemCap() == 0) return;
+    const n = mappedIn(0, std.math.maxInt(u64));
+    const old = @atomicRmw(u64, &sigProcRec(@intCast(g_acct)).mem, .Xchg, n, .acq_rel);
+    _ = @atomicRmw(u64, runMemUsed(), .Add, n -% old, .acq_rel);
+}
+
+// othersMem is what every other stub process of the run has mapped: the run's
+// sum (sandbox/lx_signal.go sigRunMemUsed) less this one's record.
 fn othersMem() u64 {
-    var n: u64 = 0;
-    for (0..chan.MAX_SLOTS) |s| {
-        if (s != g_acct) n +|= @atomicLoad(u64, &sigProcRec(@intCast(s)).mem, .acquire);
-    }
-    return n;
+    return @atomicLoad(u64, runMemUsed(), .acquire) -| @atomicLoad(u64, &sigProcRec(@intCast(g_acct)).mem, .acquire);
 }
 
 fn pageUp(n: u64) u64 {

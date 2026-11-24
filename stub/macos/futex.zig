@@ -3,12 +3,12 @@
 // in-process address.
 //
 // The threads waiting on a futex are queued here, as Linux queues them: a
-// waiter checks the word and enters the table under the lock of the word's
-// bucket, which a waker takes too, and sleeps on its own table entry. A wake
-// takes up to n of the waiters queued at the time off the table, oldest
-// first, and wakes each on its entry; requeue moves waiters to another word
-// without waking them, and a bitset wake passes over waiters it shares no bit
-// with. (Darwin's own wake of one waiter on the guest's word cannot do this:
+// waiter checks the word and joins the queue of the word's bucket under that
+// bucket's lock, which a waker takes too, and sleeps on its own queue entry,
+// which lives on its stack for as long as it waits. A wake takes up to n of
+// the waiters queued at the time off the queue, oldest first, and wakes each
+// on its entry; requeue moves waiters to another word without waking them,
+// and a bitset wake passes over waiters it shares no bit with. (Darwin's own wake of one waiter on the guest's word cannot do this:
 // a woken thread that waits again can take a later wake meant for another,
 // and a wake of all of them does not end while threads keep coming back.)
 //
@@ -92,79 +92,88 @@ const UL_COMPARE_AND_WAIT64: u64 = 5;
 const ULF_WAKE_ALL: u64 = 0x100;
 const ULF_NO_ERRNO: u64 = 0x01000000;
 
-// waits[s] is the futex word the guest thread in channel slot s waits on, 0
-// when it waits on none; masks[s] is its bitset and order[s] when it was
-// queued. An entry is set and taken off under its word's bucket lock, and its
-// thread sleeps on the entry until it is 0.
-var waits: [chan.MAX_SLOTS]u64 = [_]u64{0} ** chan.MAX_SLOTS;
-var masks: [chan.MAX_SLOTS]u32 = [_]u32{0} ** chan.MAX_SLOTS;
-var order: [chan.MAX_SLOTS]u64 = [_]u64{0} ** chan.MAX_SLOTS;
-var next_order: u64 = 0;
-var buckets: [64]std.Thread.Mutex = [_]std.Thread.Mutex{.{}} ** 64;
+// Waiter is a queued waiter: word is the futex word it waits on, 0 once a
+// wake has taken it off, and its thread sleeps on word until then. It is set,
+// linked and taken off under its word's bucket lock.
+const Waiter = struct {
+    word: u64 = 0,
+    mask: u32 = 0,
+    prev: ?*Waiter = null,
+    next: ?*Waiter = null,
+};
 
-fn bucket(addr: u64) *std.Thread.Mutex {
-    return &buckets[@intCast(((addr >> 2) *% 0x9E3779B97F4A7C15) >> 58)];
+// A bucket's queue holds its words' waiters, oldest first.
+const Bucket = struct {
+    lock: std.Thread.Mutex = .{},
+    head: ?*Waiter = null,
+    tail: ?*Waiter = null,
+
+    fn push(b: *Bucket, w: *Waiter) void {
+        w.prev = b.tail;
+        w.next = null;
+        if (b.tail) |t| t.next = w else b.head = w;
+        b.tail = w;
+    }
+
+    fn unlink(b: *Bucket, w: *Waiter) void {
+        if (w.prev) |p| p.next = w.next else b.head = w.next;
+        if (w.next) |n| n.prev = w.prev else b.tail = w.prev;
+    }
+};
+
+var buckets: [256]Bucket = [_]Bucket{.{}} ** 256;
+
+fn bucket(addr: u64) *Bucket {
+    return &buckets[@intCast(((addr >> 2) *% 0x9E3779B97F4A7C15) >> 56)];
 }
+
+// QUEUED tags a kick target (sig.beginFutexWait) that is a Waiter's word,
+// slept on as a 64-bit ulock, rather than a guest futex word.
+const QUEUED: u64 = 1;
 
 // lock2 takes the bucket locks of two words, in a fixed order; unlock2 drops
 // them.
 fn lock2(a: u64, b: u64) void {
     const x = bucket(a);
     const y = bucket(b);
-    if (x == y) return x.lock();
+    if (x == y) return x.lock.lock();
     if (@intFromPtr(x) < @intFromPtr(y)) {
-        x.lock();
-        y.lock();
+        x.lock.lock();
+        y.lock.lock();
     } else {
-        y.lock();
-        x.lock();
+        y.lock.lock();
+        x.lock.lock();
     }
 }
 
 fn unlock2(a: u64, b: u64) void {
     const x = bucket(a);
     const y = bucket(b);
-    x.unlock();
-    if (x != y) y.unlock();
+    x.lock.unlock();
+    if (x != y) y.lock.unlock();
 }
 
-fn queue(i: usize, addr: u64) void {
-    order[i] = @atomicRmw(u64, &next_order, .Add, 1, .monotonic);
-    @atomicStore(u64, &waits[i], addr, .seq_cst);
+// take takes up to n waiters on addr whose bitset meets mask off the queue,
+// oldest first, and wakes them; it returns how many. addr's bucket lock is
+// held, which a waiter needs to leave the queue, so a Waiter is never freed
+// before its turn here; once its word is 0 its thread may return and free it,
+// so its next is read first and the wake is the last touch (a wake reaching a
+// later wait at the same address is spurious, and that wait sleeps again).
+fn take(addr: u64, n: u32, mask: u32) u32 {
+    const b = bucket(addr);
+    var woke: u32 = 0;
+    var it = b.head;
+    while (it) |w| {
+        if (woke >= n) break;
+        it = w.next;
+        if (w.word != addr or w.mask & mask == 0) continue;
+        b.unlink(w);
+        @atomicStore(u64, &w.word, 0, .seq_cst);
+        _ = __ulock_wake(@truncate(UL_COMPARE_AND_WAIT64 | ULF_NO_ERRNO), &w.word, 0);
+        woke += 1;
+    }
+    return woke;
 }
-
-// oldest is the slot of the longest-queued waiter on addr whose bitset meets
-// mask; its bucket lock is held.
-fn oldest(addr: u64, mask: u32) ?usize {
-    var best: ?usize = null;
-    for (0..chan.MAX_SLOTS) |i| {
-        if (@atomicLoad(u64, &waits[i], .monotonic) != addr or masks[i] & mask == 0) continue;
-        if (best == null or order[i] < order[best.?]) best = i;
-    }
-    return best;
-}
-
-// Woken lists the slots taken off the table, to wake once the lock is dropped.
-const Woken = struct {
-    slots: [chan.MAX_SLOTS]u16 = undefined,
-    n: u32 = 0,
-
-    // take takes up to n waiters on addr whose bitset meets mask off the
-    // table, oldest first; addr's bucket lock is held.
-    fn take(w: *Woken, addr: u64, n: u32, mask: u32) void {
-        var k: u32 = 0;
-        while (k < n) : (k += 1) {
-            const i = oldest(addr, mask) orelse return;
-            @atomicStore(u64, &waits[i], 0, .seq_cst);
-            w.slots[w.n] = @intCast(i);
-            w.n += 1;
-        }
-    }
-
-    fn wake(w: *const Woken) void {
-        for (w.slots[0..w.n]) |i| _ = __ulock_wake(@truncate(UL_COMPARE_AND_WAIT64 | ULF_NO_ERRNO), &waits[i], 0);
-    }
-};
 
 // count is how many waiters a wake of val takes: Linux takes the count as a
 // signed int and wakes one for any count below one.
@@ -187,13 +196,10 @@ pub fn wake(addr: u64, n: u32) u32 {
 }
 
 fn wakeQueued(addr: u64, n: u32, mask: u32) u32 {
-    var w: Woken = .{};
     const b = bucket(addr);
-    b.lock();
-    w.take(addr, n, mask);
-    b.unlock();
-    w.wake();
-    return w.n;
+    b.lock.lock();
+    defer b.lock.unlock();
+    return take(addr, n, mask);
 }
 
 fn wakeShared(addr: u64, n: u32) u32 {
@@ -209,8 +215,8 @@ fn wakeShared(addr: u64, n: u32) u32 {
 // in a signal handler, so it cannot ask mem whether addr is shared and wakes
 // waiters of both modes.
 pub fn wakeAll(addr: u64) void {
-    if (addr >= @intFromPtr(&waits) and addr < @intFromPtr(&waits) + @sizeOf(@TypeOf(waits))) {
-        _ = __ulock_wake(@truncate(UL_COMPARE_AND_WAIT64 | ULF_WAKE_ALL | ULF_NO_ERRNO), @ptrFromInt(addr), 0);
+    if (addr & QUEUED != 0) {
+        _ = __ulock_wake(@truncate(UL_COMPARE_AND_WAIT64 | ULF_WAKE_ALL | ULF_NO_ERRNO), @ptrFromInt(addr & ~QUEUED), 0);
         return;
     }
     _ = wake_all(@ptrFromInt(addr), 4, 0);
@@ -254,49 +260,50 @@ fn deadlineOf(timeout: u64, absolute: bool, clk: c_int) union(enum) { at: i64, e
 // stopping) is acted on and the wait goes on to the same deadline, which is
 // what Linux's restart of an interrupted wait amounts to.
 fn waitQueued(addr: u64, val: u32, deadline: i64, mask: u32) u64 {
-    const me = sig.mySlot();
+    var me: Waiter = .{ .mask = mask };
     const b = bucket(addr);
-    b.lock();
+    b.lock.lock();
     const now = sig.load32(addr);
     if (now != val) {
-        b.unlock();
+        b.lock.unlock();
         return if (now == null) neg(EFAULT) else neg(EAGAIN);
     }
-    masks[me] = mask;
-    queue(me, addr);
-    b.unlock();
+    @atomicStore(u64, &me.word, addr, .seq_cst);
+    b.push(&me);
+    b.lock.unlock();
     // A signal for this thread ends the wait: its kick wakes the entry.
-    sig.beginFutexWait(@intFromPtr(&waits[me]));
+    sig.beginFutexWait(@intFromPtr(&me.word) | QUEUED);
     defer sig.endFutexWait();
     while (true) {
         sig.clearKick(); // answered by the look for signals next
-        const cur = @atomicLoad(u64, &waits[me], .seq_cst);
+        const cur = @atomicLoad(u64, &me.word, .seq_cst);
         if (cur == 0) return 0;
-        if (sig.interrupted() and sig.settle()) return leave(me, neg(ERESTARTSYS));
+        if (sig.interrupted() and sig.settle()) return leave(&me, neg(ERESTARTSYS));
         var ns: u64 = 0; // no limit
         if (deadline != 0) {
             const left = deadline - nowNs();
-            if (left <= 0) return leave(me, neg(ETIMEDOUT));
+            if (left <= 0) return leave(&me, neg(ETIMEDOUT));
             ns = @intCast(@min(left, 3600 * std.time.ns_per_s));
         }
         // The ulock call os_sync makes, issued through sig.cpSys so that a
         // kick landing as it starts still ends it.
-        const r = sig.cpSys(SYS_ULOCK_WAIT2, .{ UL_COMPARE_AND_WAIT64 | ULF_NO_ERRNO, @intFromPtr(&waits[me]), cur, ns, 0, 0 });
-        if (r < 0 and -r != DARWIN_ETIMEDOUT and -r != DARWIN_EINTR) return leave(me, neg(EFAULT));
+        const r = sig.cpSys(SYS_ULOCK_WAIT2, .{ UL_COMPARE_AND_WAIT64 | ULF_NO_ERRNO, @intFromPtr(&me.word), cur, ns, 0, 0 });
+        if (r < 0 and -r != DARWIN_ETIMEDOUT and -r != DARWIN_EINTR) return leave(&me, neg(EFAULT));
     }
 }
 
-// leave takes this thread off the table and returns ret, or 0 if a wake took
+// leave takes this thread off the queue and returns ret, or 0 if a wake took
 // it off first: that wake counted it.
-fn leave(me: usize, ret: u64) u64 {
+fn leave(me: *Waiter, ret: u64) u64 {
     while (true) {
-        const cur = @atomicLoad(u64, &waits[me], .seq_cst);
+        const cur = @atomicLoad(u64, &me.word, .seq_cst);
         if (cur == 0) return 0;
         const b = bucket(cur);
-        b.lock();
-        defer b.unlock();
-        if (@atomicLoad(u64, &waits[me], .seq_cst) == cur) { // not requeued meanwhile
-            @atomicStore(u64, &waits[me], 0, .seq_cst);
+        b.lock.lock();
+        defer b.lock.unlock();
+        if (@atomicLoad(u64, &me.word, .seq_cst) == cur) { // not requeued meanwhile
+            b.unlink(me);
+            @atomicStore(u64, &me.word, 0, .seq_cst);
             return ret;
         }
     }
@@ -341,24 +348,27 @@ fn wait(addr: u64, val: u32, timeout: u64, absolute: bool, clk: c_int, mask: u32
 // how many it woke and moved.
 fn requeue(uaddr: u64, nwake: u32, nreq: u32, uaddr2: u64, cmp: ?u32) u64 {
     if (@as(i32, @bitCast(nwake)) < 0 or @as(i32, @bitCast(nreq)) < 0) return neg(EINVAL);
-    var w: Woken = .{};
     var moved: u32 = 0;
     lock2(uaddr, uaddr2);
+    defer unlock2(uaddr, uaddr2);
     if (cmp) |c| {
         const now = sig.load32(uaddr);
-        if (now != c) {
-            unlock2(uaddr, uaddr2);
-            return if (now == null) neg(EFAULT) else neg(EAGAIN);
-        }
+        if (now != c) return if (now == null) neg(EFAULT) else neg(EAGAIN);
     }
-    w.take(uaddr, nwake, FUTEX_BITSET_MATCH_ANY);
-    while (moved < nreq) : (moved += 1) {
-        const i = oldest(uaddr, FUTEX_BITSET_MATCH_ANY) orelse break;
-        queue(i, uaddr2); // queued anew, behind uaddr2's waiters
+    const woke = take(uaddr, nwake, FUTEX_BITSET_MATCH_ANY);
+    const from = bucket(uaddr);
+    const to = bucket(uaddr2);
+    var it = from.head;
+    while (it) |w| {
+        if (moved >= nreq) break;
+        it = w.next;
+        if (w.word != uaddr) continue;
+        from.unlink(w);
+        @atomicStore(u64, &w.word, uaddr2, .seq_cst);
+        to.push(w); // queued anew, behind uaddr2's waiters
+        moved += 1;
     }
-    unlock2(uaddr, uaddr2);
-    w.wake();
-    return w.n + moved;
+    return woke + moved;
 }
 
 // sleepNs blocks the calling thread for ns: a timed wait on a private word
@@ -412,12 +422,10 @@ fn wakeOp(uaddr: u64, n: u32, n2: u32, uaddr2: u64, enc: u32, shared: bool) u64 
         if (hit) woke += wakeShared(uaddr2, count(n2));
         return woke;
     }
-    var w: Woken = .{};
-    w.take(uaddr, count(n), FUTEX_BITSET_MATCH_ANY);
-    if (hit) w.take(uaddr2, count(n2), FUTEX_BITSET_MATCH_ANY);
-    unlock2(uaddr, uaddr2);
-    w.wake();
-    return w.n;
+    defer unlock2(uaddr, uaddr2);
+    var woke = take(uaddr, count(n), FUTEX_BITSET_MATCH_ANY);
+    if (hit) woke += take(uaddr2, count(n2), FUTEX_BITSET_MATCH_ANY);
+    return woke;
 }
 
 // handle serves futex(uaddr, op, val, timeout|val2, uaddr2, val3) and returns

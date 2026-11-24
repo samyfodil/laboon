@@ -325,14 +325,31 @@ fn dropBootstrap() void {
 const WIN_OFF: usize = chan.SLOT_SIZE * chan.MAX_SLOTS + sig.AREA_LEN;
 const WIN_SIZE: usize = 256 * 1024;
 const CHAN_LEN: usize = WIN_OFF + WIN_SIZE * chan.MAX_SLOTS;
+comptime {
+    for (CHAN_AT) |at| {
+        if (at < mem.GUEST_TOP or at + CHAN_LEN > mem.TOP_LO) @compileError("the channel overlaps the guest's windows");
+    }
+}
+
+// The channel, a terabyte of address space, maps in the gap between the
+// host's malloc nano zone and the guest's upper window (mem.GUEST_TOP,
+// mem.TOP_LO), clear of every window the guest maps in, at the first of
+// these places the host has left free.
+const CHAN_AT = [_]usize{ 0x6800_0000_0000, 0x6a00_0000_0000, 0x6c00_0000_0000, 0x6600_0000_0000, 0x6400_0000_0000 };
 
 fn mapChannel(path: [*:0]const u8) [*]u8 {
     const fd = open(path, O_RDWR);
     if (fd < 0) _exit(123);
-    const p = mmap(null, CHAN_LEN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (p == MAP_FAILED or p == null) _exit(123);
-    fdlink.close(fd);
-    return @ptrCast(p.?);
+    for (CHAN_AT) |at| {
+        const p = mmap(@ptrFromInt(at), CHAN_LEN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (p == MAP_FAILED or p == null) _exit(123);
+        if (@intFromPtr(p) == at) {
+            fdlink.close(fd);
+            return @ptrCast(p.?);
+        }
+        _ = munmap(p.?, CHAN_LEN);
+    }
+    _exit(123);
 }
 
 fn slotAt(base: [*]u8, idx: usize) *chan.Chan {
