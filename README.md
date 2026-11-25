@@ -166,17 +166,22 @@ mount, environment, image-cache, and I/O options, and the
 
 The tested workload set includes the following. These are exercised workloads,
 not a promise that every Linux program or syscall is supported. The
-[sandbox test set](sandbox/) is the main guest-behavior gate; the
-[E2B examples](examples/e2b/) include the desktop integration.
+[sandbox test set](internal/sandbox/) is the main guest-behavior gate; the
+[E2B examples](examples/e2b/) include the desktop integration. The language,
+database and server images also run as a sweep
+([scripts/container-sweep.sh](scripts/container-sweep.sh) starts each one,
+[scripts/container-work-sweep.sh](scripts/container-work-sweep.sh) has it do
+real work), on Linux, macOS and Windows, on amd64 and arm64.
 
 | Workload | Tested programs |
 |---|---|
 | Languages and runtimes | Go, C/C++, Rust, Java, Python, PHP, Ruby, Perl, Node.js (V8 JIT), .NET |
 | Databases and servers | PostgreSQL, MariaDB, Redis |
-| Browser | Headless Chromium: DOM and screenshot |
+| Browser | Chromium, headless (DOM and screenshot) and on a desktop with its own sandbox on |
 | Nested containers | podman and Docker, each running its own containers |
 | Tools and nesting | `ptrace` tools such as `strace`; laboon inside laboon |
 | Desktop | Full XFCE desktop |
+| Threads | Thousands of threads in a process, with no fixed cap |
 
 ## How it works
 
