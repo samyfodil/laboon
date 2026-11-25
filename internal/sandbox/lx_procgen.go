@@ -21,7 +21,6 @@ const (
 	utsNodename = "laboon"
 	utsRelease  = "6.8.0"
 	utsVersion  = "#1 SMP PREEMPT laboon"
-	utsMachine  = guestArch
 	utsDomain   = "(none)"
 )
 
@@ -303,7 +302,7 @@ func (g *dguest) procSysKids() []pchild {
 			pchild{"swappiness", sysFile("60")},
 			pchild{"min_free_kbytes", sysFile("67584")},
 			pchild{"mmap_min_addr", sysFile("32768")},
-			pchild{"mmap_rnd_bits", sysFile(strconv.Itoa(int(rndBits())))},
+			pchild{"mmap_rnd_bits", sysFile(strconv.Itoa(int(g.vmRndBits())))},
 		)},
 		pchild{"fs", dir(
 			pchild{"file-max", sysFile("9223372036854775807")},

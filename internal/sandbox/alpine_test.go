@@ -156,7 +156,7 @@ func TestAlpine(t *testing.T) {
 		code int
 		want []string
 	}{
-		{"/sbin/apk", []string{"apk", "--version"}, 0, []string{"apk-tools 2.14", "compiled for " + guestArch}},
+		{"/sbin/apk", []string{"apk", "--version"}, 0, []string{"apk-tools 2.14", "compiled for " + map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]}},
 		{"/bin/busybox", []string{"sh", "-c", "echo hi; x=$((6*7)); echo $x; exit 3"}, 3, []string{"hi\n42\n"}},
 		{"/bin/sh", []string{"sh", "-c", "read v; echo got:$v"}, 0, []string{"got:\n"}},
 		{"/bin/busybox", []string{"ls", "-l", "/"}, 0, []string{"drwxr-xr-x", " root ", " etc\n", " usr\n", "drwxrwxrwt"}},

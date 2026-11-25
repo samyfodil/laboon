@@ -101,6 +101,14 @@ func (g *dguest) toGeneric(nr uint64, a [6]uint64) (uint64, [6]uint64, bool) {
 	return nr, a, true
 }
 
+// abi is the guest's ABI, by its architecture as toGeneric's is.
+func (g *dguest) abi() *guestABI {
+	if g.run != nil && g.run.x64 {
+		return &abiX64
+	}
+	return &abiA64
+}
+
 func (g *dguest) fromGeneric(nr uint64, a [6]uint64, r int64) int64 {
 	if g.run.x64 {
 		return x64FromGeneric(nr, a, r)

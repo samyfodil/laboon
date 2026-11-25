@@ -2022,13 +2022,13 @@ func (g *dguest) fcntl(fd, cmd int64, arg uint64) int64 {
 	return sErr(lxEINVAL)
 }
 
-// fstat / newfstatat fill a linux arm64 struct stat (128 bytes) from the host.
+// fstat / newfstatat fill the guest architecture's struct stat.
 func (g *dguest) fstatFd(fd int64, statAddr uint64) int64 {
 	s, e := g.fdStat(fd)
 	if e != 0 {
 		return sErr(e)
 	}
-	return g.putMem(statAddr, s.stat())
+	return g.putMem(statAddr, g.abi().stat(&s))
 }
 
 // fdStat describes an open file: an O_PATH fd its named object, an eventfd,
@@ -2121,7 +2121,7 @@ func (g *dguest) newfstatat(dirfd int64, pathAddr, statAddr uint64, flags int64)
 	if e != 0 {
 		return sErr(e)
 	}
-	return g.putMem(statAddr, s.stat())
+	return g.putMem(statAddr, g.abi().stat(&s))
 }
 
 // statPath is the lookup behind newfstatat and statx.
@@ -2454,7 +2454,7 @@ func (g *dguest) statx(dirfd int64, pathAddr uint64, flags int64, bufAddr uint64
 func (g *dguest) uname(addr uint64) int64 {
 	var buf [390]byte
 	node, domain := g.utsNS().get()
-	fields := [6]string{utsSysname, node, utsRelease, utsVersion, utsMachine, domain}
+	fields := [6]string{utsSysname, node, utsRelease, utsVersion, g.abi().machine, domain}
 	for i, f := range fields {
 		copy(buf[i*65:i*65+64], f) // leave the 65th byte NUL
 	}

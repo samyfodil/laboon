@@ -76,11 +76,12 @@ func (g *dguest) epollCtl(epfd int64, op int64, fd int64, evAddr uint64) int64 {
 	var events uint32
 	var data uint64
 	if op != lxEpollCtlDel {
-		b, err := g.readMem(evAddr, epollEventSize)
+		size := g.abi().epollEventSize
+		b, err := g.readMem(evAddr, size)
 		if err != nil {
 			return sErr(lxEFAULT)
 		}
-		events, data = le32(b), le64(b[epollEventSize-8:])
+		events, data = le32(b), le64(b[size-8:])
 	}
 
 	ep.mu.Lock()
@@ -195,7 +196,8 @@ func (g *dguest) epollWait(epfd int64, evAddr uint64, maxEvents int64, timeout i
 	// writable: Linux copies them one at a time and puts back on the ready
 	// list the ones from the first it cannot write on, failing with EFAULT if
 	// it wrote none.
-	fit := int(g.writablePrefix(evAddr, uint64(maxEvents)*epollEventSize) / epollEventSize)
+	size := uint64(g.abi().epollEventSize)
+	fit := int(g.writablePrefix(evAddr, uint64(maxEvents)*size) / size)
 	room := max(fit, 1)
 	if evs := ep.takePending(room); len(evs) > 0 {
 		return g.epollDeliver(ep, evAddr, evs, fit)
@@ -266,22 +268,21 @@ func (g *dguest) epollDeliver(ep *epoll, evAddr uint64, evs []pendEv, fit int) i
 		ep.mu.Unlock()
 		return sErr(lxEFAULT)
 	}
-	if err := g.writeMem(evAddr, encodeEvents(evs)); err != nil {
+	if err := g.writeMem(evAddr, encodeEvents(evs, g.abi().epollEventSize)); err != nil {
 		return sErr(lxEFAULT)
 	}
 	return int64(len(evs))
 }
 
-// encodeEvents lays out evs as struct epoll_event. Each carries the data its
-// registration had when it was taken: one deleted since still reports, as on
-// Linux, where the delete waits for the wait's copy-out.
-func encodeEvents(evs []pendEv) []byte {
-	out := make([]byte, 0, len(evs)*epollEventSize)
-	for _, p := range evs {
-		var b [epollEventSize]byte
-		put32(b[:], p.ev)
-		put64(b[epollEventSize-8:], p.data)
-		out = append(out, b[:]...)
+// encodeEvents lays out evs as struct epoll_event, size bytes each. Each
+// carries the data its registration had when it was taken: one deleted since
+// still reports, as on Linux, where the delete waits for the wait's copy-out.
+func encodeEvents(evs []pendEv, size int) []byte {
+	out := make([]byte, len(evs)*size)
+	for i, p := range evs {
+		b := out[i*size:]
+		put32(b, p.ev)
+		put64(b[size-8:], p.data)
 	}
 	return out
 }

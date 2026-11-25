@@ -8,7 +8,8 @@
 # set CC to a glibc cross gcc. Every testdata/*.c and internal/sandbox/testdata/*.c
 # for that arch is built into OUTDIR (static-PIE, unless the source names its
 # flags on a "// build:" line; with zig, also against musl as <name>+musl when
-# it has a "// libc: musl" line), every testdata Go program for linux/<arch>,
+# it has a "// libc: musl" line, and for x86-64 as <name>+x64 when it has a
+# "// cross: x64" line), every testdata Go program for linux/<arch>,
 # a dynamic glibc program with its libraries (dynroot), and the dynamic musl
 # programs and libraries alpine_test.go adds to Alpine (zig); then run
 # the suite with LC_GUEST_DIR=OUTDIR. A guest that does not build fails the
@@ -49,6 +50,11 @@ for src in testdata/*.c internal/sandbox/testdata/*.c; do
 		case $flags in *-static-pie*) flags="$flags -fPIE" ;; esac
 		# shellcheck disable=SC2086
 		"${ZIG:-zig}" cc -target "$bb-linux-musl" -O2 -pthread -w $flags -o "$out/$name+musl" "$src" || failed="$failed $name+musl"
+	fi
+	# A "// cross: x64" program is also built for x86-64 (static musl), which
+	# an arm64 macOS supervisor runs under Rosetta beside its own guests.
+	if has musl && grep -q '^// cross: x64' "$src"; then
+		"${ZIG:-zig}" cc -target x86_64-linux-musl -O2 -w -static-pie -fPIE -o "$out/$name+x64" "$src" || failed="$failed $name+x64"
 	fi
 done
 # A dynamic glibc program with its loader and libraries, each at its own path.

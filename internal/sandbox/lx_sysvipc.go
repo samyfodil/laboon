@@ -693,11 +693,12 @@ func (ns *ipcNS) semctl(g *dguest, id, num int, cmd int64, arg uint64) int64 {
 	}
 	switch cmd {
 	case ipcStat, semStat, semStatAny:
-		var b [semdsLen]byte // struct semid64_ds, its layout per architecture
-		s.perm.put(b[:])
+		abi := g.abi()
+		b := make([]byte, abi.semdsLen) // struct semid64_ds, its layout per architecture
+		s.perm.put(b)
 		put64(b[48:], uint64(s.otime))
-		put64(b[semdsCtime:], uint64(s.ctime))
-		put64(b[semdsNsems:], uint64(len(s.vals)))
+		put64(b[abi.semdsCtime:], uint64(s.ctime))
+		put64(b[abi.semdsNsems:], uint64(len(s.vals)))
 		ret := int64(0)
 		if cmd != ipcStat {
 			ret = int64(id)

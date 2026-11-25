@@ -39,8 +39,8 @@ type seccompData struct {
 	args [6]uint64
 }
 
-// auditArch is the AUDIT_ARCH value for the guest, which a filter checks before
-// trusting the syscall numbers. The guest runs the host's instruction set.
+// auditArch is the AUDIT_ARCH of the supervisor's instruction set, whose
+// register layouts ptrace's requests assume; a guest's own is g.abi's.
 func auditArch() uint32 {
 	switch runtime.GOARCH {
 	case "amd64":
@@ -274,7 +274,7 @@ func (g *dguest) seccompVerdict(nr uint32, args [6]uint64, ip uint64) uint32 {
 	if len(progs) == 0 {
 		return secRetAllow
 	}
-	d := seccompData{nr: nr, arch: auditArch(), ip: ip, args: args}
+	d := seccompData{nr: nr, arch: g.abi().auditArch, ip: ip, args: args}
 	worst := uint32(secRetAllow)
 	killProc := false
 	for _, p := range progs {
@@ -318,7 +318,7 @@ func (g *dguest) applySeccomp(nr uint32, args [6]uint64, ip uint64) (ret int64, 
 		// The result keeps the syscall number, which the kernel leaves in the
 		// register a handler reads (not ENOSYS).
 		const sysSeccomp = 1
-		si := sigInfo{errno: int32(v & secRetData), code: sysSeccomp, a: ip, b: uint64(nr) | uint64(auditArch())<<32}
+		si := sigInfo{errno: int32(v & secRetData), code: sysSeccomp, a: ip, b: uint64(nr) | uint64(g.abi().auditArch)<<32}
 		sr := g.sigs()
 		t, p := sr.thread(g.pid), sr.proc(g.tgid)
 		if t == nil || p == nil {

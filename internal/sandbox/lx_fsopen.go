@@ -202,7 +202,7 @@ func (g *dguest) openat2(dirfd int64, pathAddr, howAddr, size uint64) int64 {
 	// open and openat reach the shared table through toGeneric, which swaps the
 	// few open flags whose bit differs on x86-64 to the generic values the code
 	// below uses; openat2's flags come from this struct, so swap them here too.
-	how.flags = oflagsToGeneric(how.flags)
+	how.flags = g.abi().oflags(how.flags)
 	const known = lxOAccmod | lxOCreat | lxOExcl | lxONoctty | lxOTrunc | lxOAppend | lxONonblock |
 		lxODsync | lxOAsync | lxODirectory | lxONofollow | lxODirect | lxOLargefile | lxONoatime |
 		lxOCloexec | lxOSync | lxOPath | lxOTmpfile

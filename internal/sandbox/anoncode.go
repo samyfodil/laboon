@@ -40,6 +40,7 @@ type anonCode struct {
 	mu    sync.Mutex
 	seed  maphash.Seed
 	pages map[uint64]*anonPage
+	x64   bool // the code is x86-64's, the guest's (g.abi), not the supervisor's
 }
 
 type anonPage struct {
@@ -73,6 +74,7 @@ type anonEntry struct {
 func (a *anonCode) sites(dg *dguest, ps, page, pc uint64, read func(addr uint64, b []byte) error, insnEnd func(pc uint64) uint64) int64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.x64 = dg.abi().x64
 	sites, gained, ok := a.analyze(ps, page, pc, read, insnEnd)
 	if !ok {
 		return sErr(lxEFAULT)
@@ -105,6 +107,7 @@ func (a *anonCode) learn(dg *dguest, ps uint64, n int, read func(addr uint64, b 
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.x64 = dg.abi().x64
 	pcs := make(map[uint64]uint64, n)
 	work := make([]uint64, 0, n)
 	for i := range n {
@@ -169,14 +172,18 @@ func (a *anonCode) analyze(ps, page, pc uint64, read func(addr uint64, b []byte)
 		if read(e.from, src) != nil {
 			continue
 		}
-		untrap(src, a.pages[e.from])
+		a.untrap(src, a.pages[e.from])
 		if a.hash(src) == e.hash {
 			kept = append(kept, e)
 			entries = append(entries, e.off)
 		}
 	}
 	p.entries = kept
-	sites, steal, exits := anonAnalyze(code, entries)
+	analyze := a64AnonAnalyze
+	if a.x64 {
+		analyze = x64AnonAnalyze
+	}
+	sites, steal, exits := analyze(code, entries)
 	p.hash, p.patched, p.steal, p.stolen = a.hash(code), sites, steal, nil
 	var gained []uint64
 	for _, x := range exits {
@@ -245,7 +252,7 @@ func putPages(b []byte, pages []uint64) {
 func (a *anonCode) cloneInto(b *anonCode) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	b.seed = a.seed
+	b.seed, b.x64 = a.seed, a.x64
 	b.pages = make(map[uint64]*anonPage, len(a.pages))
 	for k, p := range a.pages {
 		q := *p
@@ -259,9 +266,13 @@ func (a *anonCode) cloneInto(b *anonCode) {
 
 // untrap puts the syscalls back at p's trap sites in code, a page that may
 // run with them trapped.
-func untrap(code []byte, p *anonPage) {
+func (a *anonCode) untrap(code []byte, p *anonPage) {
 	if p == nil {
 		return
+	}
+	untrapSite := a64UntrapSite
+	if a.x64 {
+		untrapSite = x64UntrapSite
 	}
 	for _, off := range p.patched {
 		untrapSite(code, off)

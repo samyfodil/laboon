@@ -87,6 +87,9 @@ var rndBits = sync.OnceValue(func() uint64 {
 	return mmapRndBits
 })
 
+// vmRndBits is what /proc/sys/vm/mmap_rnd_bits reports: the host's.
+func (g *dguest) vmRndBits() uint64 { return rndBits() }
+
 // guestPageSize is the guest's page size, AT_PAGESZ: the host's.
 func (g *dguest) guestPageSize() int { return int(pageSize) }
 
