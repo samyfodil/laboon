@@ -224,8 +224,10 @@ const MAP_FAILED: ?*anyopaque = @ptrFromInt(std.math.maxInt(usize));
 
 // ---- Seatbelt backstop --------------------------------------------------------
 
-// Deny-by-default. The stub reads only the run's root filesystem and its temp
-// directory (the ROOT and TMP parameters, see sbcache.zig), neither forks nor
+// Deny-by-default. The stub reads only the run's temp directory (the TMP
+// parameter, see sbcache.zig), which holds the private copy of every program it
+// loads; the guest's files reach it as descriptors, never by a host path. It
+// neither forks nor
 // execs (a fork child is a stub the supervisor started), signals only its own process group, the run's stubs (life.zig), and
 // reaches no network, Mach service, sysctl or other process. Each BSD syscall,
 // Mach trap and kernel MIG routine it issues after this point is listed (the
@@ -245,7 +247,7 @@ const seatbelt_profile: [*:0]const u8 =
     \\(version 1)
     \\(deny default)
     \\(allow signal (target pgrp))
-    \\(allow file-read* (subpath (param "ROOT")) (subpath (param "TMP")))
+    \\(allow file-read* (subpath (param "TMP")))
     \\(disable-syscall-inference)
     ++ "\n(deny syscall-unix" ++ sb_kill ++ ")\n" ++
     \\(allow syscall-unix

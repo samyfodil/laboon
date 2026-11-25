@@ -244,7 +244,7 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	defer os.Remove(chanFile.Name())
 	defer os.Remove(chanFile.Name() + ".sb") // the stubs' compiled Seatbelt profile
 	defer chanFile.Close()
-	if err := writeSeatbeltPaths(chanFile.Name(), rootPath); err != nil {
+	if err := writeSeatbeltPaths(chanFile.Name()); err != nil {
 		return 0, err
 	}
 	defer os.Remove(chanFile.Name() + ".paths")
@@ -865,22 +865,19 @@ func guestMsg(kind uint64) bool {
 	return kind == msgSyscall || kind == msgTraceLocal || kind == msgSeccomp
 }
 
-// writeSeatbeltPaths writes <chan>.paths, the two host trees the stubs'
-// Seatbelt profile lets them read (ROOT and TMP in stub/macos/sbcache.zig): the
-// rootfs, and the run's temp directory holding site lists, job files and
-// copies of every program a stub loads. Without a host-directory rootfs no
-// host tree is the guest's, so ROOT is TMP too: the guest shares the stub's
-// address space and can make the profile's calls itself, so whatever ROOT
-// names it can read past the vfs. root is already resolved.
-func writeSeatbeltPaths(chanPath, root string) error {
+// writeSeatbeltPaths writes <chan>.paths, the one host tree the stubs'
+// Seatbelt profile lets them read (TMP in stub/macos/sbcache.zig): the run's
+// temp directory, holding the site lists and the private copy of every program
+// a stub loads. The guest shares the stub's address space and can make the
+// profile's calls itself, so no tree of the guest's own is named there, not
+// even a host-directory root: a raw read of it would pass by the vfs, its
+// whiteouts and its mounts.
+func writeSeatbeltPaths(chanPath string) error {
 	tmp, err := filepath.EvalSymlinks(filepath.Dir(chanPath))
 	if err != nil {
 		return err
 	}
-	if root == "" {
-		root = tmp
-	}
-	return os.WriteFile(chanPath+".paths", []byte(root+"\x00"+tmp+"\x00"), 0o600)
+	return os.WriteFile(chanPath+".paths", []byte(tmp+"\x00"), 0o600)
 }
 
 // signedStubFor returns the path of the map+rewrite stub for the guest's

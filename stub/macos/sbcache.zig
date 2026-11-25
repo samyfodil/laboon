@@ -6,8 +6,8 @@
 // bytecode directly (the same private libsandbox entry points Chromium uses).
 // Without those it falls back to sandbox_init_with_parameters.
 //
-// The profile's ROOT and TMP parameters come from <chan>.paths, written by the
-// supervisor before it starts any stub: two NUL-terminated host paths.
+// The profile's TMP parameter comes from <chan>.paths, written by the
+// supervisor before it starts any stub: one NUL-terminated host path.
 
 const std = @import("std");
 
@@ -50,11 +50,8 @@ pub fn apply(profile: [*:0]const u8, chan_path: [*:0]const u8) bool {
     var qbuf: [1024]u8 = undefined;
     const qpath = std.fmt.bufPrint(&qbuf, "{s}.paths", .{std.mem.span(chan_path)}) catch return false;
     const raw = std.fs.cwd().readFileAlloc(alloc, qpath, 1 << 16) catch return false;
-    const mid = std.mem.indexOfScalar(u8, raw, 0) orelse return false;
-    if (mid == 0 or raw.len < mid + 3 or raw[raw.len - 1] != 0) return false;
-    if (std.mem.indexOfScalar(u8, raw[mid + 1 ..], 0).? != raw.len - mid - 2) return false;
-    const root: [*:0]const u8 = @ptrCast(raw.ptr);
-    const tmp: [*:0]const u8 = @ptrCast(raw.ptr + mid + 1);
+    if (raw.len < 2 or std.mem.indexOfScalar(u8, raw, 0) != raw.len - 1) return false;
+    const tmp: [*:0]const u8 = @ptrCast(raw.ptr);
 
     var err: ?[*:0]u8 = null;
     compiled: {
@@ -64,13 +61,13 @@ pub fn apply(profile: [*:0]const u8, chan_path: [*:0]const u8) bool {
         const set_fn = sym(SetParamFn, lib, "sandbox_set_param") orelse break :compiled;
         const free_fn = sym(FreeFn, lib, "sandbox_free_profile") orelse break :compiled;
         const params = params_fn() orelse break :compiled;
-        if (set_fn(params, "ROOT", root) != 0 or set_fn(params, "TMP", tmp) != 0) return false;
+        if (set_fn(params, "TMP", tmp) != 0) return false;
         const p = compile_fn(profile, params, &err) orelse return false;
         defer free_fn(p);
         if (p.data) |d| save(path, d[0..p.size]);
         return f(p) == 0;
     }
-    const kv = [_:null]?[*:0]const u8{ "ROOT", root, "TMP", tmp };
+    const kv = [_:null]?[*:0]const u8{ "TMP", tmp };
     return sandbox_init_with_parameters(profile, 0, &kv, &err) == 0;
 }
 
