@@ -384,7 +384,8 @@ func programBind(host string, root core.FileSystem) (string, core.FileSystem, er
 		return "", nil, err
 	}
 	dir, name := filepath.Split(real)
-	hfs := hostfs.NewHostDirFS(filepath.Clean(dir), hostfs.NewRawHostFS(""))
+	dir = filepath.Clean(dir)
+	hfs := hostfs.NewHostDirFS(dir, hostfs.NewRawHostFS(dir))
 	hfs.SetConfine(true)
 	n, err := hfs.Lookup(hfs.Root(), name)
 	if err != nil {

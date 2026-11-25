@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -370,13 +371,20 @@ func (g *dguest) mountFS(target string) int64 {
 }
 
 // tmpLayer makes a fresh writable filesystem: a confined host directory under
-// the run's temp dir, removed when the run ends.
+// the run's temp dir, removed when the run ends. Its backend is rooted at the
+// directory itself, whatever the run's root, so no host call made for the
+// guest's tree follows a symlink the guest put there.
 func (fs *dfs) tmpLayer() (*hostfs.HostDirFS, error) {
 	dir, err := os.MkdirTemp(fs.tmpDir, "lc-mount-")
 	if err != nil {
 		return nil, err
 	}
-	backing := hostfs.NewHostDirFS(dir, fs.hostFS)
+	// The no-symlink resolution refuses a root whose own path has one (/tmp on
+	// macOS).
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		return nil, err
+	}
+	backing := hostfs.NewHostDirFS(dir, hostfs.NewRawHostFS(dir))
 	backing.SetConfine(true)             // a guest-mutable tree
 	backing.SetMeta(core.NewMetaStore()) // carry device-node kind/rdev the placeholder cannot
 	return backing, nil

@@ -22,8 +22,7 @@ import (
 // host call that uses it. So every call reaches its last component through
 // the parent directory, opened with openat2's RESOLVE_NO_SYMLINKS, and acts
 // on it without following: the kernel refuses a symlink anywhere on the way
-// instead of leaving the layer through it. Without a root the guest path is
-// the host path and is followed as given.
+// instead of leaving the layer through it.
 
 // HostONonblock is the host open flag for a non-blocking open.
 const HostONonblock = unix.O_NONBLOCK
@@ -43,9 +42,6 @@ func NewRawHostFS(root string) HostFS { return &LinuxFS{root} }
 func HostPath(root, gp string) string { return joinClean(root, gp) }
 
 func (fs *LinuxFS) resolve() uint64 {
-	if fs.rootAbs == "" {
-		return 0
-	}
 	return unix.RESOLVE_NO_SYMLINKS
 }
 

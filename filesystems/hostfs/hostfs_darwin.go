@@ -24,8 +24,7 @@ import (
 // between resolving a path and the host call that uses it, so every such call
 // passes Darwin's NOFOLLOW_ANY: the kernel then refuses a symlink anywhere in
 // the path instead of leaving the layer through it. Both layer roots are
-// canonical (no symlinks), which NOFOLLOW_ANY needs. Without a root the guest
-// path is the host path and is followed as given.
+// canonical (no symlinks), which NOFOLLOW_ANY needs.
 const (
 	atNofollowAny    = 0x0800
 	cloneNofollowAny = 0x0008
@@ -48,16 +47,10 @@ func NewRawHostFS(root string) HostFS { return &DarwinFS{rootAbs: root} }
 func HostPath(root, gp string) string { return joinClean(root, gp) }
 
 func (fs *DarwinFS) oAny() int {
-	if fs.rootAbs == "" {
-		return 0
-	}
 	return unix.O_NOFOLLOW_ANY
 }
 
 func (fs *DarwinFS) atAny() int {
-	if fs.rootAbs == "" {
-		return 0
-	}
 	return atNofollowAny
 }
 
@@ -238,9 +231,7 @@ func (fs *DarwinFS) hRename(from, to string, exchange bool) error {
 	if exchange {
 		flags = unix.RENAME_SWAP
 	}
-	if fs.rootAbs != "" {
-		flags |= unix.RENAME_NOFOLLOW_ANY
-	}
+	flags |= unix.RENAME_NOFOLLOW_ANY
 	return unix.RenameatxNp(unix.AT_FDCWD, from, unix.AT_FDCWD, to, flags)
 }
 
@@ -277,9 +268,6 @@ func (fs *DarwinFS) hLink(from, to string) error {
 }
 
 func (fs *DarwinFS) cloneFlags() int {
-	if fs.rootAbs == "" {
-		return unix.CLONE_NOFOLLOW
-	}
 	return unix.CLONE_NOFOLLOW | cloneNofollowAny
 }
 
