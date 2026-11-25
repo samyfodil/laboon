@@ -56,6 +56,9 @@ func init() {
 			return 0
 		}
 		text, area := a[0], a[4]
+		if a[1] > maxCodeRead {
+			return 0
+		}
 		code := make([]byte, a[1])
 		if g.getBuf(text, code) != nil {
 			return 0

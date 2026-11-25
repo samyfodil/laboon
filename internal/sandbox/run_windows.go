@@ -131,6 +131,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	}
 	defer windows.CloseHandle(job)
 	r.job = job
+	fs.abort = func() { windows.TerminateJobObject(job, 128+9) }
 
 	exe := path.Clean("/" + prog)
 	fs.initProcfs(0, exe, cfg.Args, cfg.Env, stdio)
@@ -204,6 +205,9 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	windows.TerminateJobObject(job, 128+9)
 	fs.wg.Wait() // let the serve goroutines unwind before the section is unmapped
 	close(done)
+	if perr := fs.faulted(); perr != nil {
+		return 0, perr
+	}
 	if errors.Is(err, errExited) {
 		if k := sr.killedBy(1); k != 0 {
 			return 128 + k, nil // the guest died of a signal

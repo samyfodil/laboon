@@ -463,6 +463,7 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 		stdin: stdin, stdout: stdout, stderr: stderr,
 		life: lifeR, broker: brk,
 	}
+	fs.abort = func() { unix.Kill(-fs.run.pgid, unix.SIGKILL) }
 	sr := newSigRun(fs, mem, cmd.Process.Pid)
 	defer sr.close()
 	defer sr.forward()()
@@ -497,6 +498,9 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 	fs.killAll() // wake any serve goroutine parked in os_sync on a now-dead stub
 	fs.wg.Wait() // let the child serve goroutines unwind
 	<-done
+	if perr := fs.faulted(); perr != nil {
+		return 0, perr
+	}
 
 	if errors.Is(runErr, errExited) {
 		if k := sr.killedBy(1); k != 0 {
@@ -554,7 +558,8 @@ func serve(ch *channel, fs *dfs, mp *memProc, cfg Config) (int, error) {
 // exit code. The main process and every forked child run the same loop; a
 // child's caller (serveChild) has already completed the fork handshake, so the
 // loop's first wait receives that process's first syscall either way.
-func serveLoop(g *dguest, cfg Config) (int, error) {
+func serveLoop(g *dguest, cfg Config) (code int, err error) {
+	defer g.dfs.contain(&err)
 	ch := g.ch
 	g.attachStdio()
 	defer g.detachStdio()

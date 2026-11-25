@@ -89,7 +89,8 @@ func (g *dguest) execve(dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	// Reading argv and detaching SysV segments use the channel scratch, so
 	// the strings are packed again after them.
 	var argv []string
-	if a, e := g.readArgv(argvAddr); e == 0 {
+	room := darwinArgMax
+	if a, e := g.readArgv(argvAddr, &room); e == 0 {
 		argv = append(prefix, a[min(int(skip), len(a)):]...)
 	}
 	g.mp.detachAll(g)
@@ -269,11 +270,12 @@ func (g *dguest) execRespawn(t *execTarget, host, interpHost, mainSites, interpS
 		g.ch.page.ret = errno(e)
 		return false
 	}
-	argv, e := g.readArgv(argvAddr)
+	room := darwinArgMax
+	argv, e := g.readArgv(argvAddr, &room)
 	if e != 0 {
 		return fail(e)
 	}
-	envv, e := g.readArgv(envpAddr)
+	envv, e := g.readArgv(envpAddr, &room)
 	if e != 0 {
 		return fail(e)
 	}

@@ -394,6 +394,9 @@ func (g *wguest) codeImage(d *dfile) (imageSrc, error) {
 // (d.readAt), so a non-host file's code is rewritten and mapped like a host
 // file's without the stub ever touching the backing.
 func (g *wguest) codeFill(dg *dguest, fd, off, n, addr uint64, areas []trampArea) ([]byte, [][]byte, []uint64, lxErrno) {
+	if n > maxCodeRead {
+		return nil, nil, nil, lxENOMEM
+	}
 	buf := make([]byte, n)
 	var d *dfile
 	var img []byte

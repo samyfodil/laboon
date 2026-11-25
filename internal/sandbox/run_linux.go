@@ -200,6 +200,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 		})
 	}
 	defer join()
+	fs.abort = func() { unix.Kill(-cmd.Process.Pid, unix.SIGKILL) }
 
 	ch := newChannel(mem, 0, slotsAddr, done, nil)
 	dg := newDguest(fs, ch, mem, 0, cfg)
@@ -238,6 +239,9 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	// kills the group, reaps (<-done), and waits for the workers, so the exit
 	// code below reads settled state.
 	join()
+	if perr := fs.faulted(); perr != nil {
+		return 0, perr
+	}
 	if errors.Is(err, errExited) {
 		if k := sr.killedBy(1); k != 0 {
 			return 128 + k, nil
@@ -388,7 +392,8 @@ func stubParkCost() uint64 {
 // serveGuest runs one guest thread's syscall loop: the control messages
 // (exit, clone, execve, default signal actions) here, the rest from the
 // shared table.
-func serveGuest(dg *dguest) (int, error) {
+func serveGuest(dg *dguest) (code int, err error) {
+	defer dg.dfs.contain(&err)
 	ch := dg.ch
 	dg.attachStdio()
 	defer dg.detachStdio()

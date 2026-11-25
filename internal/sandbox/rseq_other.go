@@ -44,7 +44,10 @@ func (g *dguest) rseqEmulated(a [6]uint64) int64 {
 	if n < rseqOrigSize || area%rseqOrigSize != 0 {
 		return sErr(lxEINVAL)
 	}
-	if _, err := g.readMem(area, int(n)); err != nil {
+	if _, err := g.readMem(area, rseqOrigSize); err != nil {
+		return sErr(lxEFAULT)
+	}
+	if _, err := g.readMem(area+uint64(n)-1, 1); err != nil {
 		return sErr(lxEFAULT)
 	}
 	g.rseqReg = [3]uint64{area, n, sig}

@@ -58,6 +58,12 @@ func (g *dguest) exePin(t *execTarget) *dfile {
 
 const maxArgStrlen = 32 * 4096 // Linux's MAX_ARG_STRLEN
 
+// maxCodeRead bounds the code the supervisor holds at once to rewrite it: far
+// above any program's text, far below what would exhaust the supervisor. A
+// mapping's whole range is held at once; rewriting it in bounded windows would
+// lift the bound.
+const maxCodeRead = 1 << 30
+
 const (
 	maxInterpDepth = 4 // nested #! levels Linux follows before ELOOP
 	binprmBuf      = 256
@@ -89,8 +95,11 @@ func checkELF(h []byte, want elf.Machine) lxErrno {
 
 // readArgv reads a NULL-terminated guest string vector (argv, envp); a NULL
 // vector is empty. Each peek stays within one page: a peek that ran into an
-// unmapped page would fault the stub, not fail.
-func (g *dguest) readArgv(addr uint64) ([]string, lxErrno) {
+// unmapped page would fault the stub, not fail. Each entry is charged to room
+// as it is read, and the read fails with E2BIG once room is spent or a string
+// reaches maxArgStrlen, as the kernel's copy_strings does, so a vector of
+// pointers to one long string costs no more than room.
+func (g *dguest) readArgv(addr uint64, room *int) ([]string, lxErrno) {
 	var out []string
 	if addr == 0 {
 		return nil, 0
@@ -109,9 +118,12 @@ func (g *dguest) readArgv(addr uint64) ([]string, lxErrno) {
 			if p == 0 {
 				return out, 0
 			}
-			s, err := g.readCStrN(p, maxArgStrlen)
+			s, err := g.readCStrN(p, min(maxArgStrlen, max(*room, 0)))
 			if err != nil {
 				return nil, lxEFAULT
+			}
+			if *room -= len(s) + 1 + 8; *room < 0 || len(s) >= maxArgStrlen {
+				return nil, lxE2BIG
 			}
 			out = append(out, s)
 		}

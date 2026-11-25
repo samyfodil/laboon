@@ -479,9 +479,17 @@ func (g *dguest) sharedBacking(d *dfile, minEnd, pages int64) (*shBacking, lxErr
 // g.mp.mu held.
 func (g *dguest) mmapVFExec(d *dfile, a [6]uint64) int64 {
 	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], int64(a[5])
+	size, err := d.size0()
+	if err != nil {
+		return sErr(lxEIO)
+	}
+	n, e := codeSpan(size, off, length)
+	if e != 0 {
+		return sErr(e)
+	}
 	g.dropFileCode(addr, length)
 	src := d.content() // the live shared backing if there is one, else the backend
-	data := make([]byte, length)
+	data := make([]byte, n)
 	if _, err := src.ReadAt(data, off); err != nil && err != io.EOF {
 		return sErr(lxEIO)
 	}
@@ -494,7 +502,33 @@ func (g *dguest) mmapVFExec(d *dfile, a [6]uint64) int64 {
 	if res := g.installCode(uint64(r), data, prot, &codeSource{r: src, fd: -1, off: uint64(off)}, false); res < 0 {
 		return res
 	}
+	if res := g.protectTail(uint64(r), uint64(len(data)), length, prot); res < 0 {
+		return res
+	}
 	return r
+}
+
+// codeSpan is how many of a mapping's length bytes from off its file of size
+// holds, which is all that is read: past the file's end the fresh region's
+// zeros stand, however long a mapping the guest asks for.
+func codeSpan(size, off int64, length uint64) (int, lxErrno) {
+	if off < 0 || off >= size {
+		return 0, 0
+	}
+	n := min(uint64(size-off), length)
+	if n > maxCodeRead {
+		return 0, lxENOMEM
+	}
+	return int(n), 0
+}
+
+// protectTail gives the part of a mapping at addr past the n bytes read from
+// its file the mapping's protection, which installCode set only up to n.
+func (g *dguest) protectTail(addr, n, length, prot uint64) int64 {
+	if lo, hi := alignUp(addr+n), alignUp(addr+length); hi > lo {
+		return g.host(unix.SYS_MPROTECT, lo, hi-lo, prot)
+	}
+	return 0
 }
 
 // fillMemfd writes length bytes of r starting at off into the memfd mfd; any
@@ -537,7 +571,15 @@ func (g *dguest) mmapHostFd(fd int, f io.ReaderAt, a [6]uint64) int64 {
 	if r, ok := g.mmapPrivate(fd, f, a); ok {
 		return r
 	}
-	data := make([]byte, length)
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return sErr(osErrno(err))
+	}
+	n, e := codeSpan(st.Size, off, length)
+	if e != 0 {
+		return sErr(e)
+	}
+	data := make([]byte, n)
 	if _, err := f.ReadAt(data, off); err != nil && err != io.EOF {
 		return sErr(lxEIO)
 	}
@@ -549,6 +591,9 @@ func (g *dguest) mmapHostFd(fd int, f io.ReaderAt, a [6]uint64) int64 {
 	}
 	if prot&unix.PROT_EXEC != 0 {
 		if res := g.installCode(uint64(r), data, prot, &codeSource{r: f, fd: fd, off: uint64(off)}, false); res < 0 {
+			return res
+		}
+		if res := g.protectTail(uint64(r), uint64(len(data)), length, prot); res < 0 {
 			return res
 		}
 		return r

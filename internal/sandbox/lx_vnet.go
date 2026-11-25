@@ -1016,13 +1016,13 @@ func (g *dguest) virtSend(d *dfile, iovs [][2]uint64, dest []byte) int64 {
 
 // vudpWrite forwards a datagram out through a connected host UDP egress socket.
 func (g *dguest) vudpWrite(fd int, iovs [][2]uint64) int64 {
-	data := make([]byte, 0, iovTotal(iovs))
-	for _, iov := range iovs {
-		b, err := g.readMem(iov[0], int(iov[1]))
-		if err != nil {
-			return sErr(lxEFAULT)
-		}
-		data = append(data, b...)
+	total := iovTotal(iovs)
+	if total > 65507 {
+		return sErr(lxEMSGSIZE)
+	}
+	data, e := g.gather(iovs, 0, total)
+	if e != 0 {
+		return sErr(e)
 	}
 	if err := unix.Send(fd, data, 0); err != nil {
 		return sErr(osErrno(err))
@@ -1049,13 +1049,13 @@ func vdnsOnlyV4(network, name string) ([]net.IP, dnsmessage.RCode) {
 // later egress to them is permitted) and delivered into the socket's own
 // backing, so poll and recvfrom see it as an ordinary incoming datagram.
 func (g *dguest) vdnsSend(d *dfile, iovs [][2]uint64, ip uint32, port uint16) int64 {
-	query := make([]byte, 0, iovTotal(iovs))
-	for _, iov := range iovs {
-		b, err := g.readMem(iov[0], int(iov[1]))
-		if err != nil {
-			return sErr(lxEFAULT)
-		}
-		query = append(query, b...)
+	total := iovTotal(iovs)
+	if total > 65507 {
+		return sErr(lxEMSGSIZE)
+	}
+	query, e := g.gather(iovs, 0, total)
+	if e != 0 {
+		return sErr(e)
 	}
 	n := g.netState()
 	if e := g.vdnsBind(d, ip); e != 0 {

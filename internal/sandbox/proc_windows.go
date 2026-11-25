@@ -44,7 +44,8 @@ const lcFault = 0x4c430022
 // thread, a CLONE_VM child). Signals, futexes, memory and sleeps are handled
 // in the stub; the loop serves the rest and the control messages: faults,
 // clone and fork, execve, thread and process exit, default actions.
-func serveGuest(dg *dguest) (int, error) {
+func serveGuest(dg *dguest) (code int, err error) {
+	defer dg.dfs.contain(&err)
 	ch := dg.ch
 	finishIO, err := ch.startIO()
 	if err != nil {
@@ -700,11 +701,12 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 		return fail(e)
 	}
 	defer t.drop()
-	argv, e := dg.readArgv(argvAddr)
+	room := winArgMax
+	argv, e := dg.readArgv(argvAddr, &room)
 	if e != 0 {
 		return fail(e)
 	}
-	envv, e := dg.readArgv(envpAddr)
+	envv, e := dg.readArgv(envpAddr, &room)
 	if e != 0 {
 		return fail(e)
 	}

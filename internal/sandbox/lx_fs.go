@@ -51,6 +51,9 @@ type dfs struct {
 	emptyErr  error
 	appendMu  sync.Mutex // serializes O_APPEND writes to a backing that cannot append itself
 
+	fault atomic.Pointer[handlerPanic] // the run's first handler panic (contain)
+	abort func()                       // kills every stub of the run, taking no lock
+
 	mem  []byte          // shared channel region, inherited across the stub's forks
 	done <-chan struct{} // the main stub died
 	wg   sync.WaitGroup  // child serve goroutines

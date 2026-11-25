@@ -33,11 +33,12 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 		return fail(e)
 	}
 	defer t.drop()
-	argv, e := dg.readArgv(argvAddr)
+	room := execArgMax
+	argv, e := dg.readArgv(argvAddr, &room)
 	if e != 0 {
 		return fail(e)
 	}
-	envv, e := dg.readArgv(envpAddr)
+	envv, e := dg.readArgv(envpAddr, &room)
 	if e != 0 {
 		return fail(e)
 	}
