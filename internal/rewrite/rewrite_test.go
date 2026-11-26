@@ -178,6 +178,40 @@ func TestSweep(t *testing.T) {
 	}
 }
 
+// TestMidway: code cut mid-instruction is swept from its first byte, so a
+// syscall after an eax write is found, and so is one the code it decodes
+// branches to; a bare 0f 05, or one a misaligned decode swallowed the eax
+// write before, is not.
+func TestMidway(t *testing.T) {
+	code := []byte{
+		0x24, 0x08, // 0: the tail of mov rax, [rsp+8], cut off
+		0xb8, 0x27, 0x00, 0x00, 0x00, // 2: mov eax, 39
+		0x0f, 0x05, // 7: syscall
+		0xeb, 0x03, // 9: jmp 14
+		0x0f, 0x05, // 11: data
+		0xcc,                         // 13
+		0xb8, 0x66, 0x00, 0x00, 0x00, // 14: mov eax, 102
+		0x0f, 0x05, // 19: syscall
+		0xc3, // 21: ret
+	}
+	var got []uint32
+	for _, s := range AnalyzeMidway(code).Sites {
+		got = append(got, s.Off)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []uint32{7, 19}) {
+		t.Fatalf("sites = %v, want [7 19]", got)
+	}
+	for _, c := range [][]byte{
+		{0x00, 0x0f, 0x05, 0xc3},
+		{0x00, 0x00, 0x00, 0xb8, 0x27, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xc3},
+	} {
+		if p := AnalyzeMidway(c); len(p.Sites) != 0 {
+			t.Fatalf("% x: syscall taken: %+v", c, p.Sites)
+		}
+	}
+}
+
 func TestFuncStartsBadInput(t *testing.T) {
 	if FuncStarts(nil, 0) != nil || FuncStarts([]byte{2, 0, 0, 0}, 0) != nil {
 		t.Fatal("expected nil for unparseable eh_frame_hdr")

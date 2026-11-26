@@ -162,6 +162,10 @@ const codeSalt = "linux-amd64-code-3"
 // scavenges, leaving any syscall it cannot prove is code as a raw 0f 05 for
 // seccomp to catch loudly rather than patching a data word.
 func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *codeSource) {
+	if src != nil && src.midway {
+		cw.(*rewrite.Rewriter).Apply(rewrite.AnalyzeMidway(code), code, addr)
+		return
+	}
 	id, ok := src.identity()
 	if src != nil && src.r != nil {
 		if ef, err := elf.NewFile(src.r); err == nil {

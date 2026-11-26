@@ -1,11 +1,15 @@
 package sandbox
 
 import (
+	"bytes"
 	"cmp"
+	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"runtime/debug"
 	"slices"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -258,11 +262,107 @@ func (g *dguest) mprotect(addr, length, prot uint64) (r int64) {
 		return r
 	}
 	g.notePerm(addr, length, unix.PROT_READ|unix.PROT_WRITE)
-	code, err := g.readMem(addr, int(length))
-	if err != nil {
-		return sErr(lxEFAULT)
+	return g.installRange(addr, length, prot)
+}
+
+// codeWindow bounds the guest memory the supervisor holds at once to rewrite
+// a range made executable.
+const codeWindow = 64 << 20
+
+// installRange rewrites the code in [addr, addr+length) and makes it prot. A
+// range past codeWindow is rewritten a window at a time, skipping windows the
+// guest never wrote: they hold only zeros, so no syscall.
+func (g *dguest) installRange(addr, length, prot uint64) int64 {
+	if length <= codeWindow {
+		code, err := g.readMem(addr, int(length))
+		if err != nil {
+			return sErr(lxEFAULT)
+		}
+		return g.installCode(addr, code, prot, nil, true)
 	}
-	return g.installCode(addr, code, prot, nil, true)
+	pm := g.pageMap(addr, length)
+	defer pm.close()
+	buf := make([]byte, codeWindow)
+	for lo := addr; lo < addr+length; lo += codeWindow {
+		code := buf[:min(codeWindow, addr+length-lo)]
+		if !pm.written(lo, uint64(len(code))) {
+			continue
+		}
+		if g.mp.read(lo, code) != nil {
+			return sErr(lxEFAULT)
+		}
+		if len(bytes.TrimLeft(code, "\x00")) == 0 {
+			continue
+		}
+		var src *codeSource
+		if lo != addr {
+			src = &codeSource{fd: -1, midway: true}
+		}
+		if r := g.installCode(lo, code, prot, src, true); r < 0 {
+			return r
+		}
+	}
+	return g.host(unix.SYS_MPROTECT, addr, length, prot)
+}
+
+// stubPages answers which pages of a range of the stub's memory may hold
+// something other than zeros.
+type stubPages struct {
+	pagemap *os.File
+	files   []run
+	ents    []byte
+}
+
+// pageMap reads which parts of [addr, addr+length) are file-backed from the
+// stub's maps and opens its pagemap for the rest. Without either, every page
+// counts as written.
+func (g *dguest) pageMap(addr, length uint64) *stubPages {
+	pid := g.mp.pid.Load()
+	maps, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", pid))
+	if err != nil {
+		return &stubPages{files: []run{{lo: addr, hi: addr + length}}}
+	}
+	pm := &stubPages{ents: make([]byte, codeWindow/pageSize*8)}
+	for line := range strings.Lines(string(maps)) {
+		var lo, hi, off, ino uint64
+		var perms, dev string
+		if _, err := fmt.Sscanf(line, "%x-%x %s %x %s %d", &lo, &hi, &perms, &off, &dev, &ino); err != nil {
+			return &stubPages{files: []run{{lo: addr, hi: addr + length}}}
+		}
+		if ino != 0 && lo < addr+length && hi > addr {
+			pm.files = append(pm.files, run{lo: lo, hi: hi})
+		}
+	}
+	if pm.pagemap, err = os.Open(fmt.Sprintf("/proc/%d/pagemap", pid)); err != nil {
+		pm.files = []run{{lo: addr, hi: addr + length}}
+	}
+	return pm
+}
+
+// written reports whether a page of [lo, lo+n) may hold other than zeros: it
+// is file-backed, or the kernel holds it in memory or in swap.
+func (pm *stubPages) written(lo, n uint64) bool {
+	for _, f := range pm.files {
+		if f.lo < lo+n && f.hi > lo {
+			return true
+		}
+	}
+	b := pm.ents[:(n+pageSize-1)/pageSize*8]
+	if _, err := pm.pagemap.ReadAt(b, int64(lo/pageSize*8)); err != nil {
+		return true
+	}
+	for i := 0; i < len(b); i += 8 {
+		if binary.LittleEndian.Uint64(b[i:])>>62 != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (pm *stubPages) close() {
+	if pm.pagemap != nil {
+		pm.pagemap.Close()
+	}
 }
 
 func (g *dguest) mremap(a [6]uint64) int64 {
@@ -743,11 +843,6 @@ func (g *dguest) installFileCode(addr uint64, fd int, f io.ReaderAt, off, n, inF
 		return sErr(lxEIO)
 	}
 	defer unix.Munmap(view)
-	code := view
-	if inFile < n {
-		code = make([]byte, n)
-		copy(code, view)
-	}
 	// A file truncated underfoot faults the view: fail the mapping, not the
 	// supervisor.
 	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
@@ -756,7 +851,10 @@ func (g *dguest) installFileCode(addr uint64, fd int, f io.ReaderAt, off, n, inF
 			res = sErr(lxEIO)
 		}
 	}()
-	return g.installCode(addr, code, prot, &codeSource{r: f, fd: fd, off: off}, true)
+	if res := g.installCode(addr, view, prot, &codeSource{r: f, fd: fd, off: off}, true); res < 0 {
+		return res
+	}
+	return g.protectTail(addr, inFile, n, prot)
 }
 
 // The macOS stub's SysV attach requests: the Linux stub makes none, so the

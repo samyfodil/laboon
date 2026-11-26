@@ -156,6 +156,19 @@ func AnonPlan(code []byte, roots []int) (sites []Site, exits []int) {
 	return sites, d.exits
 }
 
+// AnalyzeMidway finds the syscall sites in code cut from the middle of a
+// larger range, whose first byte need not start an instruction: it sweeps
+// from there as from just past a terminator, so a syscall is taken only under
+// the sweep's test, then goes on as AnalyzeEntries does.
+func AnalyzeMidway(code []byte) Plan {
+	d := NewDescender(code)
+	d.axAt = map[int]bool{}
+	d.sweep(0, len(code), d.axAt)
+	d.descend([][2]int{{0, len(code)}})
+	assignCaves(d.sites, d.caves())
+	return Plan{Sites: d.sites}
+}
+
 // descendAll descends from entries, then sweeps scav and descends from what
 // the sweep accepts, until a sweep accepts nothing more.
 func descendAll(code []byte, entries []int, scav [][2]int, fs bool) *Descender {
@@ -164,6 +177,11 @@ func descendAll(code []byte, entries []int, scav [][2]int, fs bool) *Descender {
 	for _, e := range entries {
 		d.AddEntry(e)
 	}
+	d.descend(scav)
+	return d
+}
+
+func (d *Descender) descend(scav [][2]int) {
 	d.Run()
 	for {
 		added := 0
@@ -172,7 +190,7 @@ func descendAll(code []byte, entries []int, scav [][2]int, fs bool) *Descender {
 		}
 		d.swept = len(d.ends) // what the next round sweeps from is what Run ends anew
 		if added == 0 {
-			return d
+			return
 		}
 		d.Run()
 	}

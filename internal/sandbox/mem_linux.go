@@ -257,11 +257,14 @@ func (g *dguest) wouldExceed(n uint64) bool {
 // (the ELF the rewriter reads). A host file also has its descriptor fd, whose
 // identity keys the persistent rewrite cache; a non-host backing (in-memory,
 // user-defined, network) has fd -1 and is analyzed by content instead (still
-// memoized by the content's hash).
+// memoized by the content's hash). midway, with no file, is anonymous code
+// cut from the middle of a larger range, whose first byte need not start an
+// instruction.
 type codeSource struct {
-	r   io.ReaderAt
-	fd  int
-	off uint64
+	r      io.ReaderAt
+	fd     int
+	off    uint64
+	midway bool
 }
 
 // fileCode is a range installCode filled from a file region.

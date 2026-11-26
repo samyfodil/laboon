@@ -130,6 +130,11 @@ const codeSalt = "linux-a64-code-2"
 // inlined-syscall heuristic covers the rest.
 func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *codeSource) {
 	w := cw.(*rewrite.A64Rewriter)
+	if src != nil && src.midway {
+		// Its first word may sit in a literal pool: no descent from it.
+		w.Apply(rewrite.A64SegmentSites(code, 0, nil, 0, uint64(len(code))), code, addr)
+		return
+	}
 	if src != nil {
 		if sites, ok := g.fileCodeSites(src, uint64(len(code))); ok {
 			w.Apply(sites, code, addr)
