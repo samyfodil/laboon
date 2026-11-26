@@ -57,29 +57,34 @@ static void exec_map(void) {
     void *huge = mmap(NULL, 1UL << 62, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
     CHECK(huge == MAP_FAILED && errno == ENOMEM, "huge exec map %p", huge);
 
-    unsigned char *p = mmap(NULL, 3 * 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
-    CHECK(p != MAP_FAILED, "exec map");
-    if (p == MAP_FAILED)
-        return;
-    CHECK(p[0] == 0xc3 && p[4096 + 99] == 0xc3, "file bytes");
-    CHECK(p[4096 + 100] == 0 && p[3 * 4096 - 1] == 0, "zero tail");
+    // One small enough to be copied, one mapped from a staged copy of the file.
+    size_t lens[] = {3 * 4096, 1 << 20};
+    for (int i = 0; i < 2; i++) {
+        size_t len = lens[i];
+        unsigned char *p = mmap(NULL, len, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
+        CHECK(p != MAP_FAILED, "exec map %zu", len);
+        if (p == MAP_FAILED)
+            continue;
+        CHECK(p[0] == 0xc3 && p[4096 + 99] == 0xc3, "file bytes %zu", len);
+        CHECK(p[4096 + 100] == 0 && p[len - 1] == 0, "zero tail %zu", len);
 
-    unsigned long end = 0;
-    char perms[5] = "";
-    FILE *m = fopen("/proc/self/maps", "r");
-    char line[512];
-    while (m && fgets(line, sizeof line, m)) {
-        unsigned long lo, hi;
-        char pr[5];
-        if (sscanf(line, "%lx-%lx %4s", &lo, &hi, pr) == 3 && lo <= (unsigned long)p && (unsigned long)p < hi) {
-            end = hi;
-            memcpy(perms, pr, 5);
+        unsigned long end = 0;
+        char perms[5] = "";
+        FILE *m = fopen("/proc/self/maps", "r");
+        char line[512];
+        while (m && fgets(line, sizeof line, m)) {
+            unsigned long lo, hi;
+            char pr[5];
+            if (sscanf(line, "%lx-%lx %4s", &lo, &hi, pr) == 3 && lo <= (unsigned long)p + len - 1 && (unsigned long)p + len - 1 < hi) {
+                end = hi;
+                memcpy(perms, pr, 5);
+            }
         }
+        if (m)
+            fclose(m);
+        CHECK(end >= (unsigned long)p + len && strncmp(perms, "r-x", 3) == 0, "map %zu %s to %#lx", len, perms, end);
+        munmap(p, len);
     }
-    if (m)
-        fclose(m);
-    CHECK(end >= (unsigned long)p + 3 * 4096 && strncmp(perms, "r-x", 3) == 0, "map %s to %#lx", perms, end);
-    munmap(p, 3 * 4096);
     close(fd);
 }
 

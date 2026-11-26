@@ -29,6 +29,10 @@ type Descender struct {
 	axAt    map[int]bool
 	stealAt map[int]uint8 // the run before a syscall a sweep accepted, as the sweep decoded it
 	exits   []int         // targets of direct branches out of code, as offsets from its start
+	// cut, when set, has trace keep in past the starts of the instructions it
+	// decodes at or beyond it, and where it runs off the end of code.
+	cut  int
+	past []int
 	// FS, when set, also records the %fs-relative instructions decoded.
 	FS      bool
 	fsSites []FSSite
@@ -96,6 +100,9 @@ func (d *Descender) trace(off int) {
 		if !in.ok {
 			return
 		}
+		if d.cut > 0 && off >= d.cut {
+			d.past = append(d.past, off)
+		}
 		for i := 0; i < in.len && off+i < len(d.visited); i++ {
 			d.visited[off+i] = true
 		}
@@ -119,6 +126,9 @@ func (d *Descender) trace(off int) {
 		t.add(in, off)
 		ft.add(fsMove(in), off)
 		off += in.len
+	}
+	if d.cut > 0 && off >= len(d.code) {
+		d.past = append(d.past, off)
 	}
 }
 
@@ -156,17 +166,36 @@ func AnonPlan(code []byte, roots []int) (sites []Site, exits []int) {
 	return sites, d.exits
 }
 
-// AnalyzeMidway finds the syscall sites in code cut from the middle of a
-// larger range, whose first byte need not start an instruction: it sweeps
-// from there as from just past a terminator, so a syscall is taken only under
-// the sweep's test, then goes on as AnalyzeEntries does.
-func AnalyzeMidway(code []byte) Plan {
+// AnalyzeWindow finds the syscall sites in code, a window of a larger range
+// analyzed one window at a time, as AnalyzeEntries does from roots, the
+// offsets the windows before it showed start instructions, sweeping spans,
+// the parts of code that may hold any. A span's first byte need not start an
+// instruction, unless it is the window's first and not midway: it is swept
+// from as from just past a terminator, so a syscall there is taken only under
+// the sweep's test. next is where the code decoded goes on at or past cut,
+// for the windows after it: the starts of the instructions decoded there, the
+// targets of branches past its end, and where it runs off its end.
+func AnalyzeWindow(code []byte, roots []int, spans [][2]int, midway bool, cut int) (p Plan, next []int) {
 	d := NewDescender(code)
+	d.cut = cut
+	for _, r := range roots {
+		d.AddEntry(r)
+	}
 	d.axAt = map[int]bool{}
-	d.sweep(0, len(code), d.axAt)
-	d.descend([][2]int{{0, len(code)}})
+	for _, s := range spans {
+		if s[0] > 0 || midway {
+			d.sweep(s[0], s[1], d.axAt)
+		}
+	}
+	d.descend(spans)
 	assignCaves(d.sites, d.caves())
-	return Plan{Sites: d.sites}
+	next = d.past
+	for _, e := range d.exits {
+		if e >= cut {
+			next = append(next, e)
+		}
+	}
+	return Plan{Sites: d.sites}, next
 }
 
 // descendAll descends from entries, then sweeps scav and descends from what

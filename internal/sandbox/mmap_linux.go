@@ -282,25 +282,50 @@ func (g *dguest) installRange(addr, length, prot uint64) int64 {
 	}
 	pm := g.pageMap(addr, length)
 	defer pm.close()
-	buf := make([]byte, codeWindow)
-	for lo := addr; lo < addr+length; lo += codeWindow {
-		code := buf[:min(codeWindow, addr+length-lo)]
-		if !pm.written(lo, uint64(len(code))) {
+	buf := make([]byte, codeWindow+pageSize)
+	var roots []uint64
+	for lo, end := addr, addr+length; lo < end; {
+		n := min(codeWindow, end-lo)
+		ext := buf[:min(n+pageSize, end-lo)]
+		// Only what the guest wrote is read: reading the rest would map the
+		// zero page there, which the pagemap then shows as present.
+		runs := pm.written(lo, uint64(len(ext)))
+		if len(runs) == 0 {
+			lo += n
 			continue
 		}
-		if g.mp.read(lo, code) != nil {
-			return sErr(lxEFAULT)
+		clear(ext)
+		var spans [][2]int
+		nonzero := false
+		for _, r := range runs {
+			b := ext[r.lo-lo : r.hi-lo]
+			if g.mp.read(r.lo, b) != nil {
+				return sErr(lxEFAULT)
+			}
+			spans = append(spans, [2]int{int(r.lo - lo), int(r.hi - lo)})
+			nonzero = nonzero || r.lo < lo+n && !zeros(b)
 		}
-		if len(bytes.TrimLeft(code, "\x00")) == 0 {
+		if !nonzero {
+			lo += n
 			continue
 		}
-		var src *codeSource
-		if lo != addr {
-			src = &codeSource{fd: -1, midway: true}
+		var in []uint64
+		for _, r := range roots {
+			if r >= lo && r < lo+uint64(len(ext)) {
+				in = append(in, r)
+			}
 		}
-		if r := g.installCode(lo, code, prot, src, true); r < 0 {
+		plan, used, next := g.windowSites(ext, int(n), lo, in, spans, lo != addr)
+		code := ext[:used]
+		if r := g.rewriteInto(lo, code, true, func(w codeRewriter) { applyWindow(w, plan, code, lo) }); r < 0 {
 			return r
 		}
+		g.dropFileCode(lo, uint64(used))
+		if r := g.host(unix.SYS_MPROTECT, lo, alignUp(uint64(used)), prot); r < 0 {
+			return r
+		}
+		lo += uint64(used)
+		roots = slices.DeleteFunc(append(roots, next...), func(r uint64) bool { return r < lo })
 	}
 	return g.host(unix.SYS_MPROTECT, addr, length, prot)
 }
@@ -314,49 +339,70 @@ type stubPages struct {
 }
 
 // pageMap reads which parts of [addr, addr+length) are file-backed from the
-// stub's maps and opens its pagemap for the rest. Without either, every page
+// stub's maps and opens its pagemap for the rest. Without both, every page
 // counts as written.
 func (g *dguest) pageMap(addr, length uint64) *stubPages {
 	pid := g.mp.pid.Load()
+	pm := &stubPages{ents: make([]byte, (codeWindow+pageSize)/pageSize*8)}
 	maps, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", pid))
 	if err != nil {
-		return &stubPages{files: []run{{lo: addr, hi: addr + length}}}
+		return pm
 	}
-	pm := &stubPages{ents: make([]byte, codeWindow/pageSize*8)}
+	if f, err := os.Open(fmt.Sprintf("/proc/%d/pagemap", pid)); err == nil {
+		pm.pagemap = f
+	}
 	for line := range strings.Lines(string(maps)) {
 		var lo, hi, off, ino uint64
 		var perms, dev string
 		if _, err := fmt.Sscanf(line, "%x-%x %s %x %s %d", &lo, &hi, &perms, &off, &dev, &ino); err != nil {
-			return &stubPages{files: []run{{lo: addr, hi: addr + length}}}
+			pm.close()
+			pm.pagemap = nil
+			return pm
 		}
 		if ino != 0 && lo < addr+length && hi > addr {
 			pm.files = append(pm.files, run{lo: lo, hi: hi})
 		}
 	}
-	if pm.pagemap, err = os.Open(fmt.Sprintf("/proc/%d/pagemap", pid)); err != nil {
-		pm.files = []run{{lo: addr, hi: addr + length}}
-	}
 	return pm
 }
 
-// written reports whether a page of [lo, lo+n) may hold other than zeros: it
-// is file-backed, or the kernel holds it in memory or in swap.
-func (pm *stubPages) written(lo, n uint64) bool {
-	for _, f := range pm.files {
-		if f.lo < lo+n && f.hi > lo {
-			return true
-		}
+// written returns the runs of the pages of [lo, lo+n) that may hold other
+// than zeros: file-backed, or held by the kernel in memory or in swap.
+func (pm *stubPages) written(lo, n uint64) []run {
+	pages := (n + pageSize - 1) / pageSize
+	b := pm.ents[:pages*8]
+	if pm.pagemap == nil {
+		return []run{{lo: lo, hi: lo + n}}
 	}
-	b := pm.ents[:(n+pageSize-1)/pageSize*8]
 	if _, err := pm.pagemap.ReadAt(b, int64(lo/pageSize*8)); err != nil {
-		return true
+		return []run{{lo: lo, hi: lo + n}}
 	}
-	for i := 0; i < len(b); i += 8 {
-		if binary.LittleEndian.Uint64(b[i:])>>62 != 0 {
-			return true
+	var out []run
+	for i := range pages {
+		a := lo + i*pageSize
+		w := binary.LittleEndian.Uint64(b[i*8:])>>62 != 0 || slices.ContainsFunc(pm.files, func(f run) bool { return f.lo < a+pageSize && f.hi > a })
+		switch {
+		case !w:
+		case len(out) > 0 && out[len(out)-1].hi == a:
+			out[len(out)-1].hi = min(a+pageSize, lo+n)
+		default:
+			out = append(out, run{lo: a, hi: min(a+pageSize, lo+n)})
 		}
 	}
-	return false
+	return out
+}
+
+// zeros reports whether b holds only zero bytes.
+func zeros(b []byte) bool {
+	var z [4096]byte
+	for len(b) > 0 {
+		k := min(len(b), len(z))
+		if !bytes.Equal(b[:k], z[:k]) {
+			return false
+		}
+		b = b[k:]
+	}
+	return true
 }
 
 func (pm *stubPages) close() {
@@ -571,24 +617,40 @@ func (g *dguest) sharedBacking(d *dfile, minEnd, pages int64) (*shBacking, lxErr
 
 // mmapVFExec maps an executable region of a non-host file. Executable code must
 // be rewritten before it runs (W^X), and rewriting needs private memory the
-// supervisor can edit, so — exactly as a private executable mapping of a host
-// file — the mapped range is read through the file's ReadAt into anonymous
-// memory and rewritten in place (installCode). The code source reads the ELF
-// back through the same file so the rewriter can descend it precisely. Bytes
-// past the end of the file stay zero, as the zeroed region leaves them.
-// g.mp.mu held.
+// supervisor can edit, so the region is copied into a memfd and mapped from it
+// exactly as a private executable mapping of a host file is (mmapPrivate); a
+// small one is read into anonymous memory instead. The code source reads the
+// ELF back through the file itself so the rewriter can descend it precisely.
+// Bytes past the end of the file stay zero. g.mp.mu held.
 func (g *dguest) mmapVFExec(d *dfile, a [6]uint64) int64 {
 	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], int64(a[5])
 	size, err := d.size0()
 	if err != nil {
 		return sErr(lxEIO)
 	}
-	n, e := codeSpan(size, off, length)
-	if e != 0 {
-		return sErr(e)
-	}
+	n := codeSpan(size, off, length)
 	g.dropFileCode(addr, length)
 	src := d.content() // the live shared backing if there is one, else the backend
+	cs := &codeSource{r: src, fd: -1, off: uint64(off)}
+	if length >= directMapMin && n > 0 {
+		mfd, err := unix.MemfdCreate("lc-code", unix.MFD_CLOEXEC)
+		if err != nil {
+			return sErr(osErrno(err))
+		}
+		defer unix.Close(mfd)
+		if err := unix.Ftruncate(mfd, int64(n)); err != nil {
+			return sErr(osErrno(err))
+		}
+		if e := g.fillMemfd(mfd, src, off, int64(n)); e != 0 {
+			return sErr(e)
+		}
+		b := a
+		b[5] = 0
+		if r, ok := g.mmapPrivate(mfd, cs, b); ok {
+			return r
+		}
+		return sErr(lxENOMEM)
+	}
 	data := make([]byte, n)
 	if _, err := src.ReadAt(data, off); err != nil && err != io.EOF {
 		return sErr(lxEIO)
@@ -599,7 +661,7 @@ func (g *dguest) mmapVFExec(d *dfile, a [6]uint64) int64 {
 	if r < 0 {
 		return r
 	}
-	if res := g.installCode(uint64(r), data, prot, &codeSource{r: src, fd: -1, off: uint64(off)}, false); res < 0 {
+	if res := g.installCode(uint64(r), data, prot, cs, false); res < 0 {
 		return res
 	}
 	if res := g.protectTail(uint64(r), uint64(len(data)), length, prot); res < 0 {
@@ -608,18 +670,18 @@ func (g *dguest) mmapVFExec(d *dfile, a [6]uint64) int64 {
 	return r
 }
 
-// codeSpan is how many of a mapping's length bytes from off its file of size
-// holds, which is all that is read: past the file's end the fresh region's
-// zeros stand, however long a mapping the guest asks for.
-func codeSpan(size, off int64, length uint64) (int, lxErrno) {
-	if off < 0 || off >= size {
-		return 0, 0
+// fileView maps n bytes of fd at off, which need not be page-aligned, private
+// and writable into the supervisor: the file's own pages, not a copy.
+func fileView(fd int, off int64, n int) (view, data []byte, err error) {
+	if n == 0 {
+		return nil, nil, nil
 	}
-	n := min(uint64(size-off), length)
-	if n > maxCodeRead {
-		return 0, lxENOMEM
+	lead := off % int64(pageSize)
+	view, err = unix.Mmap(fd, off-lead, int(lead)+n, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE)
+	if err != nil {
+		return nil, nil, err
 	}
-	return int(n), 0
+	return view, view[lead:], nil
 }
 
 // protectTail gives the part of a mapping at addr past the n bytes read from
@@ -655,7 +717,7 @@ func (g *dguest) fillMemfd(mfd int, r io.ReaderAt, off, length int64) lxErrno {
 // (its descriptor passed to the stub), a fixed executable re-map reuses the code
 // already there, and a private mapping is the file mapped directly (mmapPrivate)
 // or read into an anonymous region and rewritten if executable.
-func (g *dguest) mmapHostFd(fd int, f io.ReaderAt, a [6]uint64) int64 {
+func (g *dguest) mmapHostFd(fd int, f io.ReaderAt, a [6]uint64) (r int64) {
 	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], int64(a[5])
 	if flags&unix.MAP_SHARED != 0 {
 		return g.mmapShared(fd, a)
@@ -668,22 +730,29 @@ func (g *dguest) mmapHostFd(fd int, f io.ReaderAt, a [6]uint64) int64 {
 		return int64(addr)
 	}
 	g.dropFileCode(addr, length)
-	if r, ok := g.mmapPrivate(fd, f, a); ok {
+	if r, ok := g.mmapPrivate(fd, &codeSource{r: f, fd: fd, off: uint64(off)}, a); ok {
 		return r
 	}
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		return sErr(osErrno(err))
 	}
-	n, e := codeSpan(st.Size, off, length)
-	if e != 0 {
-		return sErr(e)
+	view, data, err := fileView(fd, off, codeSpan(st.Size, off, length))
+	if err != nil {
+		return sErr(osErrno(err))
 	}
-	data := make([]byte, n)
-	if _, err := f.ReadAt(data, off); err != nil && err != io.EOF {
-		return sErr(lxEIO)
+	if view != nil {
+		defer unix.Munmap(view)
 	}
-	r := g.notReserved(g.mapAt(addr, length, flags, false, func(at, fixed uint64) int64 {
+	// A file truncated underfoot faults the view: fail the mapping, not the
+	// supervisor.
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	defer func() {
+		if recover() != nil {
+			r = sErr(lxEIO)
+		}
+	}()
+	r = g.notReserved(g.mapAt(addr, length, flags, false, func(at, fixed uint64) int64 {
 		return g.host(unix.SYS_MMAP, at, length, unix.PROT_READ|unix.PROT_WRITE, fixed|unix.MAP_PRIVATE|unix.MAP_ANONYMOUS, ^uint64(0), 0)
 	}), length)
 	if r < 0 {
@@ -796,7 +865,7 @@ const directMapMin = 64 << 10
 // as zero, as the copy made them. ok is false when the region is not suited
 // (small, unaligned, or all past the end of the file), for the caller to copy
 // it instead.
-func (g *dguest) mmapPrivate(fd int, f io.ReaderAt, a [6]uint64) (r int64, ok bool) {
+func (g *dguest) mmapPrivate(fd int, src *codeSource, a [6]uint64) (r int64, ok bool) {
 	addr, length, prot, flags, off := a[0], a[1], a[2], a[3], a[5]
 	var st unix.Stat_t
 	if length < directMapMin || off%pageSize != 0 || unix.Fstat(fd, &st) != nil ||
@@ -827,17 +896,17 @@ func (g *dguest) mmapPrivate(fd int, f io.ReaderAt, a [6]uint64) (r int64, ok bo
 		}
 	}
 	if exec {
-		if res := g.installFileCode(uint64(r), fd, f, off, length, inFile, prot); res < 0 {
+		if res := g.installFileCode(uint64(r), fd, src, off, length, inFile, prot); res < 0 {
 			return res, true
 		}
 	}
 	return r, true
 }
 
-// installFileCode rewrites code the stub mapped from n bytes of f at off, of
-// which the first inFile are in the file. The supervisor maps the same region
+// installFileCode rewrites code the stub mapped from n bytes of fd at off, of
+// which the first inFile are in the file; src is where the code came from. The supervisor maps the same region
 // copy-on-write to rewrite it, so only the pages with sites are read.
-func (g *dguest) installFileCode(addr uint64, fd int, f io.ReaderAt, off, n, inFile uint64, prot uint64) (res int64) {
+func (g *dguest) installFileCode(addr uint64, fd int, src *codeSource, off, n, inFile uint64, prot uint64) (res int64) {
 	view, err := unix.Mmap(fd, int64(off), int(inFile), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE)
 	if err != nil {
 		return sErr(lxEIO)
@@ -851,7 +920,7 @@ func (g *dguest) installFileCode(addr uint64, fd int, f io.ReaderAt, off, n, inF
 			res = sErr(lxEIO)
 		}
 	}()
-	if res := g.installCode(addr, view, prot, &codeSource{r: f, fd: fd, off: off}, true); res < 0 {
+	if res := g.installCode(addr, view, prot, src, true); res < 0 {
 		return res
 	}
 	return g.protectTail(addr, inFile, n, prot)

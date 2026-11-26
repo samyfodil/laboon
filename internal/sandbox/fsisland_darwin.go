@@ -2,7 +2,12 @@
 
 package sandbox
 
-import "github.com/samyfodil/laboon/internal/rewrite"
+import (
+	"cmp"
+	"slices"
+
+	"github.com/samyfodil/laboon/internal/rewrite"
+)
 
 // lcFsIsland: (pc, island, tp) -> the length n of what takes the place of the
 // x86-64 %fs-relative instruction at pc | the length of its island << 8, 0
@@ -56,34 +61,70 @@ func init() {
 			return 0
 		}
 		text, area := a[0], a[4]
-		if a[1] > maxCodeRead {
-			return 0
-		}
-		code := make([]byte, a[1])
-		if g.getBuf(text, code) != nil {
-			return 0
-		}
-		orig := append([]byte(nil), code...)
+		slices.SortFunc(sites, func(x, y rewrite.FSSite) int { return cmp.Compare(x.Off, y.Off) })
 		w := rewrite.New(area, a[5]&0xffffffff, 0)
 		w.SegmentSlot(uint32(a[5] >> 32))
-		w.PatchFS(code, text, sites)
-		if w.FS == 0 || g.putBuf(area, w.Trampolines()) != nil {
-			return 0
-		}
-		for i := 0; i < len(code); {
-			if code[i] == orig[i] {
-				i++
-				continue
+		buf, orig := make([]byte, fsWindow), make([]byte, fsWindow)
+		written := 0
+		for i := 0; i < len(sites); {
+			lo, hi := fsSpan(sites[i], a[1])
+			j := i + 1
+			for ; j < len(sites); j++ {
+				l, h := fsSpan(sites[j], a[1])
+				if max(hi, h)-min(lo, l) > fsWindow {
+					break
+				}
+				lo, hi = min(lo, l), max(hi, h)
 			}
-			j := i
-			for j < len(code) && code[j] != orig[j] {
-				j++
-			}
-			if g.putBuf(text+uint64(i), code[i:j]) != nil {
+			code, was := buf[:hi-lo], orig[:hi-lo]
+			if g.getBuf(text+lo, code) != nil {
 				return 0
+			}
+			copy(was, code)
+			in := slices.Clone(sites[i:j])
+			for k := range in {
+				in[k].Off -= uint32(lo)
+			}
+			w.PatchFS(code, text+lo, in)
+			if tr := w.Trampolines(); len(tr) > written {
+				if g.putBuf(area+uint64(written), tr[written:]) != nil {
+					return 0
+				}
+				written = len(tr)
+			}
+			for k := 0; k < len(code); {
+				if code[k] == was[k] {
+					k++
+					continue
+				}
+				m := k
+				for m < len(code) && code[m] != was[m] {
+					m++
+				}
+				if g.putBuf(text+lo+uint64(k), code[k:m]) != nil {
+					return 0
+				}
+				k = m
 			}
 			i = j
 		}
+		if w.FS == 0 {
+			return 0
+		}
 		return int64(len(w.Trampolines()))
 	})
+}
+
+// fsWindow bounds the library text lcFsPatch holds at once: the sites are
+// patched in runs, each read with the bytes its patches touch.
+const fsWindow = 1 << 20
+
+// fsSpan is the part of a text n bytes long that patching s may touch: the
+// run before it, the instruction, and its cave.
+func fsSpan(s rewrite.FSSite, n uint64) (lo, hi uint64) {
+	l, h := int64(s.Off)-int64(s.Steal), int64(s.Off)+int64(s.Len)
+	if s.Cave != 0 {
+		l, h = min(l, int64(s.Off)+int64(s.Cave)), max(h, int64(s.Off)+int64(s.Cave)+5)
+	}
+	return uint64(max(l, 0)), uint64(min(h, int64(n)))
 }

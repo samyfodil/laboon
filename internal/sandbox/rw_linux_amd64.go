@@ -162,10 +162,6 @@ const codeSalt = "linux-amd64-code-3"
 // scavenges, leaving any syscall it cannot prove is code as a raw 0f 05 for
 // seccomp to catch loudly rather than patching a data word.
 func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *codeSource) {
-	if src != nil && src.midway {
-		cw.(*rewrite.Rewriter).Apply(rewrite.AnalyzeMidway(code), code, addr)
-		return
-	}
 	id, ok := src.identity()
 	if src != nil && src.r != nil {
 		if ef, err := elf.NewFile(src.r); err == nil {
@@ -186,5 +182,41 @@ func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *cod
 	} else {
 		p, _ = plan()
 	}
+	cw.(*rewrite.Rewriter).Apply(p, code, addr)
+}
+
+// windowSites analyzes ext, the window of an executable range at addr and
+// the page after it, from roots, the addresses in it the windows before
+// showed start instructions, sweeping spans, the parts the guest wrote; the
+// range's first window (not midway) starts with one too. It rewrites the first n bytes, or past them to the next page
+// for a syscall that crosses the cut, and returns how many that is and the
+// addresses past them the code decoded goes on at.
+func (g *dguest) windowSites(ext []byte, n int, addr uint64, roots []uint64, spans [][2]int, midway bool) (windowPlan, int, []uint64) {
+	var offs []int
+	if !midway {
+		offs = append(offs, 0)
+	}
+	for _, r := range roots {
+		offs = append(offs, int(r-addr))
+	}
+	p, next := rewrite.AnalyzeWindow(ext, offs, spans, midway, n)
+	used := n
+	for _, s := range p.Sites {
+		if int(s.Off) < n && int(s.Off)+2 > n {
+			used = min(len(ext), n+int(pageSize))
+		}
+	}
+	var out []uint64
+	for _, o := range next {
+		if o >= used {
+			out = append(out, addr+uint64(o))
+		}
+	}
+	return p, used, out
+}
+
+type windowPlan = rewrite.Plan
+
+func applyWindow(cw codeRewriter, p windowPlan, code []byte, addr uint64) {
 	cw.(*rewrite.Rewriter).Apply(p, code, addr)
 }

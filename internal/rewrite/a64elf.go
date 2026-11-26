@@ -66,6 +66,21 @@ func A64SegmentSites(code []byte, vaddr uint64, funcs []uint64, textLo, textHi u
 	return sites
 }
 
+// A64WindowSites is A64SegmentSites over code at vaddr, a window of a larger
+// range analyzed one window at a time, that also returns the targets of its
+// direct branches past its end, for the windows after it.
+func A64WindowSites(code []byte, vaddr uint64, funcs []uint64) (sites []int, next []uint64) {
+	a64Mu.Lock()
+	defer a64Mu.Unlock()
+	sites, exits := a64SegmentSites(code, vaddr, funcs, vaddr, vaddr+uint64(len(code)))
+	for _, e := range exits {
+		if e >= len(code) {
+			next = append(next, vaddr+uint64(e))
+		}
+	}
+	return sites, next
+}
+
 // a64SegmentSites is A64SegmentSites, which also returns the direct branch
 // targets out of code, as offsets. a64Mu held.
 func a64SegmentSites(code []byte, vaddr uint64, funcs []uint64, textLo, textHi uint64) ([]int, []int) {

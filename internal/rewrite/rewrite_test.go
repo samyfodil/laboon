@@ -178,11 +178,11 @@ func TestSweep(t *testing.T) {
 	}
 }
 
-// TestMidway: code cut mid-instruction is swept from its first byte, so a
-// syscall after an eax write is found, and so is one the code it decodes
-// branches to; a bare 0f 05, or one a misaligned decode swallowed the eax
-// write before, is not.
-func TestMidway(t *testing.T) {
+// TestWindowMidway: a window cut mid-instruction is swept from its first
+// byte, so a syscall after an eax write is found, and so is one the code it
+// decodes branches to; a bare 0f 05, or one a misaligned decode swallowed the
+// eax write before, is not.
+func TestWindowMidway(t *testing.T) {
 	code := []byte{
 		0x24, 0x08, // 0: the tail of mov rax, [rsp+8], cut off
 		0xb8, 0x27, 0x00, 0x00, 0x00, // 2: mov eax, 39
@@ -194,8 +194,9 @@ func TestMidway(t *testing.T) {
 		0x0f, 0x05, // 19: syscall
 		0xc3, // 21: ret
 	}
+	p, _ := AnalyzeWindow(code, nil, [][2]int{{0, len(code)}}, true, len(code))
 	var got []uint32
-	for _, s := range AnalyzeMidway(code).Sites {
+	for _, s := range p.Sites {
 		got = append(got, s.Off)
 	}
 	slices.Sort(got)
@@ -206,9 +207,41 @@ func TestMidway(t *testing.T) {
 		{0x00, 0x0f, 0x05, 0xc3},
 		{0x00, 0x00, 0x00, 0xb8, 0x27, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xc3},
 	} {
-		if p := AnalyzeMidway(c); len(p.Sites) != 0 {
+		if p, _ := AnalyzeWindow(c, nil, [][2]int{{0, len(c)}}, true, len(c)); len(p.Sites) != 0 {
 			t.Fatalf("% x: syscall taken: %+v", c, p.Sites)
 		}
+	}
+}
+
+// TestWindowNext: what a window's descent reaches past its cut carries to
+// the next window, and a root given there is descended from: a syscall in a
+// window that only a branch from the one before reaches, with no eax write
+// the sweep would see, is found.
+func TestWindowNext(t *testing.T) {
+	first := []byte{
+		0xb8, 0x27, 0x00, 0x00, 0x00, // 0: mov eax, 39
+		0xe9, 0x10, 0x00, 0x00, 0x00, // 5: jmp 26, past the end
+		0x90, 0x90, // 10: cut here
+		0x48, 0x89, 0xc2, // 12: mov rdx, rax (falls through off the end)
+	}
+	_, next := AnalyzeWindow(first[:10], []int{0}, [][2]int{{0, 10}}, false, 10)
+	if !slices.Contains(next, 26) {
+		t.Fatalf("next = %v, want the branch target 26", next)
+	}
+	_, next = AnalyzeWindow(append([]byte{0xeb, 0x00}, first[10:]...), []int{0}, [][2]int{{0, 7}}, false, 2)
+	if !slices.Contains(next, 4) || !slices.Contains(next, 7) {
+		t.Fatalf("next = %v, want 4 (decoded past the cut) and 7 (off the end)", next)
+	}
+	second := []byte{
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0: what the sweep reads as data
+		0x0f, 0x05, // 6: syscall, eax set in the window before
+		0xc3, // 8: ret
+	}
+	if p, _ := AnalyzeWindow(second, nil, [][2]int{{0, len(second)}}, true, len(second)); len(p.Sites) != 0 {
+		t.Fatalf("taken without its root: %+v", p.Sites)
+	}
+	if p, _ := AnalyzeWindow(second, []int{6}, [][2]int{{0, len(second)}}, true, len(second)); len(p.Sites) != 1 || p.Sites[0].Off != 6 {
+		t.Fatalf("from its root: %+v", p.Sites)
 	}
 }
 

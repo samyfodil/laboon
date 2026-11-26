@@ -3,6 +3,7 @@ package sandbox
 import (
 	"debug/elf"
 	"io"
+	"slices"
 	"sync"
 
 	"github.com/samyfodil/laboon/internal/rewrite"
@@ -130,11 +131,6 @@ const codeSalt = "linux-a64-code-2"
 // inlined-syscall heuristic covers the rest.
 func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *codeSource) {
 	w := cw.(*rewrite.A64Rewriter)
-	if src != nil && src.midway {
-		// Its first word may sit in a literal pool: no descent from it.
-		w.Apply(rewrite.A64SegmentSites(code, 0, nil, 0, uint64(len(code))), code, addr)
-		return
-	}
 	if src != nil {
 		if sites, ok := g.fileCodeSites(src, uint64(len(code))); ok {
 			w.Apply(sites, code, addr)
@@ -184,4 +180,26 @@ func (g *dguest) fileCodeSites(src *codeSource, n uint64) ([]int, bool) {
 		}
 	}
 	return out, true
+}
+
+// windowSites analyzes the first n bytes of ext, the window of an executable
+// range at addr, from roots, the addresses in it known to start instructions;
+// the range's first window (not midway) starts with one. A midway window's
+// first word may sit in a literal pool, so it is no root: its svc words are
+// taken as the code before them shows they are code. Instructions are fixed
+// width, so no window cuts one; what carries to the windows after is the
+// targets of branches past its end.
+func (g *dguest) windowSites(ext []byte, n int, addr uint64, roots []uint64, spans [][2]int, midway bool) (windowPlan, int, []uint64) {
+	funcs := slices.Clone(roots)
+	if !midway {
+		funcs = append(funcs, addr)
+	}
+	sites, next := rewrite.A64WindowSites(ext[:n], addr, funcs)
+	return sites, n, next
+}
+
+type windowPlan = []int
+
+func applyWindow(cw codeRewriter, sites windowPlan, code []byte, addr uint64) {
+	cw.(*rewrite.A64Rewriter).Apply(sites, code, addr)
 }

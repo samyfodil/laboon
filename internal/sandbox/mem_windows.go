@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"slices"
 	"unsafe"
 
 	"github.com/samyfodil/laboon/stub/vdso"
@@ -387,53 +388,58 @@ func (g *wguest) codeImage(d *dfile) (imageSrc, error) {
 	return imageSrc{data: b}, nil
 }
 
-// codeFill reads [off, off+n) of guest fd's file and rewrites the parts the
-// file's executable segments cover, as mapped at addr with its trampolines in
-// areas. It returns the bytes, each area's contents and where traps were
-// left; with no area, every site traps. The bytes flow through the supervisor
-// (d.readAt), so a non-host file's code is rewritten and mapped like a host
-// file's without the stub ever touching the backing.
-func (g *wguest) codeFill(dg *dguest, fd, off, n, addr uint64, areas []trampArea) ([]byte, [][]byte, []uint64, lxErrno) {
-	if n > maxCodeRead {
-		return nil, nil, nil, lxENOMEM
-	}
-	buf := make([]byte, n)
+// codeFill reads the part of [off, off+n) of guest fd's file the file holds
+// and rewrites the parts its executable segments cover, as mapped at addr
+// with its trampolines in areas. It returns the bytes, each area's contents
+// and where traps were left, and a release for the bytes; with no area, every
+// site traps. The rest of the mapping is the stub's fresh zeros. The bytes
+// flow through the supervisor (d.readAt), so a non-host file's code is
+// rewritten and mapped like a host file's without the stub ever touching the
+// backing.
+func (g *wguest) codeFill(dg *dguest, fd, off, n, addr uint64, areas []trampArea) (buf []byte, tr [][]byte, traps []uint64, release func(), e lxErrno) {
+	release = func() {}
+	defer func() {
+		if e != 0 {
+			release()
+		}
+	}()
 	var d *dfile
 	var img []byte
 	if fd == vdsoFD {
 		img = vdsoImage()
 		if off != 0 || uint64(len(img)) > n {
-			return nil, nil, nil, lxEINVAL
+			return nil, nil, nil, release, lxEINVAL
 		}
-		copy(buf, img)
+		buf = slices.Clone(img)
 	} else {
-		var e lxErrno
 		if d, e = g.mapFile(dg, fd); e != 0 {
-			return nil, nil, nil, e
+			return nil, nil, nil, release, e
 		}
-		k, err := d.readAt(buf, int64(off))
-		if err != nil && err != io.EOF {
-			return nil, nil, nil, osErrno(err)
+		size, err := d.size0()
+		if err != nil {
+			return nil, nil, nil, release, osErrno(err)
 		}
-		clear(buf[k:])
+		if buf, release, err = codeView(d, off, uint64(codeSpan(size, int64(off), n))); err != nil {
+			return nil, nil, nil, func() {}, osErrno(err)
+		}
 	}
 	if g.cfg.NoRewrite {
-		return buf, nil, nil, 0
+		return buf, nil, nil, release, 0
 	}
 	src := imageSrc{data: img}
 	if d != nil {
 		var serr error
 		if src, serr = g.codeImage(d); serr != nil {
-			return nil, nil, nil, osErrno(serr)
+			return nil, nil, nil, release, osErrno(serr)
 		}
 	}
 	f, err := elf.NewFile(src.reader())
 	if err != nil || f.Machine != elfMachine {
-		return nil, nil, nil, lxENOEXEC // not an image of ours: the stub maps it as data
+		return nil, nil, nil, release, lxENOEXEC // not an image of ours: the stub maps it as data
 	}
 	rw, err := g.newRewriter(src)
 	if err != nil {
-		return nil, nil, nil, lxEACCES
+		return nil, nil, nil, release, lxEACCES
 	}
 	if areas == nil {
 		areas = rw.sizingAreas(addr, n)
@@ -443,27 +449,60 @@ func (g *wguest) codeFill(dg *dguest, fd, off, n, addr uint64, areas []trampArea
 		if p.Type != elf.PT_LOAD || p.Flags&elf.PF_X == 0 {
 			continue
 		}
-		lo, hi := max(p.Off, off), min(p.Off+p.Filesz, off+n)
+		lo, hi := max(p.Off, off), min(p.Off+p.Filesz, off+uint64(len(buf)))
 		if lo >= hi {
 			continue
 		}
 		rw.segment(buf[lo-off:hi-off], addr+lo-off, p.Vaddr+lo-p.Off)
 	}
-	tr, err := rw.finish(addr, addr+n)
+	tr, err = rw.finish(addr, addr+n)
 	if err != nil {
 		g.tracef("[lc] code at %#x: %v\n", addr, err)
-		return nil, nil, nil, lxEACCES
+		return nil, nil, nil, release, lxEACCES
 	}
-	return buf, tr, rw.traps(), 0
+	return buf, tr, rw.traps(), release, 0
+}
+
+// codeView copies n bytes of d at off into a fresh pagefile-backed section
+// and maps it writable: the code to rewrite, outside the Go heap however
+// large.
+func codeView(d *dfile, off, n uint64) ([]byte, func(), error) {
+	if n == 0 {
+		return nil, func() {}, nil
+	}
+	sec, err := windows.CreateFileMapping(windows.InvalidHandle, nil, windows.PAGE_READWRITE, uint32(n>>32), uint32(n), nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	base, err := windows.MapViewOfFile(sec, windows.FILE_MAP_WRITE, 0, 0, uintptr(n))
+	windows.CloseHandle(sec) // the view holds the section
+	if err != nil {
+		return nil, nil, err
+	}
+	release := func() { windows.UnmapViewOfFile(base) }
+	view := unsafe.Slice((*byte)(unsafe.Pointer(base)), n)
+	for done := uint64(0); done < n; {
+		k, err := d.readAt(view[done:], int64(off+done))
+		done += uint64(k)
+		if err == io.EOF || k == 0 {
+			break
+		}
+		if err != nil {
+			release()
+			return nil, nil, err
+		}
+	}
+	return view, release, nil
 }
 
 // codeSize is the room the trampolines of a code mapping need: in each of
 // its areas, of which there may be one on either side of it.
 func (g *wguest) codeSize(dg *dguest, fd, off, n, addr uint64) int64 {
-	_, tr, _, e := g.codeFill(dg, fd, off, n, addr, nil)
+	_, tr, _, release, e := g.codeFill(dg, fd, off, n, addr, nil)
 	if e != 0 {
 		return sErr(e)
 	}
+	release()
 	var need int
 	for _, t := range tr {
 		need += len(t)
@@ -480,10 +519,11 @@ func (g *wguest) mapCode(dg *dguest, fd, off, n, addr, count uint64) int64 {
 	for i := range areas {
 		areas[i] = trampArea{binary.LittleEndian.Uint64(sc[16*i:]), binary.LittleEndian.Uint64(sc[16*i+8:])}
 	}
-	buf, tr, traps, e := g.codeFill(dg, fd, off, n, addr, areas)
+	buf, tr, traps, release, e := g.codeFill(dg, fd, off, n, addr, areas)
 	if e != 0 {
 		return sErr(e)
 	}
+	defer release()
 	for i, a := range areas {
 		if uint64(len(tr[i])) > a.size {
 			return sErr(lxENOMEM)

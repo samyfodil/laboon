@@ -58,11 +58,15 @@ func (g *dguest) exePin(t *execTarget) *dfile {
 
 const maxArgStrlen = 32 * 4096 // Linux's MAX_ARG_STRLEN
 
-// maxCodeRead bounds the code the supervisor holds at once to rewrite it: far
-// above any program's text, far below what would exhaust the supervisor. A
-// mapping's whole range is held at once; rewriting it in bounded windows would
-// lift the bound.
-const maxCodeRead = 1 << 30
+// codeSpan is how many of a mapping's length bytes from off its file of size
+// holds, which is all that is read: past the file's end the fresh region's
+// zeros stand, however long a mapping the guest asks for.
+func codeSpan(size, off int64, length uint64) int {
+	if off < 0 || off >= size {
+		return 0
+	}
+	return int(min(uint64(size-off), length))
+}
 
 const (
 	maxInterpDepth = 4 // nested #! levels Linux follows before ELOOP

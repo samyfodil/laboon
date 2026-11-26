@@ -257,14 +257,11 @@ func (g *dguest) wouldExceed(n uint64) bool {
 // (the ELF the rewriter reads). A host file also has its descriptor fd, whose
 // identity keys the persistent rewrite cache; a non-host backing (in-memory,
 // user-defined, network) has fd -1 and is analyzed by content instead (still
-// memoized by the content's hash). midway, with no file, is anonymous code
-// cut from the middle of a larger range, whose first byte need not start an
-// instruction.
+// memoized by the content's hash).
 type codeSource struct {
-	r      io.ReaderAt
-	fd     int
-	off    uint64
-	midway bool
+	r   io.ReaderAt
+	fd  int
+	off uint64
 }
 
 // fileCode is a range installCode filled from a file region.
@@ -286,6 +283,24 @@ func fileID(fd int) (dev, ino uint64, ok bool) {
 // if not nil, is the file region the code was read from. inPlace says the
 // range already holds code, so only the rewritten bytes are written.
 func (g *dguest) installCode(addr uint64, code []byte, prot uint64, src *codeSource, inPlace bool) int64 {
+	if r := g.rewriteInto(addr, code, inPlace, func(w codeRewriter) { g.rewriteCode(w, code, addr, src) }); r < 0 {
+		return r
+	}
+	g.dropFileCode(addr, uint64(len(code)))
+	if src != nil {
+		if dev, ino, ok := fileID(src.fd); ok {
+			g.mp.fileCode = append(g.mp.fileCode, fileCode{lo: addr, hi: addr + uint64(len(code)), off: src.off, dev: dev, ino: ino})
+		}
+	}
+	lo := addr &^ (pageSize - 1)
+	return g.host(unix.SYS_MPROTECT, lo, alignUp(addr+uint64(len(code)))-lo, prot)
+}
+
+// rewriteInto rewrites code, bound for [addr, addr+len(code)) of the stub,
+// with the rewriter apply is given, and writes it there: only the rewritten
+// bytes when inPlace, the range already holding code. Its trampolines go in a
+// chunk of their own.
+func (g *dguest) rewriteInto(addr uint64, code []byte, inPlace bool, apply func(codeRewriter)) int64 {
 	if g.cfg.Trace != nil {
 		fmt.Fprintf(g.cfg.Trace, "rewriting code at %#x+%#x\n", addr, len(code))
 	}
@@ -296,7 +311,7 @@ func (g *dguest) installCode(addr uint64, code []byte, prot uint64, src *codeSou
 			size = 0 // no room nearby: trap sites only
 		}
 		w := g.newRewriter(chunk, size)
-		g.rewriteCode(w, code, addr, src)
+		apply(w)
 		g.record(w.Patched())
 		if inPlace {
 			if err := g.writePatches(appendPatches(nil, w.Patched().Sites, code, addr)); err != nil {
@@ -317,14 +332,7 @@ func (g *dguest) installCode(addr uint64, code []byte, prot uint64, src *codeSou
 			return sErr(lxEFAULT)
 		}
 	}
-	g.dropFileCode(addr, uint64(len(code)))
-	if src != nil {
-		if dev, ino, ok := fileID(src.fd); ok {
-			g.mp.fileCode = append(g.mp.fileCode, fileCode{lo: addr, hi: addr + uint64(len(code)), off: src.off, dev: dev, ino: ino})
-		}
-	}
-	lo := addr &^ (pageSize - 1)
-	return g.host(unix.SYS_MPROTECT, lo, alignUp(addr+uint64(len(code)))-lo, prot)
+	return 0
 }
 
 // execNotWritable reports whether all of [addr, addr+n) is mapped
