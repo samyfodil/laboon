@@ -17,7 +17,26 @@ var (
 	procGetThreadContext = modKernel32.NewProc("GetThreadContext")
 	procSetThreadContext = modKernel32.NewProc("SetThreadContext")
 	procQueueUserAPC     = modKernel32.NewProc("QueueUserAPC")
+
+	procGetProcessIdOfThread = modKernel32.NewProc("GetProcessIdOfThread")
 )
+
+// suspendThread suspends thread h and reports whether it did: SuspendThread
+// returns a DWORD, (DWORD)-1 on failure.
+func suspendThread(h windows.Handle) bool {
+	n, _, _ := procSuspendThread.Call(uintptr(h))
+	return uint32(n) != 0xffffffff
+}
+
+// dupThread returns a handle of the caller's own to thread h, 0 if it cannot.
+func dupThread(h windows.Handle) windows.Handle {
+	cur := windows.CurrentProcess()
+	var d windows.Handle
+	if windows.DuplicateHandle(cur, h, cur, &d, 0, false, windows.DUPLICATE_SAME_ACCESS) != nil {
+		return 0
+	}
+	return d
+}
 
 // hostInterruptibleRead and hostInterruptibleWrite see only files whose I/O
 // does not wait for a peer: the host's pipes are pipeend_windows.go's, the
@@ -97,9 +116,12 @@ func (st *winStub) inCode(pc uint64) bool {
 	return false
 }
 
+// threadReg is a guest thread's OS thread. The injector owns handle and closes
+// it when the registration goes; whoever uses it outside inj.mu uses a
+// duplicate, since a closed handle's value can come back naming one of the
+// supervisor's own threads.
 type threadReg struct {
 	handle windows.Handle
-	owns   bool // true when we OpenThread'd it (a clone child), closed on exit
 	st     *winStub
 }
 
@@ -123,31 +145,40 @@ func (sr *sigRun) injector() *winInjector {
 	return nil
 }
 
-// winSetThread records guest thread tid as OS thread h of stub st, replacing
-// (and closing, if owned) what tid had.
-func winSetThread(sr *sigRun, tid int, h windows.Handle, owns bool, st *winStub) {
+// winSetThread records guest thread tid as OS thread h of stub st, taking h
+// over and closing what tid had.
+func winSetThread(sr *sigRun, tid int, h windows.Handle, st *winStub) {
 	inj := sr.injector()
-	if inj == nil {
+	if inj == nil || h == 0 {
+		if h != 0 {
+			windows.CloseHandle(h)
+		}
 		return
 	}
 	inj.mu.Lock()
-	if r, ok := inj.threads[tid]; ok && r.owns {
+	if r, ok := inj.threads[tid]; ok {
 		windows.CloseHandle(r.handle)
 	}
-	inj.threads[tid] = threadReg{handle: h, owns: owns, st: st}
+	inj.threads[tid] = threadReg{handle: h, st: st}
 	inj.mu.Unlock()
 }
 
 // winRegisterThread opens a clone or fork child's OS thread by the id it
 // reported, so a signal can reach it. One whose process a job-control stop
 // already holds is held too before it runs guest code: the stop was reported
-// as in effect.
+// as in effect. The id is taken only if it is still a thread of st's process:
+// one whose thread died first may name any thread by now.
 func winRegisterThread(sr *sigRun, tid int, osTid uint32, st *winStub) {
 	h, err := windows.OpenThread(threadAccess, false, osTid)
 	if err != nil {
 		return
 	}
-	winSetThread(sr, tid, h, true, st)
+	pid, _, _ := procGetProcessIdOfThread.Call(uintptr(h))
+	if want, err := windows.GetProcessId(st.proc); err != nil || uint32(pid) != want {
+		windows.CloseHandle(h)
+		return
+	}
+	winSetThread(sr, tid, h, st)
 	if t := sr.thread(tid); t != nil {
 		if _, stopped := sr.jobStop(t.tgid); stopped {
 			if p := sr.proc(t.tgid); p != nil {
@@ -165,9 +196,7 @@ func winUnregisterThread(sr *sigRun, tid int) {
 	inj.mu.Lock()
 	if r, ok := inj.threads[tid]; ok {
 		delete(inj.threads, tid)
-		if r.owns {
-			windows.CloseHandle(r.handle)
-		}
+		windows.CloseHandle(r.handle)
 	}
 	inj.mu.Unlock()
 }
@@ -179,9 +208,7 @@ func winDropInjector(sr *sigRun) {
 	}
 	inj.mu.Lock()
 	for _, r := range inj.threads {
-		if r.owns {
-			windows.CloseHandle(r.handle)
-		}
+		windows.CloseHandle(r.handle)
 	}
 	inj.threads = nil
 	inj.mu.Unlock()
@@ -208,17 +235,22 @@ func (sr *sigRun) wakeThread(t *sigThread) {
 	}
 	inj.mu.Lock()
 	reg, ok := inj.threads[t.tid]
+	var h windows.Handle
+	if ok {
+		h = dupThread(reg.handle)
+	}
 	inj.mu.Unlock()
-	if !ok {
+	if h == 0 {
 		return
 	}
-	h, st := reg.handle, reg.st
+	defer windows.CloseHandle(h)
+	st := reg.st
 
 	// Break an alertable wait (a futex, a sleep, sigsuspend/sigtimedwait, or
 	// the channel exchange); the pending signal is taken on the way out.
 	procQueueUserAPC.Call(st.apc, uintptr(h), 0)
 
-	if r, _, _ := procSuspendThread.Call(uintptr(h)); r == ^uintptr(0) {
+	if !suspendThread(h) {
 		return
 	}
 	defer windows.ResumeThread(h)

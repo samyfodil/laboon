@@ -353,7 +353,7 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 	// points; the supervisor reaches a thread through them, redirecting it only
 	// while it runs guest code.
 	w.st = &winStub{proc: sp.proc, chanBase: reported[1], redirect: uintptr(reported[2]), apc: uintptr(reported[3]), code: ranges}
-	winSetThread(fs.sigs(), dg.pid, sp.thread, false, w.st)
+	winSetThread(fs.sigs(), dg.pid, dupThread(sp.thread), w.st)
 	if err := w.mapImage(img, true); err != nil {
 		return w, err
 	}

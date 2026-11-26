@@ -45,17 +45,20 @@ func quiesceFork(sr *sigRun, st *winStub, self int) func() {
 	if inj == nil || lo == 0 {
 		return func() {}
 	}
-	inj.mu.Lock() // no handle is closed under us
+	inj.mu.Lock()
 	var hs []windows.Handle
 	for tid, r := range inj.threads {
 		if r.st == st && tid != self {
-			hs = append(hs, r.handle)
+			if h := dupThread(r.handle); h != 0 {
+				hs = append(hs, h)
+			}
 		}
 	}
+	inj.mu.Unlock()
 	for try := 0; ; try++ {
 		var held []windows.Handle
 		for _, h := range hs {
-			if n, _, _ := procSuspendThread.Call(uintptr(h)); n != ^uintptr(0) {
+			if suspendThread(h) {
 				held = append(held, h)
 			}
 		}
@@ -72,8 +75,12 @@ func quiesceFork(sr *sigRun, st *winStub, self int) func() {
 			}
 		}
 		if !busy || try == 1000 {
-			inj.mu.Unlock()
-			return resume
+			return func() {
+				resume()
+				for _, h := range hs {
+					windows.CloseHandle(h)
+				}
+			}
 		}
 		resume()
 		runtime.Gosched()

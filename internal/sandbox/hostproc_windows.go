@@ -45,7 +45,7 @@ func (sr *sigRun) hostStop(p *sigProc) {
 	var tids []int
 	for _, t := range threads {
 		if r, ok := inj.threads[t.tid]; ok {
-			if n, _, _ := procSuspendThread.Call(uintptr(r.handle)); n != ^uintptr(0) {
+			if suspendThread(r.handle) {
 				tids = append(tids, t.tid)
 			}
 		}
@@ -96,7 +96,7 @@ func (sr *sigRun) hostStopThread(p *sigProc, t *sigThread) {
 		}
 	}
 	if r, ok := inj.threads[t.tid]; ok {
-		if n, _, _ := procSuspendThread.Call(uintptr(r.handle)); n != ^uintptr(0) {
+		if suspendThread(r.handle) {
 			inj.parked[p.tgid] = append(tids, t.tid)
 		}
 	}
