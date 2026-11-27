@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,11 @@ func TestRunTmpIsolated(t *testing.T) {
 		defer close(done)
 		Run(ctx, "/bin/busybox", Config{RootFS: HostRoot(root), Args: []string{"sleep", "30"}})
 	}()
+	tmp, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := filepath.Join(tmp, runTmpPrefix())
 	var chanPath string
 	for i := 0; i < 100 && chanPath == ""; i++ {
 		time.Sleep(50 * time.Millisecond)
@@ -33,7 +39,7 @@ func TestRunTmpIsolated(t *testing.T) {
 		}
 		for _, l := range strings.Split(string(out), "\n") {
 			f := strings.Fields(l)
-			if len(f) > 1 && f[0] == "lc-stub" && strings.HasPrefix(f[1], tmpDir()) {
+			if len(f) > 1 && f[0] == "lc-stub" && strings.HasPrefix(f[1], prefix) {
 				chanPath = f[1]
 			}
 		}

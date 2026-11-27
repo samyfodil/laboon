@@ -88,7 +88,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 	r.chans = chans
 	mem := chans.mem()
 
-	tmp, err := os.MkdirTemp("", "lc-run-")
+	tmp, err := newRunTmp()
 	if err != nil {
 		return 0, err
 	}
