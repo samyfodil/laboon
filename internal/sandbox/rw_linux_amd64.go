@@ -161,7 +161,8 @@ const codeSalt = "linux-amd64-code-3"
 // re-protected after its file was closed) descends from the region start and
 // scavenges, leaving any syscall it cannot prove is code as a raw 0f 05 for
 // seccomp to catch loudly rather than patching a data word. A plan is kept by
-// the file's identity, or, for code with no file behind it, only in memory.
+// the file's identity, only in memory for an unlinked file (a memfd) or for
+// code with no file behind it.
 func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *codeSource) {
 	id, ok := src.identity()
 	if src != nil && src.r != nil {

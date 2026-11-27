@@ -213,3 +213,31 @@ func TestDiskReadOnlyHasNoWriter(t *testing.T) {
 }
 
 func hexKey(k [32]byte) string { return hex.EncodeToString(k[:]) }
+
+// A plan keyed by an unlinked file's identity is found again in memory but
+// never written to disk: no later process can name that file.
+func TestUnlinkedIDNeverOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCache(dir)
+	calls := 0
+	compute := func() (Plan, error) { calls++; return Analyze(distinctCode(1)), nil }
+	id := FileID{Dev: 1, Ino: 2, Size: 3, Unlinked: true}
+	for range 2 {
+		if _, err := c.ByID("t", id, nil, compute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.Sync()
+	if calls != 1 {
+		t.Fatalf("computed %d times, want 1", calls)
+	}
+	if fs := planFiles(t, dir); len(fs) != 0 {
+		t.Fatalf("%d plan files for an unlinked file, want 0", len(fs))
+	}
+	id.Unlinked = false
+	c.ByID("t", id, nil, compute)
+	c.Sync()
+	if fs := planFiles(t, dir); len(fs) != 1 {
+		t.Fatalf("%d plan files for a linked file, want 1", len(fs))
+	}
+}

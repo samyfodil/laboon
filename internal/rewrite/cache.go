@@ -154,6 +154,10 @@ type FileID struct {
 	Dev, Ino     uint64
 	Size         int64
 	Mtime, Ctime int64 // nanoseconds
+	// Unlinked is a file with no name left (a memfd, an unlinked temporary):
+	// no later process can see it again, so its plans stay in memory, kept
+	// as the Anon methods keep theirs.
+	Unlinked bool
 }
 
 // ByID memoizes compute under salt and a file's identity. salt names the
@@ -165,6 +169,17 @@ func (c *Cache) ByID(salt string, id FileID, extra []uint64, compute func() (Pla
 		b = binary.LittleEndian.AppendUint64(b, x)
 	}
 	key := sha256.Sum256(b)
+	if id.Unlinked {
+		if p, ok := c.anonGet(key); ok {
+			return p, nil
+		}
+		p, err := compute()
+		if err != nil {
+			return Plan{}, err
+		}
+		c.anonPut(key, p)
+		return p, nil
+	}
 	if p, ok := c.lookup(key); ok {
 		return p, nil
 	}

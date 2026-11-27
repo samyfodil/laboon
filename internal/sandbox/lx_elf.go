@@ -69,9 +69,9 @@ func infoIdentity(fi os.FileInfo) (rewrite.FileID, bool) {
 	var id rewrite.FileID
 	if ci, ok := fi.(core.Info); ok {
 		a := ci.Attr()
-		id = rewrite.FileID{Dev: ci.ID().Dev, Ino: ci.ID().Ino, Size: a.Size, Mtime: a.Mtime, Ctime: a.Ctime}
+		id = rewrite.FileID{Dev: ci.ID().Dev, Ino: ci.ID().Ino, Size: a.Size, Mtime: a.Mtime, Ctime: a.Ctime, Unlinked: a.Nlink == 0}
 	} else if st, ok := hostfs.StatOf(fi); ok {
-		id = rewrite.FileID{Dev: st.Dev(), Ino: st.Ino(), Size: st.Size(), Mtime: TsNano(st.Mtime()), Ctime: TsNano(st.Ctime())}
+		id = rewrite.FileID{Dev: st.Dev(), Ino: st.Ino(), Size: st.Size(), Mtime: TsNano(st.Mtime()), Ctime: TsNano(st.Ctime()), Unlinked: st.Nlink() == 0}
 	}
 	return id, id.Ino != 0
 }

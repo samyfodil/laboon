@@ -107,7 +107,7 @@ func (pf *progFile) view() ([]byte, error) {
 }
 
 func statIdentity(st *unix.Stat_t) rewrite.FileID {
-	return rewrite.FileID{Dev: st.Dev, Ino: st.Ino, Size: st.Size, Mtime: st.Mtim.Nano(), Ctime: st.Ctim.Nano()}
+	return rewrite.FileID{Dev: st.Dev, Ino: st.Ino, Size: st.Size, Mtime: st.Mtim.Nano(), Ctime: st.Ctim.Nano(), Unlinked: st.Nlink == 0}
 }
 
 // identity returns the identity of the file code was mapped from, if any.

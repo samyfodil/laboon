@@ -129,7 +129,7 @@ const codeSalt = "linux-a64-code-2"
 // ELF file (a shared library) gets the same whole-file analysis as an image;
 // anonymous code has no symbols, so descent starts at its first byte and the
 // inlined-syscall heuristic covers the rest. Its sites are kept only in memory
-// unless a file is behind it.
+// unless a file with a name is behind it.
 func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *codeSource) {
 	w := cw.(*rewrite.A64Rewriter)
 	if src != nil {
@@ -139,7 +139,7 @@ func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *cod
 		}
 	}
 	memo := g.cfg.Cache.AnonOffsets
-	if _, ok := src.identity(); ok {
+	if id, ok := src.identity(); ok && !id.Unlinked {
 		memo = g.cfg.Cache.Offsets
 	}
 	offs, err := memo(codeSalt, code, func() ([]uint32, error) {

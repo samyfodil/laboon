@@ -1,6 +1,7 @@
 // jitflip: a JIT that keeps W^X writes new code into one page and flips it
 // between writable and executable argv[1] times, running a raw syscall
-// (lseek, whose result is the offset it is given) from each version.
+// (lseek, whose result is the offset it is given) from each version. With
+// argv[2] "memfd" each version is instead a new memfd mapped executable.
 #define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdio.h>
@@ -40,7 +41,27 @@ int main(int argc, char **argv) {
 		printf("jitflip setup failed\n");
 		return 1;
 	}
-	for (int i = 0; i < n; i++) {
+	int memfd = argc > 2 && strcmp(argv[2], "memfd") == 0;
+	for (int i = 0; memfd && i < n; i++) {
+		memcpy(m, seekFn, sizeof seekFn);
+		memcpy(m + pg - sizeof i, &i, sizeof i);
+		int mfd = memfd_create("jit", 0);
+		if (mfd < 0 || write(mfd, m, pg) != pg) {
+			fails++;
+			break;
+		}
+		void *x = mmap(0, pg, PROT_READ | PROT_EXEC, MAP_PRIVATE, mfd, 0);
+		close(mfd);
+		if (x == MAP_FAILED) {
+			fails++;
+			break;
+		}
+		long off = (i + 1) * 4096L + 7;
+		if (((fn)x)(fd, off, SEEK_SET) != off)
+			fails++;
+		munmap(x, pg);
+	}
+	for (int i = 0; !memfd && i < n; i++) {
 		memcpy(m, seekFn, sizeof seekFn);
 		memcpy(m + pg - sizeof i, &i, sizeof i); // new bytes each time
 		syncCode(m, pg);
