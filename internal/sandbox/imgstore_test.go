@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -182,35 +183,58 @@ func TestGoBuildID(t *testing.T) {
 	if id := goBuildID(bytes.NewReader(head)); id != "a/b/c/d" {
 		t.Fatalf("synthetic: %q", id)
 	}
-	gobin, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("no go tool")
+	// A real executable: the test binary where it is not ELF (the supervisor
+	// reads its own ID on Windows), and, where the go tool is, a Windows build
+	// whose ID the tool reports.
+	if runtime.GOOS != "linux" {
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkBuildID(t, exe)
 	}
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o600); err != nil {
-		t.Fatal(err)
+	if _, err := exec.LookPath("go"); err == nil {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module m\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		exe := filepath.Join(dir, "m.exe")
+		build := exec.Command("go", "build", "-o", exe, ".")
+		build.Dir = dir
+		build.Env = append(os.Environ(), "GOOS=windows", "GOARCH=amd64", "GOWORK=off", "CGO_ENABLED=0")
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build: %v\n%s", err, out)
+		}
+		checkBuildID(t, exe)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module m\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	exe := filepath.Join(dir, "m.exe")
-	build := exec.Command(gobin, "build", "-o", exe, ".")
-	build.Dir = dir
-	build.Env = append(os.Environ(), "GOOS=windows", "GOARCH=amd64", "GOWORK=off", "CGO_ENABLED=0")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
-	want, err := exec.Command(gobin, "tool", "buildid", exe).Output()
-	if err != nil {
-		t.Fatal(err)
-	}
+}
+
+// checkBuildID: goBuildID finds exe's build ID, the go tool's answer when
+// there is one.
+func checkBuildID(t *testing.T, exe string) {
+	t.Helper()
 	f, err := os.Open(exe)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if got := goBuildID(f); got == "" || got != strings.TrimSpace(string(want)) {
-		t.Fatalf("goBuildID = %q, go tool buildid = %q", got, want)
+	got := goBuildID(f)
+	if !strings.Contains(got, "/") {
+		t.Fatalf("goBuildID(%s) = %q", exe, got)
+	}
+	gobin, err := exec.LookPath("go")
+	if err != nil {
+		return
+	}
+	want, err := exec.Command(gobin, "tool", "buildid", exe).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != strings.TrimSpace(string(want)) {
+		t.Fatalf("goBuildID(%s) = %q, go tool buildid = %q", exe, got, want)
 	}
 }
 
