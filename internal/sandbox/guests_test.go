@@ -27,7 +27,7 @@ import (
 // host can do. Both build it static-PIE unless the source names its own flags on
 // a "// build:" line. A guest that is neither staged nor buildable fails the
 // test: it is a broken setup, not a reason to skip.
-func guestPath(t *testing.T, name string) string {
+func guestPath(t testing.TB, name string) string {
 	t.Helper()
 	if dir := os.Getenv("LC_GUEST_DIR"); dir != "" {
 		exe := filepath.Join(dir, name)
@@ -99,7 +99,7 @@ func goGuest(t *testing.T, src, mode string) string {
 // guestFlags is a guest source's "// build:" flags, or -static-pie. The
 // staging script reads the same line, and builds a source with a
 // "// libc: musl" line against musl too, as <name>+musl.
-func guestFlags(t *testing.T, src string) []string {
+func guestFlags(t testing.TB, src string) []string {
 	f, err := os.Open(src)
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func guestFlags(t *testing.T, src string) []string {
 // directory that also holds an empty /tmp and /mnt, as a Linux root does, and
 // returns the root and the guest's path in it. Run it with RootFS:
 // HostRoot(root); it works the same on every host.
-func guestRoot(t *testing.T, name string) (root, prog string) {
+func guestRoot(t testing.TB, name string) (root, prog string) {
 	t.Helper()
 	root = t.TempDir()
 	for _, d := range []string{"tmp", "mnt"} {
@@ -131,7 +131,7 @@ func guestRoot(t *testing.T, name string) (root, prog string) {
 }
 
 // copyGuest puts the guest testdata/<name>.c at dst.
-func copyGuest(t *testing.T, dst, name string) {
+func copyGuest(t testing.TB, dst, name string) {
 	t.Helper()
 	b, err := os.ReadFile(guestPath(t, name))
 	if err != nil {
