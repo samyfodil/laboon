@@ -470,7 +470,7 @@ func (s imageSrc) identity() (rewrite.FileID, bool) {
 }
 
 func fileIdentity(f *os.File) (rewrite.FileID, bool) {
-	fi, err := f.Stat()
+	fi, err := hostfs.FileStat(f)
 	if err != nil {
 		return rewrite.FileID{}, false
 	}
