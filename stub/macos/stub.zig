@@ -906,9 +906,9 @@ fn vforkWait(ch: *chan.Chan, flags: u64) void {
 
 // CloneHandoff is the per-thread bootstrap block lcClone hands its new OS
 // thread: where its channel slot is, the guest TLS and stack the clone call
-// provided, and where the guest resumes (the instruction after the svc). It is
-// heap-allocated and intentionally leaked — the thread runs the guest from it
-// and never returns to free it.
+// provided, and where the guest resumes (the instruction after the svc). The
+// thread copies it into its own g_boot, which lives as long as it does, and
+// frees it.
 const CloneHandoff = extern struct {
     slot: u64, // g_base + child slot offset
     tls: u64, // guest tpidr_el0
@@ -918,6 +918,8 @@ const CloneHandoff = extern struct {
 };
 
 extern "c" fn malloc(n: usize) ?*anyopaque;
+
+threadlocal var g_boot: CloneHandoff = undefined;
 
 // lcClone creates a guest thread. The supervisor allocated the tid (ret) and a
 // channel slot, and passes the clone arguments decoded from clone or clone3:
@@ -959,6 +961,7 @@ fn spawnThread(h: *CloneHandoff) bool {
     if (pthread_create(&t, null, cloneBootstrap, h) == 0) return true;
     _ = g_threads.fetchSub(1, .seq_cst);
     retireSlot(@ptrFromInt(h.slot));
+    free(h);
     return false;
 }
 
@@ -998,13 +1001,18 @@ fn vforkSpawn(ch: *chan.Chan, h: *CloneHandoff, tid: u64, frame: [*]u64) u64 {
         return if (ok) tid else neg(EAGAIN);
     }
     const top = proc.guestSp(frame);
-    const stk = malloc(PARK_STACK) orelse return cloneFailed(h.slot - @intFromPtr(g_base), CLONE_VFORK, ch);
+    const off = h.slot - @intFromPtr(g_base);
+    const stk = malloc(PARK_STACK) orelse {
+        free(h);
+        return cloneFailed(off, CLONE_VFORK, ch);
+    };
     var v = VforkPark{ .ch = ch, .h = h, .lo = 0, .len = 0, .save = undefined, .ok = false };
     v.lo = frame[98];
     v.len = top - v.lo;
     v.save = @ptrCast(malloc(v.len) orelse {
         free(stk);
-        return cloneFailed(h.slot - @intFromPtr(g_base), CLONE_VFORK, ch);
+        free(h);
+        return cloneFailed(off, CLONE_VFORK, ch);
     });
     @memcpy(v.save[0..v.len], @as([*]const u8, @ptrFromInt(v.lo))[0..v.len]);
     lc_call_on_stack(&v, &vforkParked, (@intFromPtr(stk) + PARK_STACK) & ~@as(usize, 15));
@@ -1271,8 +1279,10 @@ fn threadExitFinish(ctid: u64, code: u64) callconv(.C) noreturn {
 }
 
 fn cloneBootstrap(arg: ?*anyopaque) callconv(.C) ?*anyopaque {
-    const h: *CloneHandoff = @ptrCast(@alignCast(arg.?));
-    g_chan = @ptrFromInt(h.slot); // thread-local; also inits this thread's TLV
+    g_boot = @as(*CloneHandoff, @ptrCast(@alignCast(arg.?))).*;
+    free(arg);
+    const h = &g_boot;
+    g_chan = @ptrFromInt(h.slot);
     procinfo.publish(g_chan);
     g_is_thread = true;
     g_ctid = h.ctid;
