@@ -82,10 +82,12 @@ func buildCmd(args []string) {
 		k, v, _ := strings.Cut(kv, "=")
 		bargs[k] = v
 	}
+	plans := planCache()
 	h, err := build.Build(ctx, f, build.Options{
 		Context: ctxDir, Tag: *tag, Platform: *platform, Output: *out, Target: *target, Net: *net,
-		Store: true, BuildArgs: bargs, Cache: cache, Stdout: os.Stderr, Stderr: os.Stderr,
+		Store: true, BuildArgs: bargs, Cache: cache, Plans: plans, Stdout: os.Stderr, Stderr: os.Stderr,
 	})
+	plans.Sync()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "laboon build:", err)
 		os.Exit(1)

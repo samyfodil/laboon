@@ -21,6 +21,7 @@ import (
 	"github.com/samyfodil/laboon/core"
 	"github.com/samyfodil/laboon/filesystems/hostfs"
 	"github.com/samyfodil/laboon/internal/namespace"
+	"github.com/samyfodil/laboon/internal/rewrite"
 	"github.com/samyfodil/laboon/internal/sandbox"
 	"github.com/samyfodil/laboon/oci"
 )
@@ -37,6 +38,7 @@ type Options struct {
 	BuildArgs map[string]string // --build-arg values, overriding ARG defaults
 	CacheDir  string            // oci image cache; empty uses the default
 	Cache     Cache             // build layer cache; nil disables step caching
+	Plans     *rewrite.Cache    // RUN steps' rewrite plans (laboon.NewCache); nil keeps them in memory for this process
 	Stdout    io.Writer         // RUN step output
 	Stderr    io.Writer
 }
@@ -530,6 +532,7 @@ func (b *builder) exec(ctx context.Context, in Instruction) (v1.Layer, error) {
 		Net:    b.opt.Net,
 		Stdout: b.opt.Stdout,
 		Stderr: b.opt.Stderr,
+		Cache:  b.opt.Plans,
 	})
 	if err != nil {
 		return nil, err
