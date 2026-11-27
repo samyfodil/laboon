@@ -49,7 +49,7 @@ func TestFileSetAttrOwnObject(t *testing.T) {
 	if got := attr(b).Uid; got != before.Uid {
 		t.Errorf("b's uid = %d after a chown of a, was %d", got, before.Uid)
 	}
-	mtime := (before.Mtime/1e9 - 3600) * 1e9
+	mtime := before.Mtime - 3600e9 + 100 // finer than a microsecond, as NTFS holds
 	if err := b.SetAttr(core.AttrUpdate{Mtime: &mtime}); err != nil {
 		t.Fatal(err)
 	}
@@ -57,8 +57,7 @@ func TestFileSetAttrOwnObject(t *testing.T) {
 	if after.Mtime != mtime {
 		t.Errorf("mtime = %d, want %d", after.Mtime, mtime)
 	}
-	// darwin sets times through futimes, to the microsecond.
-	if d := after.Atime - before.Atime; d <= -1000 || d >= 1000 {
+	if after.Atime != before.Atime {
 		t.Errorf("atime = %d after setting only mtime, was %d", after.Atime, before.Atime)
 	}
 }

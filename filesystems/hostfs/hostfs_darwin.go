@@ -255,8 +255,7 @@ func (fs *DarwinFS) hUtimes(p string, atime, mtime syscall.Timespec) error {
 // FutimesOf sets the open file f's times. Darwin has no futimens in x/sys;
 // futimes keeps microseconds.
 func FutimesOf(f *os.File, atime, mtime syscall.Timespec) error {
-	return unix.Futimes(hostFd(f), []unix.Timeval{
-		unix.NsecToTimeval(syscall.TimespecToNsec(atime)), unix.NsecToTimeval(syscall.TimespecToNsec(mtime))})
+	return futimens(hostFd(f), &[2]syscall.Timespec{atime, mtime})
 }
 
 func (fs *DarwinFS) hCloneFile(f *os.File, to string) error {
