@@ -434,14 +434,13 @@ func (h hostFile) Stat() (core.Info, error) {
 // key Stat reads back. A standalone backend (no MetaStore) keeps only what the
 // host file itself can hold.
 func (h hostFile) SetAttr(u core.AttrUpdate) error {
-	fi, err := h.File.Stat()
+	st, err := FstatOf(h.File)
 	if err != nil {
 		return err
 	}
-	st, _ := StatOf(fi)
 	id := core.NodeID{Dev: st.Dev(), Ino: st.Ino()}
 	if u.Mode != nil {
-		hm := uint32(core.HostMode(*u.Mode, fi.IsDir()))
+		hm := uint32(core.HostMode(*u.Mode, st.Mode()&lxSIFMT == lxSIFDIR))
 		if err := FchmodOf(h.File, hm); err != nil {
 			return err
 		}
