@@ -148,7 +148,11 @@ func TestStdinFeedServesEveryWaiter(t *testing.T) {
 		}
 		return copy(p, s), nil
 	}), pr, pw)
-	defer f.stop()
+	defer func() { // the copier may be in a Read: end it, and the feed with it
+		close(chunks)
+		f.stop()
+		<-f.exited
+	}()
 	f.want(100) // a second read, still waiting when the first returns
 	chunks <- "hello"
 	if s := readPipe(t, f, 100); s != "hello" {
@@ -180,7 +184,10 @@ func TestStdinFeedRetriesEmptyRead(t *testing.T) {
 		}
 		return copy(p, "hello"), nil
 	}), pr, pw)
-	defer f.stop()
+	defer func() {
+		f.stop()
+		<-f.exited
+	}()
 	if s := readPipe(t, f, 5); s != "hello" {
 		t.Fatalf("read got %q", s)
 	}
