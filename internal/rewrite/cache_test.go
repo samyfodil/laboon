@@ -108,10 +108,17 @@ func TestDiskBound(t *testing.T) {
 	oldGen := filepath.Join(dir, "v1-2")
 	keep := filepath.Join(dir, "keep.txt")
 	os.MkdirAll(oldGen, 0o700)
-	for _, p := range []string{legacy, filepath.Join(oldGen, strings.Repeat("cd", 32)), filepath.Join(dir, ".plan-1"), keep} {
+	otherGen := filepath.Join(dir, "v9-9")
+	os.MkdirAll(otherGen, 0o700)
+	otherPlan := filepath.Join(otherGen, strings.Repeat("ef", 32))
+	for _, p := range []string{legacy, filepath.Join(oldGen, strings.Repeat("cd", 32)), filepath.Join(dir, ".plan-1"), keep, otherPlan} {
 		if err := os.WriteFile(p, []byte{planVersion}, 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	idle := time.Now().Add(-otherGenIdle - time.Hour)
+	if err := os.Chtimes(filepath.Join(oldGen, strings.Repeat("cd", 32)), idle, idle); err != nil {
+		t.Fatal(err)
 	}
 
 	c := &Cache{disk: newDiskDir(dir)}
@@ -120,6 +127,10 @@ func TestDiskBound(t *testing.T) {
 		c.Plan(distinctCode(i))
 	}
 	c.Sync()
+	if _, err := os.Stat(otherPlan); err != nil {
+		t.Errorf("a plan of another generation in recent use was deleted: %v", err)
+	}
+	os.RemoveAll(otherGen)
 	if fs := planFiles(t, dir); len(fs) != 10 {
 		t.Fatalf("%d plan files, want 10", len(fs))
 	}

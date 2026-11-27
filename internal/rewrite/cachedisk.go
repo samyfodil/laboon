@@ -24,8 +24,13 @@ const (
 )
 
 // diskGen names the subdirectory plans of the current file format live in.
-// Plans of any other generation are deleted when a process first writes.
+// Another generation's directory is deleted when a process first writes, once
+// no plan in it has been used for otherGenIdle: a newer and an older build
+// sharing the directory each keep their own plans, and an abandoned
+// generation goes within a week.
 var diskGen = fmt.Sprintf("v%d-%d", planVersion, planVersionFS)
+
+const otherGenIdle = 7 * 24 * time.Hour
 
 // diskDir keeps plan files under root/diskGen. A writer goroutine, started
 // when there is something to write and gone when there is not, applies the
@@ -194,8 +199,7 @@ func (d *diskDir) scan() {
 			case isPlanName(e.Name()) || strings.HasPrefix(e.Name(), ".plan-"):
 				os.Remove(name)
 			case e.IsDir() && isGenName(e.Name()):
-				removePlans(name)
-				os.Remove(name)
+				removeIdleGen(name)
 			}
 		}
 	}
@@ -234,18 +238,29 @@ func (d *diskDir) scan() {
 	d.prune()
 }
 
-// removePlans deletes the plan files in dir, a directory of an older
-// generation, and nothing else.
-func removePlans(dir string) {
+// removeIdleGen deletes the plan files in dir, another generation's
+// directory, and dir itself once empty, unless one of its plans was used
+// within otherGenIdle. It deletes nothing that is not a plan.
+func removeIdleGen(dir string) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
+	cutoff := time.Now().Add(-otherGenIdle)
+	var plans []string
 	for _, e := range ents {
-		if isPlanName(e.Name()) || strings.HasPrefix(e.Name(), ".plan-") {
-			os.Remove(filepath.Join(dir, e.Name()))
+		if !isPlanName(e.Name()) && !strings.HasPrefix(e.Name(), ".plan-") {
+			continue
 		}
+		if fi, err := e.Info(); err == nil && fi.ModTime().After(cutoff) {
+			return
+		}
+		plans = append(plans, e.Name())
 	}
+	for _, name := range plans {
+		os.Remove(filepath.Join(dir, name))
+	}
+	os.Remove(dir)
 }
 
 func isPlanName(s string) bool {

@@ -303,7 +303,7 @@ func (l *lru) put(key [32]byte, p Plan, maxN, maxBytes int) {
 // predate stealing a run before a syscall, 3 and 4 caves, 6 a run or a cave
 // for an %fs instruction; their plans are recomputed. A change to either
 // version also moves the directory plans are kept in (diskGen), so files of
-// an old format are deleted rather than kept.
+// an old format are deleted, once no build uses them, rather than kept.
 const (
 	planVersion   = 5
 	planVersionFS = 7
