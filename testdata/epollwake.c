@@ -2,7 +2,8 @@
 // is woken by another thread's write, returns at once for an fd ready before
 // it began, or ends with EINTR for a signal, whichever epoll it waited on
 // last and also once the epolls it waited on are closed and their numbers
-// reused. Returns 0 on success, else the line number of the failed check.
+// reused. Waiting does not change how deep epolls nest under the one waited
+// on. Returns 0 on success, else the line number of the failed check.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <pthread.h>
@@ -81,5 +82,15 @@ int main(void) {
 	struct itimerval it = {.it_value = {.tv_usec = 100000}};
 	CHECK(setitimer(ITIMER_REAL, &it, 0) == 0);
 	CHECK(epoll_wait(epb, out, 2, -1) < 0 && errno == EINTR && hits == 1);
+
+	// Waiting leaves the epoll as it was: a chain of epolls as deep as Linux
+	// allows still builds under it.
+	int up = epb;
+	for (int i = 0; i < 4; i++) {
+		int down = epoll_create1(0);
+		struct epoll_event e = {.events = EPOLLIN, .data.fd = down};
+		CHECK(down >= 0 && epoll_ctl(up, EPOLL_CTL_ADD, down, &e) == 0);
+		up = down;
+	}
 	return 0;
 }

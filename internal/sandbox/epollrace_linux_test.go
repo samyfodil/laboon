@@ -10,8 +10,8 @@ import (
 
 // TestEpollWake runs testdata/epollwake.c: a thread's blocking epoll_waits
 // end on a timeout, another thread's write, an fd ready already or a signal,
-// across the epolls it waits on and after they close (the thread's wait
-// epoll, waitEpoll).
+// across the epolls it waits on and after they close, and waiting leaves the
+// guest's epolls free to nest as deep as Linux allows.
 func TestEpollWake(t *testing.T) {
 	root, bin := guestRoot(t, "epollwake")
 	var out bytes.Buffer

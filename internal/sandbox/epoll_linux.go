@@ -293,28 +293,28 @@ func (g *dguest) epollWait(epfd int64, evAddr uint64, maxEvents int64, timeout i
 	s := epScratches.Get().(*epScratch)
 	defer epScratches.Put(s)
 	hev := s.hev[:min(2*maxEvents, epollBufMax)]
-	wake, wep := -1, -1
+	wake := -1
 	if timeout != 0 {
 		wt, fd, e := g.wakeFd()
 		if e != 0 {
 			return sErr(e)
 		}
 		defer wt.putWake()
-		wake, wep = fd, wt.waitEpoll(ep)
+		wake = fd
 	}
 	// A thread whose wait had to block likely blocks again: its next waits
-	// skip the first collect-only pass and wait at once, on a wait epoll that
-	// holds ep's, so ep being ready already ends the wait. A skipping wait
-	// cannot tell whether it blocked, so the run ends and the next wait
-	// collects first again, as a busy loop wants.
-	skip := g.epSkips > 0 && wep >= 0
+	// skip the first collect-only pass and block at once, which ep being
+	// ready already ends. A skipping wait cannot tell whether it blocked, so
+	// the run ends and the next wait collects first again, as a busy loop
+	// wants.
+	skip := g.epSkips > 0 && timeout != 0
 	for first := true; ; first = false {
 		// A signal or teardown after this check writes the wake pipe, which
 		// ends the wait; a signal already pending has none, so then the call
 		// only collects.
 		intr := g.sigIntr() || g.ch.dead()
 		if !intr && timeout != 0 && (!first || skip) {
-			if err := waitReady(ep.epfd, wake, wep, waitMs(deadline)); err != nil {
+			if err := waitReady(ep.epfd, wake, waitMs(deadline)); err != nil {
 				return sErr(osErrno(err))
 			}
 		}
@@ -345,22 +345,11 @@ func (g *dguest) epollWait(epfd int64, evAddr uint64, maxEvents int64, timeout i
 }
 
 // waitReady blocks up to ms (-1 = forever) until the host epoll epfd or the
-// wake pipe wake is readable, draining the pipe. wep, the thread's wait epoll
-// (waitEpoll), makes that one host call; without one (-1) it polls the two.
-func waitReady(epfd, wake, wep, ms int) error {
-	if wep >= 0 {
-		var tev [2]unix.EpollEvent
-		n, err := unix.EpollWait(wep, tev[:], ms)
-		if err != nil && err != unix.EINTR {
-			return err
-		}
-		for _, e := range tev[:max(n, 0)] {
-			if int(e.Fd) == wake {
-				drainWake(wake)
-			}
-		}
-		return nil
-	}
+// wake pipe wake is readable, draining the pipe. It polls the two rather than
+// holding epfd in an epoll of the thread's: an epoll inside another makes
+// every later add to it take the kernel's global loop and path checks, and
+// counts against how deep and how widely the guest's own epolls may nest.
+func waitReady(epfd, wake, ms int) error {
 	fds := [2]unix.PollFd{{Fd: int32(epfd), Events: unix.POLLIN}, {Fd: int32(wake), Events: unix.POLLIN}}
 	if _, err := unix.Poll(fds[:], ms); err != nil && err != unix.EINTR {
 		return err
@@ -369,44 +358,6 @@ func waitReady(epfd, wake, wep, ms int) error {
 		drainWake(wake)
 	}
 	return nil
-}
-
-// waitEpoll returns t's wait epoll: a host epoll of its own holding its wake
-// pipe and the host epoll of ep, the guest epoll it waits on, so a blocking
-// wait is one host call. It is made on first use and keeps the last guest
-// epoll, replaced when the thread waits on another; ep's own epoll is never
-// given the pipe, as other threads wait on it too. It returns -1 when ep's
-// cannot be added (one nested too deep), and the wait polls instead. The
-// caller holds the pipe (wakeFd), whose teardown closes the wait epoll.
-func (t *sigThread) waitEpoll(ep *epoll) int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.wep < 0 {
-		wep, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
-		if err != nil {
-			return -1
-		}
-		if err := unix.EpollCtl(wep, unix.EPOLL_CTL_ADD, t.wr, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(t.wr)}); err != nil {
-			unix.Close(wep)
-			return -1
-		}
-		t.wep = wep
-	}
-	if t.wepOn == ep {
-		return t.wep
-	}
-	if t.wepOn != nil {
-		// If that epoll's file closed, it left the wait epoll with it, and
-		// its number now names a file the wait epoll does not hold: the
-		// delete fails, harmlessly.
-		unix.EpollCtl(t.wep, unix.EPOLL_CTL_DEL, t.wepOn.epfd, nil)
-		t.wepOn = nil
-	}
-	if err := unix.EpollCtl(t.wep, unix.EPOLL_CTL_ADD, ep.epfd, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(ep.epfd)}); err != nil {
-		return -1
-	}
-	t.wepOn = ep
-	return t.wep
 }
 
 // epollDeliver writes the ready events evs to the guest's buffer at evAddr,
