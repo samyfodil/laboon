@@ -34,25 +34,31 @@ var diskGen = fmt.Sprintf("v%d-%d", planVersion, planVersionFS)
 // the count, the bytes and the least-recently-used order itself and prunes on
 // each write. Other processes writing the same directory make those numbers
 // approximate: each one holds the directory near the bound as it sees it.
+// A read hit touches its file in place, so a process that only reads never
+// starts the writer and has nothing for Sync to wait on.
 type diskDir struct {
-	root, dir       string
-	maxFiles        int
-	maxBytes, bytes int64
+	root, dir string
+	maxFiles  int
+	maxBytes  int64
 
 	mu   sync.Mutex
 	idle sync.Cond
 	q    []diskOp
 	busy bool
 
-	// The writer's own state; only one writer runs at a time.
-	scanned bool
-	files   list.List // least recently used first: *diskFile
-	idx     map[string]*list.Element
+	scanned bool // the writer's own; only one writer runs at a time
+
+	// The index of the current generation's files, shared by the writer and
+	// read hits; held only for in-memory work, never across a file operation.
+	imu   sync.Mutex
+	bytes int64
+	files list.List // least recently used first: *diskFile
+	idx   map[string]*list.Element
 }
 
 type diskOp struct {
 	name string
-	data []byte // nil marks a read hit: the file is touched, not written
+	data []byte
 }
 
 type diskFile struct {
@@ -74,9 +80,23 @@ func (d *diskDir) read(key [32]byte) (Plan, bool) {
 	}
 	p, ok := decodePlan(b)
 	if ok {
-		d.enqueue(diskOp{name: name})
+		d.touch(name)
 	}
 	return p, ok
+}
+
+// touch marks a file just read as recently used, on disk for the next
+// process's scan and in the index for this one's pruning.
+func (d *diskDir) touch(name string) {
+	now := time.Now()
+	if os.Chtimes(filepath.Join(d.dir, name), now, now) != nil {
+		return
+	}
+	d.imu.Lock()
+	if e := d.idx[name]; e != nil {
+		d.files.MoveToBack(e)
+	}
+	d.imu.Unlock()
 }
 
 func (d *diskDir) write(key [32]byte, b []byte) {
@@ -127,21 +147,13 @@ func (d *diskDir) drain() {
 }
 
 func (d *diskDir) apply(op diskOp) {
-	path := filepath.Join(d.dir, op.name)
-	e := d.idx[op.name]
-	if op.data == nil {
-		now := time.Now()
-		if os.Chtimes(path, now, now) == nil && e != nil {
-			d.files.MoveToBack(e)
-		}
-		return
-	}
 	// Best effort: a failed write only costs a re-analysis next time.
-	if writeAtomic(path, op.data) != nil {
+	if writeAtomic(filepath.Join(d.dir, op.name), op.data) != nil {
 		return
 	}
 	size := int64(len(op.data))
-	if e != nil {
+	d.imu.Lock()
+	if e := d.idx[op.name]; e != nil {
 		f := e.Value.(*diskFile)
 		d.bytes += size - f.size
 		f.size = size
@@ -150,15 +162,22 @@ func (d *diskDir) apply(op diskOp) {
 		d.idx[op.name] = d.files.PushBack(&diskFile{op.name, size})
 		d.bytes += size
 	}
+	d.imu.Unlock()
 	d.prune()
 }
 
 func (d *diskDir) prune() {
+	var gone []string
+	d.imu.Lock()
 	for d.files.Len() > 0 && (d.files.Len() > d.maxFiles || d.bytes > d.maxBytes) {
 		f := d.files.Remove(d.files.Front()).(*diskFile)
 		delete(d.idx, f.name)
 		d.bytes -= f.size
-		os.Remove(filepath.Join(d.dir, f.name))
+		gone = append(gone, f.name)
+	}
+	d.imu.Unlock()
+	for _, name := range gone {
+		os.Remove(filepath.Join(d.dir, name))
 	}
 }
 
@@ -202,6 +221,7 @@ func (d *diskDir) scan() {
 		}
 	}
 	sort.Slice(fs, func(i, j int) bool { return fs[i].mtime.Before(fs[j].mtime) })
+	d.imu.Lock()
 	for _, f := range fs {
 		if _, ok := d.idx[f.name]; ok {
 			continue
@@ -210,6 +230,7 @@ func (d *diskDir) scan() {
 		d.idx[f.name] = d.files.PushBack(&df)
 		d.bytes += f.size
 	}
+	d.imu.Unlock()
 	d.prune()
 }
 

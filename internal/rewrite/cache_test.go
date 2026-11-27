@@ -3,11 +3,13 @@ package rewrite
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // distinctCode is a syscall followed by a word that differs for each i.
@@ -161,3 +163,42 @@ func TestDiskBound(t *testing.T) {
 		t.Fatalf("%d plan files, %d bytes, want 3 and %d", len(fs), d.bytes, 3*one)
 	}
 }
+
+// A process that only hits plans on disk never starts the writer: the hit is
+// touched in place, the directory is not scanned, and Sync has nothing to wait
+// for.
+func TestDiskReadOnlyHasNoWriter(t *testing.T) {
+	dir := t.TempDir()
+	warm := NewCache(dir)
+	warm.Plan(distinctCode(1))
+	warm.Sync()
+	legacy := filepath.Join(dir, strings.Repeat("ab", 32))
+	if err := os.WriteFile(legacy, []byte{planVersion}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(dir, diskGen, hexKey(sha256.Sum256(distinctCode(1))))
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(name, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewCache(dir)
+	if _, ok := c.lookup(sha256.Sum256(distinctCode(1))); !ok {
+		t.Fatal("the plan on disk was not found")
+	}
+	c.disk.mu.Lock()
+	busy, queued := c.disk.busy, len(c.disk.q)
+	c.disk.mu.Unlock()
+	if busy || queued != 0 {
+		t.Fatalf("a read hit started the writer (busy %v, %d queued)", busy, queued)
+	}
+	c.Sync()
+	if _, err := os.Stat(legacy); err != nil {
+		t.Fatal("a read-only process scanned the directory")
+	}
+	if fi, err := os.Stat(name); err != nil || !fi.ModTime().After(old) {
+		t.Fatalf("the hit was not touched: %v", err)
+	}
+}
+
+func hexKey(k [32]byte) string { return hex.EncodeToString(k[:]) }
