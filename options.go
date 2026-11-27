@@ -252,7 +252,9 @@ func WithMaxImageSize(bytes uint64) Option {
 // WithCache memoizes syscall rewriting in c instead of the process-wide
 // default, which keeps plans in memory only. Make c with NewCache, once, and
 // share it across runs; to keep plans across processes too, give NewCache a
-// directory.
+// directory. On Windows the directory also keeps prepared images (NewCache):
+// without one, the default included, every run rewrites and copies its
+// programs again.
 func WithCache(c *Cache) Option {
 	return func(o *options) { o.cfg.Cache = c }
 }
