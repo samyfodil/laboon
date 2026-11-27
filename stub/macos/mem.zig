@@ -142,6 +142,7 @@ const LC_CODEFILE: u64 = 0x4c430006; // (open-file id): this stub maps that file
 const LC_SYNCFILE: u64 = 0x4c430007; // (open-file id): msync of its MAP_SHARED mapping; write the backing back to the file
 const LC_UNMAPFILE: u64 = 0x4c430008; // (open-file id): this stub's last MAP_SHARED mapping of that non-host file is gone
 pub const LC_REWRITE: u64 = 0x4c430002; // (base, len, file off, guest fd, count only): rewrite, or count, a text range's sites
+const REWRITE_ASK_IMAGE: u64 = 2; // LC_REWRITE's 5th argument: 1 if the file is an image (sandbox/run_darwin.go rewriteAskImage)
 pub const LC_FS_PATCH: u64 = 0x4c430039; // (text, len, file off, guest fd, area, area len | tp << 32): move x86-64 %fs sites to islands in area
 const LC_SHMAT: u64 = 0x4c430003; // (shmid) -> stub fd | pages << 32
 const LC_SHMATTACHED: u64 = 0x4c430004; // (shmid) -> attachment cookie
@@ -727,6 +728,15 @@ fn vmaAt(addr: u64) ?Vma {
     return null;
 }
 
+// fileCode reports whether the file mapping at addr is code rewritten as its
+// image's.
+fn fileCode(addr: u64) bool {
+    lock.lock();
+    defer lock.unlock();
+    const v = vmaAt(addr) orelse return false;
+    return v.exec;
+}
+
 // vmaNext is the start of the first file entry inside (addr, hi), or hi.
 fn vmaNext(addr: u64, hi: u64) u64 {
     var n = hi;
@@ -1231,7 +1241,7 @@ fn mmap(addr: u64, len: u64, prot_in: u64, flags: u64, fd: u64, off: u64) u64 {
                 _ = munmap(r, n);
                 return p;
             }
-        } else wx.mapped(r, n, prot, (!file or shared) and prot & PROT_EXEC != 0, shared);
+        } else wx.mapped(r, n, prot, (!file or shared or !fileCode(r)) and prot & PROT_EXEC != 0, shared);
     }
     if (!isErr(r) and flags & L_POPULATE != 0) _ = sys(SYS_madvise, r, n, D_MADV_WILLNEED, 0, 0, 0);
     flushGone();
@@ -1303,7 +1313,10 @@ fn mapFileAt(addr: u64, n: u64, prot: u64, shared: bool, fixed: bool, noreplace:
         }
         return v;
     }
-    if (off % PAGE == 0 and off + n <= rdUp(fileSize(sfd) orelse 0)) {
+    // Code in a file that is not an image is copied in and runs as memory a
+    // JIT wrote does, once rewritten page by page (wx.zig).
+    const image = prot & PROT_EXEC == 0 or root.hostCall(LC_REWRITE, .{ 0, n, off, gfd, REWRITE_ASK_IMAGE, 0 }) == 1;
+    if (image and off % PAGE == 0 and off + n <= rdUp(fileSize(sfd) orelse 0)) {
         const r = place(addr, n, PROT_RW, D_PRIVATE | (if (fixed) D_FIXED else 0), sfd, off, noreplace);
         if (isErr(r)) return r;
         rewrite(r, n, off, gfd);
@@ -1322,15 +1335,17 @@ fn mapFileAt(addr: u64, n: u64, prot: u64, shared: bool, fixed: bool, noreplace:
         _ = sys(SYS_munmap, r, n, 0, 0, 0, 0);
         return lx(k);
     }
-    if (prot & PROT_EXEC != 0) rewrite(r, n, off, gfd);
-    if (prot != PROT_RW) {
-        const p = jit.protect(r, n, prot);
+    const exec = prot & PROT_EXEC != 0;
+    if (exec and image) rewrite(r, n, off, gfd);
+    const hp = if (exec and !image) wx.hostProtOf(prot) else prot;
+    if (hp != PROT_RW) {
+        const p = jit.protect(r, n, hp);
         if (isErr(p)) {
             _ = sys(SYS_munmap, r, n, 0, 0, 0, 0);
             return p;
         }
     }
-    return record(r, n, .{ .lo = r, .hi = r + n, .id = id, .off = off, .copy = true, .exec = prot & PROT_EXEC != 0 });
+    return record(r, n, .{ .lo = r, .hi = r + n, .id = id, .off = off, .copy = true, .exec = exec and image });
 }
 
 // ---- island rooms -------------------------------------------------------------

@@ -89,7 +89,16 @@ func init() {
 	}
 	syscalls[lcRewrite] = func(g *dguest, a [6]uint64) int64 {
 		d, ok := g.ft.get(int(int32(a[3])))
-		if !ok || !d.held() && d.mapf == nil {
+		known := ok && (d.held() || d.mapf != nil)
+		if a[4] == rewriteAskImage {
+			// Code in a file that is not an image is not rewritten as one:
+			// the stub runs it as it does memory a JIT wrote (wx.zig).
+			if known && isImage(d) {
+				return 1
+			}
+			return 0
+		}
+		if !known {
 			return 0
 		}
 		if a[4] != 0 {

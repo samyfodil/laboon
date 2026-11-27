@@ -108,6 +108,19 @@ func libSites(cache *rewrite.Cache, length, offset uint64, d *dfile) []uint64 {
 	return in
 }
 
+// rewriteAskImage is lcRewrite's query of whether a file is an image.
+const rewriteAskImage = 2
+
+// isImage reports whether d is an ELF image, whose sites libSites finds.
+func isImage(d *dfile) bool {
+	ef, _, ok := libFile(d)
+	if !ok {
+		return false
+	}
+	_, err := elf.NewFile(ef)
+	return err == nil
+}
+
 // libFile is what backs a library mapping of d. A non-host file has no host
 // fd; its content is in the materialized mapf (mmapFd) the stub mapped.
 func libFile(d *dfile) (io.ReaderAt, os.FileInfo, bool) {
