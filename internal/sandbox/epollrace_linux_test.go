@@ -66,3 +66,24 @@ func TestEpollCollectFolds(t *testing.T) {
 		}
 	}
 }
+
+// TestEpollCollectAllocs checks that, with the pooled scratch epollWait uses,
+// folding host events and encoding them allocates nothing once warm.
+func TestEpollCollectAllocs(t *testing.T) {
+	ep := &epoll{interest: map[int]epollReg{
+		3: {d: &dfile{}, events: unix.EPOLLIN | unix.EPOLLOUT, data: 3, id: 1, wfd: 9, xfd: -1},
+		4: {d: &dfile{}, events: unix.EPOLLIN, data: 4, id: 2, wfd: -1, xfd: -1},
+	}}
+	hev := []unix.EpollEvent{
+		{Events: unix.EPOLLIN, Fd: 3, Pad: 1},
+		{Events: unix.EPOLLIN, Fd: 4, Pad: 2},
+		{Events: unix.EPOLLOUT, Fd: 3, Pad: 1},
+	}
+	if n := testing.AllocsPerRun(100, func() {
+		s := epScratches.Get().(*epScratch)
+		s.out = encodeEvents(s.out[:0], ep.collect(hev, 8, s))
+		epScratches.Put(s)
+	}); n != 0 {
+		t.Fatalf("%v allocations per wait", n)
+	}
+}
