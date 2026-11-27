@@ -42,7 +42,10 @@ const (
 // NewCache returns a cache that also keeps plans on disk under dir, so they
 // outlive the process; an empty dir keeps them in memory only. Plans for code
 // with no file behind it are never written there, and the directory is held
-// to a bounded number of files and bytes, least recently used out first.
+// to a bounded number of files and bytes, least recently used out first. The
+// cache owns dir: what scan takes for an older format's plans (64-hex names
+// and .plan- temporaries at the top, and in idle v<digits> subdirectories) is
+// deleted.
 func NewCache(dir string) *Cache {
 	c := &Cache{}
 	if dir != "" {

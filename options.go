@@ -266,10 +266,12 @@ type Cache = rewrite.Cache
 // the same binaries; cmd/laboon uses the user cache directory's
 // laboon/plans. Plans for code made at run time with no file behind it (a
 // JIT's) stay in memory only. The directory is held to a bounded number of
-// files and bytes, least recently used out first, and files of an older
-// plan format are deleted. Writes happen in the background: call the
-// cache's Sync before the process exits so they are not lost. An empty dir
-// keeps plans in memory only.
+// files and bytes, least recently used out first. dir must be one the cache
+// owns: files directly in it named by 64 lowercase hex digits or starting
+// with ".plan-", and such files in its v<digits> subdirectories that have
+// gone unused for a week, are taken for plans of an older format and deleted.
+// Writes happen in the background: call the cache's Sync before the process
+// exits so they are not lost. An empty dir keeps plans in memory only.
 func NewCache(dir string) *Cache { return rewrite.NewCache(dir) }
 
 // WithNoRewrite skips syscall rewriting, so the guest's syscalls reach the
