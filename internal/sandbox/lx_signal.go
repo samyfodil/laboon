@@ -213,9 +213,11 @@ type sigThread struct {
 	kickCh          chan struct{}             // a token per wake, for channel-based waits
 
 	mu      sync.Mutex
-	wr, ww  int  // Unix wake pipe; Windows wr is a wake event; -1 until used
-	waits   int  // Unix: the waits holding the pipe (wakeFd)
-	retired bool // Unix: closeWake ran; the last wait closes the pipe
+	wr, ww  int    // Unix wake pipe; Windows wr is a wake event; -1 until used
+	waits   int    // Unix: the waits holding the pipe (wakeFd)
+	retired bool   // Unix: closeWake ran; the last wait closes the pipe
+	wep     int    // Linux: the epoll_wait epoll holding the pipe (waitEpoll), or -1
+	wepOn   *epoll // the guest epoll wep holds, or nil
 }
 
 type sigProc struct {
@@ -300,7 +302,7 @@ func (sr *sigRun) dropMem(slot int) {
 }
 
 func newSigThread(tid, tgid, slot int) *sigThread {
-	return &sigThread{tid: tid, tgid: tgid, slot: slot, q: sigQueue{mirror: tOff(slot) + stPending}, wr: -1, ww: -1}
+	return &sigThread{tid: tid, tgid: tgid, slot: slot, q: sigQueue{mirror: tOff(slot) + stPending}, wr: -1, ww: -1, wep: -1}
 }
 
 func newSigProc(tgid, slot, ppid int, leader *sigThread) *sigProc {

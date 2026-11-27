@@ -698,6 +698,8 @@ type dguest struct {
 	outW  uint64 // how much of its output vector the guest can write, as the stub measured it at the call's entry (macOS, Windows: noteOut)
 	iobuf []byte // reused scratch for gathering a guest write's buffers (per thread, so no lock)
 	rbuf  []byte // reused scratch for a socket receive, distinct from iobuf so a read+write path cannot alias
+
+	epSkips int // Linux: the epoll_waits left that block without collecting first (epollWait)
 }
 
 // gbuf returns this thread's write-scratch buffer grown to n, reused across

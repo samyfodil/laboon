@@ -248,6 +248,22 @@ func (ep *epoll) forget(d *dfile) {
 	}
 }
 
+// epScratch is one epoll_wait's working memory, pooled so a wait allocates
+// nothing: the host events, the ready events folded from them and their
+// struct epoll_event bytes.
+type epScratch struct {
+	hev  [epollBufMax]unix.EpollEvent
+	evs  []pendEv
+	out  []byte
+	fold map[int]int // guest fd to its index in evs, for registrations on several host fds
+}
+
+var epScratches = sync.Pool{New: func() any { return &epScratch{fold: map[int]int{}} }}
+
+// epSkipRun is how many waits after one that blocked go straight to blocking
+// (epollWait).
+const epSkipRun = 8
+
 // epollWait blocks up to timeout ms (-1 = forever) for readiness and writes
 // the ready registrations as struct epoll_event. The wait includes the
 // thread's wake pipe, so a signal or the guest's teardown ends it.
@@ -268,34 +284,38 @@ func (g *dguest) epollWait(epfd int64, evAddr uint64, maxEvents int64, timeout i
 	room := max(fit, 1)
 	// Deliver any events held back from an earlier wait before polling again.
 	if evs := ep.takePending(room); len(evs) > 0 {
-		return g.epollDeliver(ep, evAddr, evs, fit)
+		return g.epollDeliver(ep, evAddr, evs, fit, nil)
 	}
 	var deadline time.Time
 	if timeout >= 0 {
 		deadline = time.Now().Add(time.Duration(timeout) * time.Millisecond)
 	}
-	nbuf := 2 * maxEvents
-	if nbuf > epollBufMax {
-		nbuf = epollBufMax
+	s := epScratches.Get().(*epScratch)
+	defer epScratches.Put(s)
+	hev := s.hev[:min(2*maxEvents, epollBufMax)]
+	wake, wep := -1, -1
+	if timeout != 0 {
+		wt, fd, e := g.wakeFd()
+		if e != 0 {
+			return sErr(e)
+		}
+		defer wt.putWake()
+		wake, wep = fd, wt.waitEpoll(ep)
 	}
-	hev := make([]unix.EpollEvent, nbuf)
-	wt, wake, e := g.wakeFd()
-	if e != 0 {
-		return sErr(e)
-	}
-	defer wt.putWake()
-	fds := []unix.PollFd{{Fd: int32(ep.epfd), Events: unix.POLLIN}, {Fd: int32(wake), Events: unix.POLLIN}}
+	// A thread whose wait had to block likely blocks again: its next waits
+	// skip the first collect-only pass and wait at once, on a wait epoll that
+	// holds ep's, so ep being ready already ends the wait. A skipping wait
+	// cannot tell whether it blocked, so the run ends and the next wait
+	// collects first again, as a busy loop wants.
+	skip := g.epSkips > 0 && wep >= 0
 	for first := true; ; first = false {
 		// A signal or teardown after this check writes the wake pipe, which
-		// ends the poll; a signal already pending has none, so the first
-		// pass only collects.
+		// ends the wait; a signal already pending has none, so then the call
+		// only collects.
 		intr := g.sigIntr() || g.ch.dead()
-		if !intr && !first {
-			if _, err := unix.Poll(fds, waitMs(deadline)); err != nil && err != unix.EINTR {
+		if !intr && timeout != 0 && (!first || skip) {
+			if err := waitReady(ep.epfd, wake, wep, waitMs(deadline)); err != nil {
 				return sErr(osErrno(err))
-			}
-			if fds[1].Revents != 0 {
-				drainWake(wake)
 			}
 		}
 		n, err := unix.EpollWait(ep.epfd, hev, 0)
@@ -303,24 +323,98 @@ func (g *dguest) epollWait(epfd int64, evAddr uint64, maxEvents int64, timeout i
 			return sErr(osErrno(err))
 		}
 		if n > 0 {
-			if evs := ep.collect(hev[:n], room); len(evs) > 0 {
-				return g.epollDeliver(ep, evAddr, evs, fit)
+			if evs := ep.collect(hev[:n], room, s); len(evs) > 0 {
+				if !first {
+					g.epSkips = epSkipRun
+				} else if skip {
+					g.epSkips--
+				}
+				return g.epollDeliver(ep, evAddr, evs, fit, s)
 			}
 		}
 		if intr {
 			return sErr(lxEINTR)
 		}
 		if timeout >= 0 && !time.Now().Before(deadline) {
+			if timeout != 0 {
+				g.epSkips = epSkipRun
+			}
 			return 0
 		}
 	}
 }
 
+// waitReady blocks up to ms (-1 = forever) until the host epoll epfd or the
+// wake pipe wake is readable, draining the pipe. wep, the thread's wait epoll
+// (waitEpoll), makes that one host call; without one (-1) it polls the two.
+func waitReady(epfd, wake, wep, ms int) error {
+	if wep >= 0 {
+		var tev [2]unix.EpollEvent
+		n, err := unix.EpollWait(wep, tev[:], ms)
+		if err != nil && err != unix.EINTR {
+			return err
+		}
+		for _, e := range tev[:max(n, 0)] {
+			if int(e.Fd) == wake {
+				drainWake(wake)
+			}
+		}
+		return nil
+	}
+	fds := [2]unix.PollFd{{Fd: int32(epfd), Events: unix.POLLIN}, {Fd: int32(wake), Events: unix.POLLIN}}
+	if _, err := unix.Poll(fds[:], ms); err != nil && err != unix.EINTR {
+		return err
+	}
+	if fds[1].Revents != 0 {
+		drainWake(wake)
+	}
+	return nil
+}
+
+// waitEpoll returns t's wait epoll: a host epoll of its own holding its wake
+// pipe and the host epoll of ep, the guest epoll it waits on, so a blocking
+// wait is one host call. It is made on first use and keeps the last guest
+// epoll, replaced when the thread waits on another; ep's own epoll is never
+// given the pipe, as other threads wait on it too. It returns -1 when ep's
+// cannot be added (one nested too deep), and the wait polls instead. The
+// caller holds the pipe (wakeFd), whose teardown closes the wait epoll.
+func (t *sigThread) waitEpoll(ep *epoll) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.wep < 0 {
+		wep, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
+		if err != nil {
+			return -1
+		}
+		if err := unix.EpollCtl(wep, unix.EPOLL_CTL_ADD, t.wr, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(t.wr)}); err != nil {
+			unix.Close(wep)
+			return -1
+		}
+		t.wep = wep
+	}
+	if t.wepOn == ep {
+		return t.wep
+	}
+	if t.wepOn != nil {
+		// If that epoll's file closed, it left the wait epoll with it, and
+		// its number now names a file the wait epoll does not hold: the
+		// delete fails, harmlessly.
+		unix.EpollCtl(t.wep, unix.EPOLL_CTL_DEL, t.wepOn.epfd, nil)
+		t.wepOn = nil
+	}
+	if err := unix.EpollCtl(t.wep, unix.EPOLL_CTL_ADD, ep.epfd, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(ep.epfd)}); err != nil {
+		return -1
+	}
+	t.wepOn = ep
+	return t.wep
+}
+
 // epollDeliver writes the ready events evs to the guest's buffer at evAddr,
 // which has room for fit of them; with none, the call fails with EFAULT, as
 // on Linux, and the edge-triggered and oneshot ones wait for the next call
-// (the host reports a level-triggered one again while it is ready).
-func (g *dguest) epollDeliver(ep *epoll, evAddr uint64, evs []pendEv, fit int) int64 {
+// (the host reports a level-triggered one again while it is ready). s, when
+// not nil, lends the encoding its buffer.
+func (g *dguest) epollDeliver(ep *epoll, evAddr uint64, evs []pendEv, fit int, s *epScratch) int64 {
 	if fit == 0 {
 		ep.mu.Lock()
 		var back []pendEv
@@ -333,17 +427,23 @@ func (g *dguest) epollDeliver(ep *epoll, evAddr uint64, evs []pendEv, fit int) i
 		ep.mu.Unlock()
 		return sErr(lxEFAULT)
 	}
-	if err := g.putOut(evAddr, encodeEvents(evs)); err != nil {
+	var buf []byte
+	if s != nil {
+		buf = encodeEvents(s.out[:0], evs)
+		s.out = buf
+	} else {
+		buf = encodeEvents(nil, evs)
+	}
+	if err := g.putOut(evAddr, buf); err != nil {
 		return sErr(lxEFAULT)
 	}
 	return int64(len(evs))
 }
 
-// encodeEvents lays out evs as struct epoll_event. Each carries the data its
-// registration had when it was taken: one deleted since still reports, as on
-// Linux, where the delete waits for the wait's copy-out.
-func encodeEvents(evs []pendEv) []byte {
-	out := make([]byte, 0, len(evs)*epollEventSize)
+// encodeEvents appends evs to out as struct epoll_event. Each carries the data
+// its registration had when it was taken: one deleted since still reports, as
+// on Linux, where the delete waits for the wait's copy-out.
+func encodeEvents(out []byte, evs []pendEv) []byte {
 	for _, p := range evs {
 		var b [epollEventSize]byte
 		put32(b[:], p.ev)
@@ -353,12 +453,12 @@ func encodeEvents(evs []pendEv) []byte {
 	return out
 }
 
-// collect folds the host events into one ready event per guest fd.
-func (ep *epoll) collect(hev []unix.EpollEvent, max int) []pendEv {
+// collect folds the host events into one ready event per guest fd, in s's
+// buffer: copies taken under the lock, for the calling wait alone.
+func (ep *epoll) collect(hev []unix.EpollEvent, max int, s *epScratch) []pendEv {
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
-	ready := map[int]uint32{}
-	var order []int
+	evs := s.evs[:0]
 	for _, e := range hev {
 		gfd := int(e.Fd)
 		r, ok := ep.interest[gfd]
@@ -381,28 +481,33 @@ func (ep *epoll) collect(hev []unix.EpollEvent, max int) []pendEv {
 		if ev == 0 {
 			continue
 		}
-		if _, seen := ready[gfd]; !seen {
-			order = append(order, gfd)
+		// The host reports each of its fds once a wait, so only a
+		// registration on several comes up more than once.
+		if r.wfd >= 0 || r.xfd >= 0 {
+			if i, seen := s.fold[gfd]; seen {
+				evs[i].ev |= ev
+				continue
+			}
+			s.fold[gfd] = len(evs)
 		}
-		ready[gfd] |= ev
+		evs = append(evs, pendEv{gfd: gfd, id: r.id, ev: ev, data: r.data})
 	}
-	if len(order) > max {
+	if len(s.fold) > 0 {
+		clear(s.fold)
+	}
+	if len(evs) > max {
 		// The host reports an edge-triggered or oneshot event once; hold back
 		// the ones that do not fit so the next wait delivers them, rather than
 		// losing the wakeup. A level-triggered fd re-reports on its own.
-		for _, gfd := range order[max:] {
-			if r := ep.interest[gfd]; r.events&(lxEpollEt|lxEpollOneshot) != 0 {
-				ep.pending = append(ep.pending, pendEv{gfd: gfd, id: r.id, ev: ready[gfd], data: r.data})
+		for _, p := range evs[max:] {
+			if ep.interest[p.gfd].events&(lxEpollEt|lxEpollOneshot) != 0 {
+				ep.pending = append(ep.pending, p)
 			}
 		}
-		order = order[:max]
+		evs = evs[:max]
 	}
-	out := make([]pendEv, 0, len(order))
-	for _, gfd := range order {
-		r := ep.interest[gfd]
-		out = append(out, pendEv{gfd: gfd, id: r.id, ev: ready[gfd], data: r.data})
-	}
-	return out
+	s.evs = evs
+	return evs
 }
 
 // takePending returns up to max events held over from an earlier wait, dropping

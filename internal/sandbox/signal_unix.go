@@ -98,6 +98,10 @@ func (t *sigThread) closePipe() {
 		unix.Close(t.ww)
 		t.wr, t.ww = -1, -1
 	}
+	if t.wep >= 0 {
+		unix.Close(t.wep)
+		t.wep, t.wepOn = -1, nil
+	}
 }
 
 // sigWaitFd blocks until fd is ready for events, or returns errSigIntr when a
