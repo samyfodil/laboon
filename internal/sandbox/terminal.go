@@ -22,7 +22,9 @@ type Terminal interface {
 }
 
 // Resizer is an optional Terminal whose Resizes channel reports window-size
-// changes; laboon applies each to the program's pty.
+// changes; laboon applies each to the program's pty. laboon receives from it
+// only while the program runs, so a sender must not block once Run returns:
+// buffer the channel and send without waiting, or stop sending.
 type Resizer interface {
 	Resizes() <-chan WinSize
 }
