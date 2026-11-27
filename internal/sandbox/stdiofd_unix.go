@@ -113,7 +113,7 @@ func (g *dguest) stdioRead(d *dfile, bufAddr uint64, n int64) int64 {
 	}
 	d.feed.want(int(n))
 	r := g.stdioReadHost(d, bufAddr, n)
-	d.feed.done(r >= 0)
+	d.feed.done(int(n))
 	return r
 }
 

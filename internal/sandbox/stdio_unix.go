@@ -113,11 +113,11 @@ func (s *stdio) finish() {
 		}
 		return
 	}
-	for _, f := range s.own {
-		f.Close()
-	}
 	if s.feed != nil {
 		s.feed.stop()
+	}
+	for _, f := range s.own {
+		f.Close()
 	}
 	for _, p := range s.pumps {
 		p.r.SetReadDeadline(time.Now())
