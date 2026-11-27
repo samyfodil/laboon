@@ -25,11 +25,20 @@ type Namespace struct {
 	// (generational), cache the walked location per path and reuse it while the
 	// generation is unchanged. A change to the root's name space bumps the
 	// generation and so invalidates every entry; Mount clears the cache since
-	// mounts are not part of the overlay's generation.
+	// mounts are not part of the overlay's generation. A root that versions
+	// each directory (dirGen) narrows this: genOf is then its epoch, and an
+	// entry also holds the version of every directory its walk looked in.
 	genOf   func() uint64 // nil if the root does not report a generation
 	touch   func()        // bumps the root's generation, for Invalidate
+	dirGen  func(dir string) uint64
 	cacheMu sync.Mutex
 	cache   resolveCache
+}
+
+// dirStamp is a directory a walk looked a name up in, and its version then.
+type dirStamp struct {
+	dir string
+	gen uint64
 }
 
 // resolveKey names a cached answer. followLast is set only for a walk that
@@ -48,6 +57,7 @@ type resolveKey struct {
 type resolveEnt struct {
 	key        resolveKey
 	gen        uint64
+	stamps     []dirStamp
 	loc        Loc
 	err        error
 	path       string
@@ -65,20 +75,30 @@ type resolveCache struct {
 	list resolveEnt // sentinel: list.next is the most recent entry
 }
 
-// get returns key's entry if it was stored at generation gen, marking it
-// recently used. An entry from an older generation is dropped.
-func (c *resolveCache) get(key resolveKey, gen uint64) *resolveEnt {
+// get returns key's entry if it was stored at generation gen and no directory
+// it stamped has changed since (dirGen nil checks none), marking it recently
+// used. A stale entry is dropped.
+func (c *resolveCache) get(key resolveKey, gen uint64, dirGen func(string) uint64) *resolveEnt {
 	e, ok := c.m[key]
 	if !ok {
 		return nil
 	}
 	c.unlink(e)
-	if e.gen != gen {
+	if e.gen != gen || !e.fresh(dirGen) {
 		delete(c.m, key)
 		return nil
 	}
 	c.front(e)
 	return e
+}
+
+func (e *resolveEnt) fresh(dirGen func(string) uint64) bool {
+	for _, s := range e.stamps {
+		if dirGen(s.dir) != s.gen {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *resolveCache) put(e *resolveEnt) {
@@ -139,6 +159,10 @@ func NewNamespace(root FileSystem) *Namespace {
 	if g, ok := root.(Generational); ok {
 		ns.genOf = g.Gen
 		ns.touch = g.Touch
+	}
+	if g, ok := root.(DirGenerational); ok {
+		ns.genOf = g.Epoch
+		ns.dirGen = g.DirGen
 	}
 	return ns
 }
@@ -258,7 +282,8 @@ func (ns *Namespace) resolve(p string, followLast bool, hops int) (Loc, error) {
 	if loc, err, ok := ns.cached(p, followLast, g); ok {
 		return loc, err
 	}
-	var st walkState
+	st := walkState{dirGen: ns.dirGen}
+	st.stamps = st.buf[:0]
 	loc, err := ns.walk(p, followLast, 0, &st, "", nil)
 	// Cache only a result that stayed within the versioned overlay root. Skip
 	// it if the walk crossed a mount (a dynamic fs like /proc is not covered by
@@ -275,10 +300,10 @@ func (ns *Namespace) resolve(p string, followLast bool, hops int) (Loc, error) {
 		if cn := cloneNode(loc.Node); cn != nil {
 			stored := loc
 			stored.Node = cn
-			ns.store(&resolveEnt{key: key, gen: g, loc: stored})
+			ns.store(&resolveEnt{key: key, gen: g, stamps: st.kept(), loc: stored})
 		}
 	case DefinitelyNotExist(err):
-		ns.store(&resolveEnt{key: key, gen: g, err: err})
+		ns.store(&resolveEnt{key: key, gen: g, stamps: st.kept(), err: err})
 	}
 	return loc, err
 }
@@ -288,12 +313,12 @@ func (ns *Namespace) resolve(p string, followLast bool, hops int) (Loc, error) {
 // that is missing or not a link resolves the same either way.
 func (ns *Namespace) cached(p string, followLast bool, g uint64) (Loc, error, bool) {
 	ns.cacheMu.Lock()
-	e := ns.cache.get(resolveKey{p: p}, g)
+	e := ns.cache.get(resolveKey{p: p}, g, ns.dirGen)
 	if e != nil && followLast && e.err == nil && e.loc.Node.Kind() == Symlink {
 		e = nil
 	}
 	if e == nil && followLast {
-		e = ns.cache.get(resolveKey{p: p, followLast: true}, g)
+		e = ns.cache.get(resolveKey{p: p, followLast: true}, g, ns.dirGen)
 	}
 	ns.cacheMu.Unlock()
 	if e == nil {
@@ -314,12 +339,24 @@ func (ns *Namespace) store(e *resolveEnt) {
 }
 
 // walkState is what a walk learns besides its result: whether it crossed a
-// mount, whose filesystem the root's generation does not cover, and whether
-// it followed a symlink as its final component.
+// mount, whose filesystem the root's generation does not cover, whether it
+// followed a symlink as its final component, and with dirGen set the version
+// of each root directory it looked a name up in, read before the lookup.
 type walkState struct {
 	crossed  bool
 	lastLink bool
+	dirGen   func(string) uint64
+	stamps   []dirStamp
+	buf      [8]dirStamp
 }
+
+func (st *walkState) lookIn(dir string) {
+	if st.dirGen != nil {
+		st.stamps = append(st.stamps, dirStamp{dir: dir, gen: st.dirGen(dir)})
+	}
+}
+
+func (st *walkState) kept() []dirStamp { return append([]dirStamp(nil), st.stamps...) }
 
 // walkMiss is the cached Walk.Path answer for p, a path that did not exist.
 func (ns *Namespace) walkMiss(p string, followLast bool) (string, error, bool) {
@@ -328,7 +365,7 @@ func (ns *Namespace) walkMiss(p string, followLast bool) (string, error, bool) {
 	}
 	g := ns.genOf()
 	ns.cacheMu.Lock()
-	e := ns.cache.get(resolveKey{p: p, followLast: followLast, walk: true}, g)
+	e := ns.cache.get(resolveKey{p: p, followLast: followLast, walk: true}, g, ns.dirGen)
 	ns.cacheMu.Unlock()
 	if e == nil {
 		return "", nil, false
@@ -410,13 +447,17 @@ func (w Walk) Path(ns *Namespace, p string) (string, error) {
 		}
 		keep = ns.genOf != nil && DefinitelyNotExist(err)
 	}
-	var st walkState
+	st := walkState{}
+	if keep {
+		st.dirGen = ns.dirGen
+		st.stamps = st.buf[:0]
+	}
 	loc, err := ns.walk(start+"/"+p, w.FollowLast, 0, &st, "", o)
 	if err == nil {
 		loc.Path = absPath(loc.Path)
 	}
 	if keep && !st.crossed && ns.genOf() == g && (err == nil || DefinitelyNotExist(err)) {
-		ns.store(&resolveEnt{key: resolveKey{p: p, followLast: w.FollowLast, walk: true}, gen: g, path: loc.Path, err: err})
+		ns.store(&resolveEnt{key: resolveKey{p: p, followLast: w.FollowLast, walk: true}, gen: g, stamps: st.kept(), path: loc.Path, err: err})
 	}
 	if err != nil {
 		return "", err
@@ -457,6 +498,10 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, st *walkState, fl
 			if floor != "" && len(par) < len(floor) {
 				par = floor // a confined symlink's "../" cannot climb above the instance root
 			}
+			for d := par; d != ""; {
+				d = parent(d)
+				st.lookIn(d) // at walks down to par from the root
+			}
 			cur = ns.at(par)
 			if cur.FS != ns.root {
 				st.crossed = true // ".." landed in a mounted (unversioned) filesystem
@@ -475,6 +520,9 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, st *walkState, fl
 		}
 		if cur.Node.Kind() != Dir {
 			return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: ErrNotDir}
+		}
+		if cur.FS == ns.root {
+			st.lookIn(cur.Path)
 		}
 		child, err := cur.FS.Lookup(cur.Node, name)
 		if err != nil {

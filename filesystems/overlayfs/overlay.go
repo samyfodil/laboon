@@ -23,7 +23,11 @@ import (
 // passes the full CreateSpec down and the destination layer is authoritative.
 type overlay struct {
 	layers []FileSystem  // lowest first; the last is the writable top
-	mutGen atomic.Uint64 // bumped on every mutation; the Namespace resolve cache keys on it
+	mutGen atomic.Uint64 // bumped on every mutation
+	epoch  atomic.Uint64 // bumped on a Touch, a change made outside the overlay's methods
+	// dirGens versions each directory's names, one counter per path hash; a
+	// change to the names in a directory bumps its counter once it is done.
+	dirGens [1024]atomic.Uint64
 	// making serializes the materialization of one overlay path in the top layer,
 	// so two threads in a CLONE_FILES group copying the same shared path up do not
 	// race to create it twice. One lock per path hash.
@@ -36,18 +40,41 @@ type overlay struct {
 func OverlayFS(layers ...FileSystem) FileSystem { return &overlay{layers: layers} }
 
 func (f *overlay) makingLock(p string) *sync.RWMutex {
+	return &f.making[pathHash(p)%uint32(len(f.making))]
+}
+
+func pathHash(p string) uint32 {
 	p = strings.TrimLeft(p, "/")
+	if p == "." {
+		p = ""
+	}
 	h := uint32(2166136261)
 	for i := 0; i < len(p); i++ {
 		h = (h ^ uint32(p[i])) * 16777619
 	}
-	return &f.making[h%uint32(len(f.making))]
+	return h
 }
 
-// touch records that the overlay changed, so any cached path resolution taken
-// before now is treated as stale (generational). gen is the current generation.
-func (f *overlay) Touch()      { f.mutGen.Add(1) }
-func (f *overlay) Gen() uint64 { return f.mutGen.Load() }
+// Touch records a change the overlay cannot place, so every cached path
+// resolution taken before now is stale. Gen moves on every change.
+func (f *overlay) Touch() {
+	f.epoch.Add(1)
+	f.mutGen.Add(1)
+}
+func (f *overlay) Gen() uint64   { return f.mutGen.Load() }
+func (f *overlay) Epoch() uint64 { return f.epoch.Load() }
+
+func (f *overlay) DirGen(dir string) uint64 {
+	return f.dirGens[pathHash(dir)%uint32(len(f.dirGens))].Load()
+}
+
+// changed records a finished change to the names in each of dirs.
+func (f *overlay) changed(dirs ...string) {
+	for _, d := range dirs {
+		f.dirGens[pathHash(d)%uint32(len(f.dirGens))].Add(1)
+	}
+	f.mutGen.Add(1)
+}
 
 func (f *overlay) top() FileSystem { return f.layers[len(f.layers)-1] }
 
@@ -193,6 +220,7 @@ func (f *overlay) topDir(p string) (Node, error) {
 		return nil, err
 	}
 	l.Unlock()
+	f.changed(parent)
 	return c, nil
 }
 
@@ -204,7 +232,7 @@ func (f *overlay) copyUp(n *overlayNode) (Node, error) {
 	if tn := n.nodes[len(f.layers)-1]; tn != nil {
 		return tn, nil // already in the top
 	}
-	defer f.Touch()
+	defer f.changed(path.Dir(n.p))
 	src := n.nodes[n.owner]
 	a, err := src.Stat()
 	if err != nil {
@@ -318,8 +346,8 @@ func (f *overlay) unwhiteout(topDir Node, name string) {
 }
 
 func (f *overlay) Create(dir Node, name string, spec CreateSpec) (Node, error) {
-	defer f.Touch()
 	d := dir.(*overlayNode)
+	defer f.changed(d.p)
 	topDir, err := f.topDir(d.p)
 	if err != nil {
 		return nil, err
@@ -349,8 +377,8 @@ func (f *overlay) Create(dir Node, name string, spec CreateSpec) (Node, error) {
 }
 
 func (f *overlay) WriteFile(dir Node, name string, spec CreateSpec, data []byte) (Node, error) {
-	defer f.Touch()
 	d := dir.(*overlayNode)
+	defer f.changed(d.p)
 	topDir, err := f.topDir(d.p)
 	if err != nil {
 		return nil, err
@@ -369,12 +397,12 @@ func (f *overlay) WriteFile(dir Node, name string, spec CreateSpec, data []byte)
 }
 
 func (f *overlay) Link(dir Node, name string, target Node) (Node, error) {
-	defer f.Touch()
 	t, ok := target.(*overlayNode)
 	d, okd := dir.(*overlayNode)
 	if !ok || !okd {
 		return nil, ErrCrossDevice // a node from another filesystem (a mount)
 	}
+	defer f.changed(d.p)
 	tn, err := f.copyUp(t)
 	if err != nil {
 		return nil, err
@@ -391,8 +419,8 @@ func (f *overlay) Link(dir Node, name string, target Node) (Node, error) {
 }
 
 func (f *overlay) Remove(dir Node, name string, isDir bool) error {
-	defer f.Touch()
 	d := dir.(*overlayNode)
+	defer f.changed(d.p)
 	child, err := f.Lookup(dir, name)
 	if err != nil {
 		return err
@@ -480,7 +508,7 @@ func (f *overlay) deepCopyUp(n *overlayNode) error {
 }
 
 func (f *overlay) Rename(fromDir Node, from string, toDir Node, to string) error {
-	defer f.Touch()
+	defer f.changed(fromDir.(*overlayNode).p, toDir.(*overlayNode).p)
 	src, err := f.Lookup(fromDir, from)
 	if err != nil {
 		return err
@@ -515,7 +543,7 @@ func (f *overlay) Rename(fromDir Node, from string, toDir Node, to string) error
 // them; no whiteout is needed, since each path keeps a top entry that shadows
 // its lower.
 func (f *overlay) RenameExchange(fromDir Node, from string, toDir Node, to string) error {
-	defer f.Touch()
+	defer f.changed(fromDir.(*overlayNode).p, toDir.(*overlayNode).p)
 	src, err := f.Lookup(fromDir, from)
 	if err != nil {
 		return err

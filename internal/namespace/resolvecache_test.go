@@ -141,13 +141,15 @@ func TestResolveCacheConcurrent(t *testing.T) {
 // miss that may not hold.
 type countFS struct {
 	FileSystem
-	g       Generational
+	g       DirGenerational
 	lookups atomic.Int64
 	doubt   atomic.Pointer[string]
 }
 
-func (c *countFS) Gen() uint64 { return c.g.Gen() }
-func (c *countFS) Touch()      { c.g.Touch() }
+func (c *countFS) Gen() uint64              { return c.g.Gen() }
+func (c *countFS) Touch()                   { c.g.Touch() }
+func (c *countFS) Epoch() uint64            { return c.g.Epoch() }
+func (c *countFS) DirGen(dir string) uint64 { return c.g.DirGen(dir) }
 
 func (c *countFS) Lookup(dir Node, name string) (Node, error) {
 	c.lookups.Add(1)
@@ -165,7 +167,7 @@ func TestResolveCacheMiss(t *testing.T) {
 		t.Fatal(err)
 	}
 	ofs := overlayfs.OverlayFS(newTestDirFS(lowerDir), newTestDirFS(t.TempDir()))
-	c := &countFS{FileSystem: ofs, g: ofs.(Generational)}
+	c := &countFS{FileSystem: ofs, g: ofs.(DirGenerational)}
 	ns := NewNamespace(c)
 	walk := Walk{FollowLast: true}
 

@@ -13,8 +13,8 @@ func (f *overlay) BindSocket(dir Node, name string, bind func(addr string) error
 	if !ok {
 		return nil, ErrSocketUnsupported
 	}
-	defer f.Touch()
 	d := dir.(*overlayNode)
+	defer f.changed(d.p)
 	topDir, err := f.topDir(d.p)
 	if err != nil {
 		return nil, err

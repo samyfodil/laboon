@@ -17,8 +17,10 @@ import (
 func BenchmarkResolveStat(b *testing.B) {
 	const dir = "/d1/d2/d3/d4/d5/d6"
 	lowerDir := b.TempDir()
-	if err := os.MkdirAll(filepath.Join(lowerDir, dir), 0o755); err != nil {
-		b.Fatal(err)
+	for _, d := range []string{dir, "/scratch"} {
+		if err := os.MkdirAll(filepath.Join(lowerDir, d), 0o755); err != nil {
+			b.Fatal(err)
+		}
 	}
 	for i := 0; i < 64; i++ {
 		if err := os.WriteFile(filepath.Join(lowerDir, dir, fmt.Sprint("f", i)), []byte("x"), 0o644); err != nil {
@@ -26,7 +28,7 @@ func BenchmarkResolveStat(b *testing.B) {
 		}
 	}
 	ofs := overlayfs.OverlayFS(newTestDirFS(lowerDir), newTestDirFS(b.TempDir()))
-	c := &countFS{FileSystem: ofs, g: ofs.(Generational)}
+	c := &countFS{FileSystem: ofs, g: ofs.(DirGenerational)}
 	ns := NewNamespace(c)
 	dloc, err := ns.Resolve(dir, true)
 	if err != nil {
@@ -80,16 +82,23 @@ func BenchmarkResolveStat(b *testing.B) {
 		}
 		f.Close()
 	})
-	run("afterCreate", follow, abs, func() {
-		dloc, err := ns.Resolve(dir, true)
-		if err != nil {
-			b.Fatal(err)
+	createIn := func(d string) func() {
+		return func() {
+			dloc, err := ns.Resolve(d, true)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if _, err := ofs.Create(dloc.Node, "t", CreateSpec{Kind: Reg, Mode: 0o644}); err != nil {
+				b.Fatal(err)
+			}
+			if dloc, err = ns.Resolve(d, true); err != nil {
+				b.Fatal(err)
+			}
+			if err := ofs.Remove(dloc.Node, "t", false); err != nil {
+				b.Fatal(err)
+			}
 		}
-		if _, err := ofs.Create(dloc.Node, "t", CreateSpec{Kind: Reg, Mode: 0o644}); err != nil {
-			b.Fatal(err)
-		}
-		if err := ofs.Remove(dloc.Node, "t", false); err != nil {
-			b.Fatal(err)
-		}
-	})
+	}
+	run("afterCreate", follow, abs, createIn(dir))
+	run("afterCreateElsewhere", follow, abs, createIn("/scratch"))
 }

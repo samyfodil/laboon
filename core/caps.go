@@ -33,6 +33,17 @@ type Generational interface {
 	Touch()
 }
 
+// DirGenerational is a Generational FileSystem that also places its mutations:
+// DirGen(dir) moves whenever a name in the directory dir (a path from the
+// root, "" or "/" for the root) may resolve differently, and Epoch moves on a
+// Touch, a mutation it cannot place. A counter may be shared by several
+// directories, which only makes it move more often.
+type DirGenerational interface {
+	Generational
+	Epoch() uint64
+	DirGen(dir string) uint64
+}
+
 // Cloner is a Node that can return an independent copy of itself, so a resolver
 // cache never hands out a node another caller might mutate in place (a copy-up
 // rewrites a union node's layer and owner). A node that cannot be cloned safely

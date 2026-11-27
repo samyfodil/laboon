@@ -33,7 +33,7 @@ func cacheTree(t testing.TB, files map[string]string) (FileSystem, *countFS, *Na
 		}
 	}
 	ofs := overlayfs.OverlayFS(newTestDirFS(lowerDir), newTestDirFS(t.TempDir()))
-	c := &countFS{FileSystem: ofs, g: ofs.(Generational)}
+	c := &countFS{FileSystem: ofs, g: ofs.(DirGenerational)}
 	return ofs, c, NewNamespace(c)
 }
 
@@ -315,7 +315,7 @@ func TestResolveCacheSharedViews(t *testing.T) {
 	}
 	ns1.Invalidate()
 	ns2.cacheMu.Lock()
-	e := ns2.cache.get(resolveKey{p: "/a/g"}, ofs.(Generational).Gen())
+	e := ns2.cache.get(resolveKey{p: "/a/g"}, ns2.genOf(), ns2.dirGen)
 	ns2.cacheMu.Unlock()
 	if e != nil {
 		t.Error("Invalidate on one view left another's entries valid")
@@ -330,20 +330,20 @@ func TestResolveCacheLRU(t *testing.T) {
 	c.put(&resolveEnt{key: hot, gen: 1})
 	for i := 0; i < 2*resolveCacheMax; i++ {
 		c.put(&resolveEnt{key: resolveKey{p: fmt.Sprint("/cold", i)}, gen: 1})
-		if i%64 == 0 && c.get(hot, 1) == nil {
+		if i%64 == 0 && c.get(hot, 1, nil) == nil {
 			t.Fatalf("hot entry evicted after %d inserts", i)
 		}
 	}
 	if n := len(c.m); n != resolveCacheMax {
 		t.Fatalf("cache holds %d entries, want %d", n, resolveCacheMax)
 	}
-	if c.get(resolveKey{p: "/cold0"}, 1) != nil {
+	if c.get(resolveKey{p: "/cold0"}, 1, nil) != nil {
 		t.Error("the oldest cold entry survived")
 	}
-	if c.get(resolveKey{p: fmt.Sprint("/cold", 2*resolveCacheMax-1)}, 1) == nil {
+	if c.get(resolveKey{p: fmt.Sprint("/cold", 2*resolveCacheMax-1)}, 1, nil) == nil {
 		t.Error("the newest entry was evicted")
 	}
-	if c.get(hot, 2) != nil || c.get(hot, 1) != nil {
+	if c.get(hot, 2, nil) != nil || c.get(hot, 1, nil) != nil {
 		t.Error("an entry from an older generation was served or kept")
 	}
 	n := 0

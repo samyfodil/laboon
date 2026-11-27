@@ -67,3 +67,70 @@ func TestGenOnlyOnNameChange(t *testing.T) {
 	moved("rename", func() error { return ov.Rename(ov.Root(), "new", ov.Root(), "moved") })
 	moved("remove", func() error { return ov.Remove(ov.Root(), "moved", false) })
 }
+
+// TestDirGen checks a change bumps the version of the directories whose names
+// it changed, and only theirs: a copy-up the parent of the copied path, a move
+// both directories.
+func TestDirGen(t *testing.T) {
+	lower, top := memfs.NewMemFS(), memfs.NewMemFS()
+	for _, d := range []string{"a", "b", "c"} {
+		if _, err := lower.Create(lower.Root(), d, CreateSpec{Kind: Dir, Mode: 0o755}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	al, _ := lower.Lookup(lower.Root(), "a")
+	writeInto(t, lower, al, "f", "F", CreateSpec{Mode: 0o644})
+	ov := OverlayFS(lower, top)
+	g := ov.(DirGenerational)
+	check := func(what string, f func() error, want ...string) {
+		t.Helper()
+		before := map[string]uint64{}
+		for _, d := range []string{"", "a", "b", "c"} {
+			before[d] = g.DirGen(d)
+		}
+		e0 := g.Epoch()
+		if err := f(); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		for d, v := range before {
+			bumped := g.DirGen(d) != v
+			wanted := false
+			for _, w := range want {
+				wanted = wanted || w == d
+			}
+			if bumped != wanted {
+				t.Errorf("%s: directory %q bumped=%v, want %v", what, d, bumped, wanted)
+			}
+		}
+		if g.Epoch() != e0 {
+			t.Errorf("%s moved the epoch", what)
+		}
+	}
+	check("first write into a lower dir", func() error {
+		f, err := lookupPath(t, ov, "a/f").Open(os.O_WRONLY)
+		if err != nil {
+			return err
+		}
+		return f.Close()
+	}, "", "a")
+	check("create", func() error {
+		_, err := ov.Create(lookupPath(t, ov, "a"), "g", CreateSpec{Kind: Reg, Mode: 0o644})
+		return err
+	}, "a")
+	check("rewrite", func() error {
+		f, err := lookupPath(t, ov, "a/f").Open(os.O_WRONLY)
+		if err != nil {
+			return err
+		}
+		return f.Close()
+	})
+	check("rename into a lower dir", func() error {
+		return ov.Rename(lookupPath(t, ov, "a"), "g", lookupPath(t, ov, "b"), "g")
+	}, "", "a", "b")
+	check("remove", func() error { return ov.Remove(lookupPath(t, ov, "b"), "g", false) }, "b")
+	before := g.Epoch()
+	ov.(Generational).Touch()
+	if g.Epoch() == before {
+		t.Error("Touch left the epoch unchanged")
+	}
+}
