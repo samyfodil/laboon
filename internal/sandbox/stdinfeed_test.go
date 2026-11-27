@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,39 +45,59 @@ func (r *heldReader) Read(p []byte) (int, error) {
 }
 
 // TestStdinReaderNotOutlived: a stdin reader that is not a file is read only
-// as far as the guest reads it. When Run returns, nothing is reading it, the
-// copier is gone and its pipe closed, and the bytes the guest did not read
-// are still the caller's.
+// as far as the guest reads it, whether it reads fd 0 with read(2), after an
+// fstat as stdio does, through getchar, or with readv. When Run returns,
+// nothing is reading it, the copier is gone and its pipe closed, and the
+// bytes the guest did not read are still the caller's.
 func TestStdinReaderNotOutlived(t *testing.T) {
-	root, prog := guestRoot(t, "stdinsome")
-	run := func(want int, stdin io.Reader) string {
+	type guest struct {
+		name string
+		args []string
+		out  string
+		take int // bytes the guest reads from fd 0
+	}
+	cases := []guest{
+		{"stdinsome", []string{"0"}, "read 0: \n", 0},
+		{"stdinsome", []string{"5"}, "read 5: hello\n", 5},
+		{"stdinstdio", []string{"fstat"}, "fstat 5: hello\n", 5},
+		{"stdinstdio", []string{"readv"}, "readv 5: hello\n", 5},
+		// stdio reads a buffer's worth, all the reader has before it holds.
+		{"stdinstdio", []string{"getc"}, "getc 5: hello\n", 12},
+	}
+	roots := map[string][2]string{}
+	run := func(c guest, stdin io.Reader) string {
+		rp, ok := roots[c.name]
+		if !ok {
+			root, prog := guestRoot(t, c.name)
+			rp = [2]string{root, prog}
+			roots[c.name] = rp
+		}
 		var o bytes.Buffer
-		code, err := Run(context.Background(), prog, Config{RootFS: HostRoot(root), Args: []string{"stdinsome", strconv.Itoa(want)}, Stdin: stdin, Stdout: &o, Stderr: &o})
+		code, err := Run(context.Background(), rp[1], Config{RootFS: HostRoot(rp[0]), Args: append([]string{c.name}, c.args...), Stdin: stdin, Stdout: &o, Stderr: &o})
 		if err != nil || code != 0 {
-			t.Fatalf("code=%d err=%v\n%s", code, err, o.String())
+			t.Fatalf("%s %v: code=%d err=%v\n%s", c.name, c.args, code, err, o.String())
 		}
 		return o.String()
 	}
-	run(0, nil)
+	run(cases[0], nil)
 	pipes := hostPipes()
-	for _, want := range []int{0, 5} {
+	for _, c := range cases {
 		r := &heldReader{data: []byte("hello, world"), released: make(chan struct{})}
-		out := run(want, r)
-		if exp := "read " + strconv.Itoa(want) + ": " + "hello, world"[:want] + "\n"; out != exp {
-			t.Errorf("guest reading %d: %q, want %q", want, out, exp)
+		if out := run(c, r); out != c.out {
+			t.Errorf("%s %v: %q, want %q", c.name, c.args, out, c.out)
 		}
 		r.mu.Lock()
 		given, inRead := r.given, r.inRead
 		r.mu.Unlock()
-		if given != want || inRead != 0 {
-			t.Errorf("guest reading %d: the reader gave %d bytes and has %d Reads outstanding", want, given, inRead)
+		if given != c.take || inRead != 0 {
+			t.Errorf("%s %v: the reader gave %d bytes, want %d, and has %d Reads outstanding", c.name, c.args, given, c.take, inRead)
 		}
 		if n := hostPipes(); n != pipes {
-			t.Errorf("guest reading %d: %d pipe fds after the run, %d before", want, n, pipes)
+			t.Errorf("%s %v: %d pipe fds after the run, %d before", c.name, c.args, n, pipes)
 		}
 		buf := make([]byte, 1<<20)
 		if s := string(buf[:runtime.Stack(buf, true)]); strings.Contains(s, "stdinFeed).copy") {
-			t.Errorf("guest reading %d: the stdin copier outlived the run", want)
+			t.Errorf("%s %v: the stdin copier outlived the run", c.name, c.args)
 		}
 		close(r.released)
 	}

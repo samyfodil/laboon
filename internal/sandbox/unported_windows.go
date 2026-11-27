@@ -48,6 +48,6 @@ func (r *fileRegistry) closed(d *dfile) {}
 
 var stubFiles = &fileRegistry{}
 
-func (g *dguest) stdioRead(d *dfile, bufAddr uint64, n int64) int64 { return sErr(lxEIO) }
+func (g *dguest) stdioRead(d *dfile, bufAddr uint64, n, ask int64) int64 { return sErr(lxEIO) }
 
 func (t *sigThread) wakeWrite() {}

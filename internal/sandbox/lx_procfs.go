@@ -812,7 +812,7 @@ func (m *memFile) accmode() uint64 {
 }
 
 func (g *dguest) memOf(fd int64) *memFile {
-	if d, ok := g.ft.get(int(fd)); ok {
+	if d, ok := g.ft.lookup(int(fd)); ok {
 		return d.mem
 	}
 	return nil

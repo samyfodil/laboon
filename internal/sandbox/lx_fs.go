@@ -808,7 +808,9 @@ func (t *ftable) get(fd int) (*dfile, bool) {
 	return d, ok
 }
 
-// lookup is get for a read of the run's stdin, which asks its feed itself.
+// lookup is get for a use that cannot wait on the run's stdin pipe without
+// saying how much it wants: a read, which asks the feed itself, fstat, lseek,
+// and most fcntls and ioctls.
 func (t *ftable) lookup(fd int) (*dfile, bool) {
 	fd = int(int32(fd)) // a Linux fd argument is an int: the upper half is not part of it
 	t.mu.Lock()
@@ -1536,6 +1538,12 @@ func (g *dguest) gatherPrefix(v [][2]uint64, off int, buf []byte) int {
 }
 
 func (g *dguest) read(fd int64, bufAddr uint64, n int64) int64 {
+	return g.readAsking(fd, bufAddr, n, n)
+}
+
+// readAsking is read, but a wait on the run's stdin asks its feed for ask
+// bytes: the first part of a readv asks for the whole vector.
+func (g *dguest) readAsking(fd int64, bufAddr uint64, n, ask int64) int64 {
 	d, ok := g.ft.lookup(int(fd))
 	if ok && d.vf != nil {
 		if n < 0 {
@@ -1583,7 +1591,7 @@ func (g *dguest) read(fd int64, bufAddr uint64, n int64) int64 {
 		return g.timerfdRead(d, bufAddr, n)
 	}
 	if d.stub >= 0 {
-		return g.stdioRead(d, bufAddr, n)
+		return g.stdioRead(d, bufAddr, n, min(max(ask, n), ioChunk))
 	}
 	if d.isDir {
 		return sErr(lxEISDIR)
@@ -1637,9 +1645,8 @@ func (g *dguest) readHost(d *dfile, v [][2]uint64, n int) int64 {
 
 // plainRead reports whether reads of d go straight to its host file, which
 // fills a whole vector at once: not a special file read serves itself.
-func (g *dguest) plainRead(fd int64, d *dfile) bool {
-	_, e := g.file(fd)
-	return e == 0 && (d.pipe == nil || d.pipe.io == nil) && d.sf == nil && d.ev == nil && d.pid == 0 && d.sk == nil &&
+func (g *dguest) plainRead(d *dfile) bool {
+	return d.f != nil && (d.pipe == nil || d.pipe.io == nil) && d.sf == nil && d.ev == nil && d.pid == 0 && d.sk == nil &&
 		d.pty == nil && d.fx.in == nil && d.tfd == nil && d.stub < 0 && !d.isDir && !d.tty && !d.fillsReads()
 }
 
@@ -1754,16 +1761,17 @@ func (g *dguest) readv(fd int64, iov uint64, cnt int64) int64 {
 	if e != 0 {
 		return sErr(e)
 	}
-	if d, ok := g.ft.get(int(fd)); ok && d.vf != nil {
+	d, ok := g.ft.lookup(int(fd))
+	if ok && d.vf != nil {
 		return g.regRead(d, v, -1)
 	}
-	if d, ok := g.ft.get(int(fd)); ok && d.sk != nil {
+	if ok && d.sk != nil {
 		return g.sockRead(d, v)
 	}
-	if d, ok := g.ft.get(int(fd)); ok && d.pipe != nil && d.pipe.io != nil {
+	if ok && d.pipe != nil && d.pipe.io != nil {
 		return g.pipeVector(d, v, false)
 	}
-	if d, ok := g.ft.get(int(fd)); ok && g.plainRead(fd, d) && iovTotal(v) <= ioChunk {
+	if ok && g.plainRead(d) && iovTotal(v) <= ioChunk {
 		return g.readHost(d, v, iovTotal(v))
 	}
 	var total int64
@@ -1771,7 +1779,16 @@ func (g *dguest) readv(fd int64, iov uint64, cnt int64) int64 {
 		if x[1] == 0 {
 			continue
 		}
-		r := g.read(fd, x[0], int64(x[1]))
+		ask := int64(x[1])
+		if ok && d.feed != nil {
+			if total > 0 && d.feed.held() == 0 {
+				break // the rest would wait for input the guest has not asked for
+			}
+			if total == 0 {
+				ask = int64(iovTotal(v))
+			}
+		}
+		r := g.readAsking(fd, x[0], int64(x[1]), ask)
 		if r < 0 {
 			if total > 0 {
 				return total
@@ -1787,7 +1804,7 @@ func (g *dguest) readv(fd int64, iov uint64, cnt int64) int64 {
 }
 
 func (g *dguest) lseek(fd, off, whence int64) int64 {
-	d, ok := g.ft.get(int(fd))
+	d, ok := g.ft.lookup(int(fd))
 	if !ok || d.fx.opath {
 		return sErr(lxEBADF)
 	}
@@ -1946,9 +1963,12 @@ const (
 )
 
 func (g *dguest) fcntl(fd, cmd int64, arg uint64) int64 {
-	d, ok := g.ft.get(int(fd))
+	d, ok := g.ft.lookup(int(fd))
 	if !ok {
 		return sErr(lxEBADF)
+	}
+	if d.feed != nil && cmd == lxFSetfl && arg&lxOAsync != 0 {
+		d.feed.stream() // SIGIO tells of input the guest has not asked for
 	}
 	switch cmd {
 	case lxFDupfd, lxFDupfdCloexec:
@@ -2071,7 +2091,7 @@ func (g *dguest) fstatFd(fd int64, statAddr uint64) int64 {
 // fdStat describes an open file: an O_PATH fd its named object, an eventfd,
 // epoll or inotify fd an anonymous inode, anything else its host file.
 func (g *dguest) fdStat(fd int64) (lxStat, lxErrno) {
-	d, ok := g.ft.get(int(fd))
+	d, ok := g.ft.lookup(int(fd))
 	if !ok {
 		return lxStat{}, lxEBADF
 	}

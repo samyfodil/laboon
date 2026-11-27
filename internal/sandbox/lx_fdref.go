@@ -55,9 +55,12 @@ func (d *dfile) unref() {
 }
 
 func (g *dguest) ioctl(fd int64, req, arg uint64) int64 {
-	d, ok := g.ft.get(int(fd))
+	d, ok := g.ft.lookup(int(fd))
 	if !ok {
 		return sErr(lxEBADF)
+	}
+	if d.feed != nil && (req == lxFIONREAD || req == lxFioasync) {
+		d.feed.stream() // both tell of input the guest has not asked for
 	}
 	switch req {
 	case lxFionbio:
