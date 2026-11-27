@@ -178,3 +178,21 @@ func TestPlace(t *testing.T) {
 		t.Fatalf("legacy layout: %#x then %#x", l1, l2)
 	}
 }
+
+// A call that is not about memory must not wait on the memory lock, which a
+// memory call holds across its host round trip: the exec-stack check every
+// call makes, a trap on a known site, and the writable check before a read.
+func TestNonMemoryPathsSkipMemLock(t *testing.T) {
+	g := &dguest{mp: newMemProc(os.Getpid())}
+	g.mp.sites.addList([]uint64{0x1000})
+	g.mp.vm.add(0x10000, 0x14000, true)
+	g.mp.mu.Lock()
+	defer g.mp.mu.Unlock()
+	g.dropHostStack()
+	if !g.mp.isSite(0x1000) {
+		t.Fatal("a known site was refused")
+	}
+	if got := g.writablePrefix(0x10000, 0x4000); got != 0x4000 {
+		t.Fatalf("writable prefix %#x, want 0x4000", got)
+	}
+}
