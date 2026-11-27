@@ -218,7 +218,17 @@ func TestGoBuildID(t *testing.T) {
 // mount is stable; one in the writable upper, in a writable mount or with no
 // host file behind it is not.
 func TestOpenReadStable(t *testing.T) {
-	root, upper, ro, rw := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	// A host backend opens its root without following links, so its path is
+	// the resolved one (darwin's temp dirs are under the /var link).
+	dirs := make([]string, 4)
+	for i := range dirs {
+		d, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		dirs[i] = d
+	}
+	root, upper, ro, rw := dirs[0], dirs[1], dirs[2], dirs[3]
 	for _, p := range []string{filepath.Join(root, "lower"), filepath.Join(upper, "built"), filepath.Join(ro, "p"), filepath.Join(rw, "p")} {
 		if err := os.WriteFile(p, []byte("\x7fELF"), 0o755); err != nil {
 			t.Fatal(err)
