@@ -33,6 +33,13 @@ type memProc struct {
 	hopPend *hop
 	hopP    atomic.Pointer[hop]
 
+	hostStack atomic.Pointer[run] // the stack the stub process's exec gave it, until the guest's first call unmaps it
+
+	// vmMu lets writablePrefix read vm and noWrite without mu, which memory
+	// calls hold across their host calls: a change to the two holds both
+	// locks, and vmMu only for the change itself.
+	vmMu sync.RWMutex
+
 	sites      siteSet // syscall sites rewritten to trap, which a trap must hit
 	fast       int     // of them, with a trampoline
 	strays     int     // stray syscall encodings left to seccomp
@@ -41,7 +48,6 @@ type memProc struct {
 	vm         vmaSet       // the guest's mappings: execve's teardown, the memory cap and placement
 	noWrite    vmaSet       // the mapped ranges the guest cannot write (mapped or protected without PROT_WRITE)
 	shMaps     []shMap      // this address space's MAP_SHARED mappings of non-host files, for eviction (shmaps_linux.go)
-	hostStack  run          // the stack the stub process's exec gave it, until the guest's first call unmaps it
 	special    []specialMap // the kernel's special mappings the guest has, in place or moved aside (vdso_linux.go)
 	lay        mmapLayout   // where mappings the guest leaves unplaced go
 	used       int64
@@ -177,6 +183,18 @@ func (g *dguest) host(nr uintptr, args ...uint64) int64 {
 	return r
 }
 
+// isSite reports whether a trap at pc hit a site the rewriter wrote. Sites
+// are published under mu before their traps are written; a miss is checked
+// again under mu, which orders it after a change in flight.
+func (m *memProc) isSite(pc uint64) bool {
+	if m.sites.load().has(pc) {
+		return true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sites.load().has(pc)
+}
+
 // record notes what a rewriter patched in code made executable at run time.
 func (g *dguest) record(w *rewrite.Result) {
 	g.mp.sites.add(w.Sites)
@@ -208,12 +226,16 @@ func (g *dguest) track(addr, n uint64) { g.trackAs(addr, n, false) }
 // trackAs is track, anon marking private anonymous memory. The new mapping
 // is writable until notePerm says otherwise.
 func (g *dguest) trackAs(addr, n uint64, anon bool) {
+	g.mp.vmMu.Lock()
+	defer g.mp.vmMu.Unlock()
 	g.addMem(int64(g.mp.vm.add(addr, addr+alignUp(n), anon)))
 	g.mp.noWrite.sub(addr, addr+alignUp(n))
 }
 
 // untrack forgets the guest mappings in [addr, addr+n). g.mp.mu held.
 func (g *dguest) untrack(addr, n uint64) {
+	g.mp.vmMu.Lock()
+	defer g.mp.vmMu.Unlock()
 	g.addMem(-int64(g.mp.vm.sub(addr, addr+alignUp(n))))
 	g.mp.noWrite.sub(addr, addr+alignUp(n))
 }
@@ -221,6 +243,8 @@ func (g *dguest) untrack(addr, n uint64) {
 // notePerm records whether the guest can write [addr, addr+n), just mapped
 // or protected with prot. g.mp.mu held.
 func (g *dguest) notePerm(addr, n, prot uint64) {
+	g.mp.vmMu.Lock()
+	defer g.mp.vmMu.Unlock()
 	if prot&unix.PROT_WRITE != 0 {
 		g.mp.noWrite.sub(addr, addr+alignUp(n))
 	} else {
@@ -229,7 +253,8 @@ func (g *dguest) notePerm(addr, n, prot uint64) {
 }
 
 // writable reports whether the guest can write all of [lo, hi) as the
-// supervisor has its mappings: mapped, and not without PROT_WRITE. m.mu held.
+// supervisor has its mappings: mapped, and not without PROT_WRITE. m.mu or
+// m.vmMu held.
 func (m *memProc) writable(lo, hi uint64) bool {
 	for at := lo; at < hi; {
 		v, ok := m.vm.at(at)
@@ -451,11 +476,10 @@ func hostStackOf(pid int) (run, bool) {
 // runs on it: from the guest's first call on, a Linux process has no such
 // mapping, and its range is the guest's.
 func (g *dguest) dropHostStack() {
-	g.mp.mu.Lock()
-	s := g.mp.hostStack
-	g.mp.hostStack = run{}
-	g.mp.mu.Unlock()
-	if s.hi != 0 {
+	if g.mp.hostStack.Load() == nil {
+		return
+	}
+	if s := g.mp.hostStack.Swap(nil); s != nil {
 		g.host(unix.SYS_MUNMAP, s.lo, s.hi-s.lo)
 	}
 }

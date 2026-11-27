@@ -120,9 +120,9 @@ func (g *dguest) writablePrefix(addr, n uint64) uint64 {
 		return 0
 	}
 	m := g.mp
-	m.mu.Lock()
+	m.vmMu.RLock()
 	ok := m.writable(addr, addr+n)
-	m.mu.Unlock()
+	m.vmMu.RUnlock()
 	if ok {
 		return n
 	}

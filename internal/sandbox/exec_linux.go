@@ -123,12 +123,14 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	dg.memUsed.Add(-m.used)
 	m.used = 0
 	m.dropShMaps(dg.dfs) // execve clears the address space: release its shared backings
-	m.vm.r = nil         // the foreign ranges are the stub process's and stay
+	m.vmMu.Lock()
+	m.vm.r = nil // the foreign ranges are the stub process's and stay
 	m.noWrite = vmaSet{}
+	m.vmMu.Unlock()
 	clear(m.ownStack)
 	m.reserved = nil
 	m.fileCode = nil
-	m.sites = siteSet{}
+	m.sites.reset()
 	m.fast, m.strays = 0, 0
 	for _, img := range []*image{exe, interp} {
 		if img != nil {

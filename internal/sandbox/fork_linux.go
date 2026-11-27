@@ -50,7 +50,7 @@ func (m *memProc) forkCopy(fs *dfs) *memProc {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c := newMemProc(0)
-	c.sites = m.sites.clone()
+	c.sites.share(&m.sites)
 	c.fast, c.strays = m.fast, m.strays
 	c.reserved = slices.Clone(m.reserved)
 	c.fileCode = slices.Clone(m.fileCode)

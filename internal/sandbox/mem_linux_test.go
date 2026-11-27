@@ -53,7 +53,7 @@ func TestForkCopyOwnsBookkeeping(t *testing.T) {
 		t.Fatalf("parent's reservation overwrote the child's: %+v", c.mp.reserved)
 	}
 	c.mp.sites.add([]uint64{2})
-	if g.mp.sites.has(2) || !c.mp.sites.has(1) {
+	if g.mp.sites.load().has(2) || !c.mp.sites.load().has(1) {
 		t.Fatal("the child's sites are not its own copy of the parent's")
 	}
 }

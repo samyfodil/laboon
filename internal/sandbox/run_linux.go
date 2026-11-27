@@ -324,7 +324,7 @@ func boot(dg *dguest, src execSrc, argv, env []string) error {
 	// exclusion use the live base.
 	adoptWindow(ch.page.args[0])
 	if s, ok := hostStackOf(int(dg.mp.pid.Load())); ok {
-		dg.mp.hostStack = s
+		dg.mp.hostStack.Store(&s)
 	}
 	dg.noteSpecial()
 	dg.run.entry = ch.page.args[0] + dg.run.entryOff.entry
@@ -415,10 +415,7 @@ func serveGuest(dg *dguest) (code int, err error) {
 		// rip 0 marks a trampoline call; anything else came from SIGILL,
 		// and must be a site the rewriter wrote.
 		if pg.rip != 0 {
-			dg.mp.mu.Lock()
-			known := dg.mp.sites.has(pg.rip)
-			dg.mp.mu.Unlock()
-			if !known {
+			if !dg.mp.isSite(pg.rip) {
 				ch.reply(repFault)
 				continue
 			}

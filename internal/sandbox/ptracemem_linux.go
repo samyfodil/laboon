@@ -56,7 +56,7 @@ var (
 func (m *memProc) ptraceInternalPC(pc uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.sites.has(pc) {
+	if m.sites.load().has(pc) {
 		return true
 	}
 	for _, r := range m.reserved {
