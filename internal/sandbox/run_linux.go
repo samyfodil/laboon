@@ -130,6 +130,7 @@ func Run(ctx context.Context, prog string, cfg Config) (int, error) {
 		return 0, err
 	}
 	defer std.finish()
+	fs.feed = std.feed
 	cfg.Stdin, cfg.Stdout, cfg.Stderr = std.files[0], std.files[1], std.files[2]
 
 	cmd := exec.CommandContext(ctx, fmt.Sprintf("/proc/self/fd/%d", stubFd))

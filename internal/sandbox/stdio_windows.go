@@ -31,13 +31,15 @@ const hostNull = "NUL"
 // output. It runs once the guest is gone, every stub and serve loop with it,
 // so no one writes to the output pipes any more and what they hold is all
 // there is: each copier stops (a write end someone still holds would keep it
-// from seeing end of file) and drains its pipe. The stdin copier, blocked on
-// the caller's reader, is left to end with it.
+// from seeing end of file) and drains its pipe. The stdin feed stops and
+// closes its pipe; one blocked on the caller's reader ends as that Read
+// returns.
 func stdioFiles(cfg *Config) ([3]*os.File, func(), error) {
 	var files [3]*os.File
 	var wg sync.WaitGroup
 	var mine []*os.File
 	var outs []*outPipe
+	var feed *stdinFeed
 	closeAll := func() {
 		for _, f := range mine {
 			f.Close()
@@ -66,10 +68,10 @@ func stdioFiles(cfg *Config) ([3]*os.File, func(), error) {
 			}
 			files[i] = r
 			mine = append(mine, r)
-			go func(src io.Reader) {
-				io.Copy(w, src)
-				w.Close()
-			}(v.(io.Reader))
+			// The guest's reads of fd 0 are not routed through the feed
+			// here, so it streams from the start.
+			feed = newStdinFeed(v.(io.Reader), r, w)
+			feed.stream()
 			continue
 		}
 		if i == 2 && sameWriter(cfg.Stdout, cfg.Stderr) {
@@ -93,6 +95,9 @@ func stdioFiles(cfg *Config) ([3]*os.File, func(), error) {
 	cfg.Stdin, cfg.Stdout, cfg.Stderr = files[0], files[1], files[2]
 	return files, func() {
 		closeAll()
+		if feed != nil {
+			feed.stop()
+		}
 		for _, op := range outs {
 			windows.SetEvent(op.final)
 		}

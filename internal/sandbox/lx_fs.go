@@ -45,6 +45,7 @@ type dfs struct {
 	workAbs   string          // private dir beside the upper layer for staging host objects
 	keepUpper bool            // upperAbs is the caller's, kept after the run
 	tmpDir    string          // the run's temp directory (newRunTmp)
+	feed      *stdinFeed      // the run's stdin, when it is a reader that is not a file
 	emptyOnce sync.Once
 	shmOnce   sync.Once
 	shm       core.FileSystem // the run's /dev/shm (shmFS)
@@ -739,6 +740,7 @@ type dfile struct {
 	gp      string     // guest path (resolved, rooted), for relative lookups
 	isDir   bool
 	stub    int         // the stub's host stdio fd this description is, or -1
+	feed    *stdinFeed  // the run's stdin filled by a feed: a read asks it, any other use streams it
 	tty     bool        // a host terminal
 	dents   []dirent    // merged directory listing, built on first getdents64
 	dpos    int         // cursor into dents
@@ -799,6 +801,15 @@ func newFtable() *ftable {
 }
 
 func (t *ftable) get(fd int) (*dfile, bool) {
+	d, ok := t.lookup(fd)
+	if ok && d.feed != nil {
+		d.feed.stream()
+	}
+	return d, ok
+}
+
+// lookup is get for a read of the run's stdin, which asks its feed itself.
+func (t *ftable) lookup(fd int) (*dfile, bool) {
 	fd = int(int32(fd)) // a Linux fd argument is an int: the upper half is not part of it
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -966,7 +977,11 @@ func newDguest(fs *dfs, ch *hostChan, mem []byte, slot int, cfg Config) *dguest 
 	g := &dguest{dfs: fs, cfg: cfg, ch: ch, mem: mem, slot: slot, ft: newFtable(), pfs: newProcFs(), pi: fs.pst.boot}
 	for fd, f := range []any{cfg.Stdin, cfg.Stdout, cfg.Stderr} {
 		hf, _ := f.(*os.File)
-		g.ft.installAt(fd, stdioFile(hf, fd))
+		d := stdioFile(hf, fd)
+		if fd == 0 && fs.feed != nil && hf == fs.feed.in {
+			d.feed = fs.feed
+		}
+		g.ft.installAt(fd, d)
 	}
 	return g
 }
@@ -1377,7 +1392,7 @@ func (g *dguest) file(fd int64) (*dfile, lxErrno) {
 // do the IO on, or -1 when the supervisor must: not stdio, O_NONBLOCK (the
 // host fd is blocking), or a terminal (the stub's background reads stop it).
 func (g *dguest) stubFd(fd int64) int {
-	if d, ok := g.ft.get(int(fd)); ok && d.stub >= 0 && !d.tty && !d.nonblock.Load() {
+	if d, ok := g.ft.lookup(int(fd)); ok && d.stub >= 0 && !d.tty && !d.nonblock.Load() && d.feed == nil {
 		return d.stub
 	}
 	return -1
@@ -1521,13 +1536,17 @@ func (g *dguest) gatherPrefix(v [][2]uint64, off int, buf []byte) int {
 }
 
 func (g *dguest) read(fd int64, bufAddr uint64, n int64) int64 {
-	if d, ok := g.ft.get(int(fd)); ok && d.vf != nil {
+	d, ok := g.ft.lookup(int(fd))
+	if ok && d.vf != nil {
 		if n < 0 {
 			return sErr(lxEINVAL)
 		}
 		return g.regRead(d, [][2]uint64{{bufAddr, uint64(n)}}, -1)
 	}
-	d, e := g.file(fd)
+	var e lxErrno
+	if !ok || d.f == nil {
+		d, e = nil, lxEBADF
+	}
 	if e != 0 {
 		if r, ok := g.memRead(fd, bufAddr, n); ok {
 			return r

@@ -23,6 +23,7 @@ type stdio struct {
 	own   []*os.File // ours to close once the guest is gone
 	pumps []pump     // the output copiers
 	wg    sync.WaitGroup
+	feed  *stdinFeed // the copier of a stdin reader that is not a file
 
 	term   Terminal // set for WithTerminal: the guest runs on a pty bridged to it
 	master *os.File
@@ -55,12 +56,9 @@ func newStdio(cfg Config) (*stdio, error) {
 		if err != nil {
 			return nil, err
 		}
+		s.feed = newStdinFeed(r, pr, pw)
 		s.files[0] = pr
 		s.own = append(s.own, pr)
-		go func() {
-			io.Copy(pw, r)
-			pw.Close()
-		}()
 	}
 	for i, w := range []io.Writer{cfg.Stdout, cfg.Stderr} {
 		fd := i + 1
@@ -117,6 +115,9 @@ func (s *stdio) finish() {
 	}
 	for _, f := range s.own {
 		f.Close()
+	}
+	if s.feed != nil {
+		s.feed.stop()
 	}
 	for _, p := range s.pumps {
 		p.r.SetReadDeadline(time.Now())
@@ -176,8 +177,19 @@ func (fs *dfs) serveResize(s *stdio) {
 		return
 	}
 	slaveFd := int(s.slave.Fd())
+	resizes := r.Resizes()
 	go func() {
-		for ws := range r.Resizes() {
+		for {
+			var ws WinSize
+			select {
+			case <-fs.done:
+				return
+			case w, ok := <-resizes:
+				if !ok {
+					return
+				}
+				ws = w
+			}
 			unix.IoctlSetWinsize(int(s.master.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: ws.Rows, Col: ws.Cols})
 			pgrp := 1 // the guest's init session group, when none is set for job control
 			if ctl := fs.cttyOf(slaveFd); ctl != nil && ctl.pgrp > 0 {

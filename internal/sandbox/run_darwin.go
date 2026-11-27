@@ -423,6 +423,7 @@ func Run(ctx context.Context, path string, cfg Config) (int, error) {
 		return 0, err
 	}
 	defer std.finish()
+	fs.feed = std.feed
 	stdin, stdout, stderr := std.files[0], std.files[1], std.files[2]
 	cfg.Stdin, cfg.Stdout, cfg.Stderr = stdin, stdout, stderr
 	var term *ttyGuard

@@ -569,6 +569,9 @@ func (g *dguest) reopen(d *dfile, flags int64) (*dfile, lxErrno) {
 		if acc == own && flags&lxONonblock == 0 {
 			return d, 0
 		}
+		if d.feed != nil {
+			d.feed.stream() // the new description reads the pipe without asking
+		}
 		var h *os.File
 		if d.stub < 3 {
 			h = g.pst.stdio[d.stub]

@@ -92,7 +92,7 @@ func (g *dguest) stdioMask() uint64 {
 			continue
 		}
 		m |= 1 << (stdioWriteBits + i)
-		if !d.tty {
+		if !d.tty && d.feed == nil {
 			m |= 1 << (stdioReadBits + i)
 		}
 	}
@@ -108,6 +108,16 @@ func (g *dguest) stdioMask() uint64 {
 // A regular file never waits. Neither does a blocking read of a terminal in
 // non-canonical mode with VMIN 0: the host read applies VTIME itself.
 func (g *dguest) stdioRead(d *dfile, bufAddr uint64, n int64) int64 {
+	if d.feed == nil || n == 0 {
+		return g.stdioReadHost(d, bufAddr, n)
+	}
+	d.feed.want(int(n))
+	r := g.stdioReadHost(d, bufAddr, n)
+	d.feed.done(r >= 0)
+	return r
+}
+
+func (g *dguest) stdioReadHost(d *dfile, bufAddr uint64, n int64) int64 {
 	fd := hostFd(d.f)
 	r, watch := pollReqOf(d)
 	nonblock := d.nonblock.Load()

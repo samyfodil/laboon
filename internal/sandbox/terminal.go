@@ -14,7 +14,9 @@ type WinSize struct{ Rows, Cols uint16 }
 // error (the far side went away) laboon ends the run. Any io.ReadWriteCloser
 // works — a net.Conn, a websocket adapter, a pair of pipes — so an app wires a
 // confined shell to its own transport without touching a pty itself. A Terminal
-// that also implements Resizer is told the window size.
+// that also implements Resizer is told the window size. Close must make a
+// Read in progress return: laboon's input copier is blocked in one when the
+// program exits, and it is gone only once that Read returns.
 type Terminal interface {
 	io.ReadWriteCloser
 }
