@@ -34,3 +34,27 @@ func TestSiteSetSnapshots(t *testing.T) {
 		t.Fatal("reset reached the fork")
 	}
 }
+
+// Sites added one call at a time stay findable while the runs that hold
+// them stay few: each is under half the length of the one before it.
+func TestSiteSetRuns(t *testing.T) {
+	var s siteSet
+	const n = 5000
+	for i := range n {
+		s.add([]uint64{uint64(i*7919%n) * 2})
+		if i%3 == 0 {
+			s.add([]uint64{uint64(i*7919%n) * 2})
+		}
+	}
+	m := s.load().more
+	for k := 1; k < len(m); k++ {
+		if len(m[k]) > len(m[k-1])/2 {
+			t.Fatalf("run %d holds %d sites after one of %d", k, len(m[k]), len(m[k-1]))
+		}
+	}
+	for i := range uint64(n) {
+		if !s.load().has(2*i) || s.load().has(2*i+1) {
+			t.Fatalf("site lookup wrong around %d", 2*i)
+		}
+	}
+}
