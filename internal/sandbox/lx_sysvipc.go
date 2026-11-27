@@ -92,9 +92,10 @@ const (
 	msgPool    = 64 << 20
 )
 
-// ipcLimits are a namespace's segment bounds in the guest's pages, as
-// IPC_INFO and /proc/sys/kernel report them. A memory cap (Config.MaxBytes)
-// also caps the segments' total.
+// ipcLimits are the segment bounds in the calling process's pages, as
+// IPC_INFO and /proc/sys/kernel report them to it: on darwin each exec picks
+// its own page size, so they are computed per call over a total kept in
+// bytes. A memory cap (Config.MaxBytes) also caps the segments' total.
 type ipcLimits struct {
 	page   uint64
 	shmMax uint64 // bytes in one segment
@@ -154,9 +155,8 @@ type ipcNS struct {
 	msg  map[int]*msgQueue
 	keys [3]map[int32]int
 	next [3]int
-	lim  ipcLimits
-	// shmTot counts the pages of every segment, semUsed every semaphore and
-	// msgBytes every queued message's charge.
+	// shmTot counts the bytes of every segment's pages, semUsed every
+	// semaphore and msgBytes every queued message's charge.
 	shmTot   uint64
 	semUsed  int
 	msgBytes uint64
@@ -175,7 +175,7 @@ func (g *dguest) ipc() *ipcNS {
 	defer ipcSpaces.Unlock()
 	ns := ipcSpaces.m[g.dfs]
 	if ns == nil {
-		ns = &ipcNS{shm: map[int]*shmSeg{}, sem: map[int]*semSet{}, msg: map[int]*msgQueue{}, undo: map[*memProc]bool{}, lim: g.ipcLimits()}
+		ns = &ipcNS{shm: map[int]*shmSeg{}, sem: map[int]*semSet{}, msg: map[int]*msgQueue{}, undo: map[*memProc]bool{}}
 		for i := range ns.keys {
 			ns.keys[i] = map[int32]int{}
 		}
@@ -272,6 +272,7 @@ func now() int64 { return time.Now().Unix() }
 type shmSeg struct {
 	perm    ipcPerm
 	size    uint64
+	charge  uint64 // its pages in its creator's page size, in bytes
 	d       *dfile
 	atime   int64
 	dtime   int64
@@ -301,11 +302,12 @@ func (ns *ipcNS) shmget(g *dguest, key int32, size uint64, flg int64) int64 {
 		}
 		return int64(id)
 	}
-	if size < 1 || size > ns.lim.shmMax {
+	l := g.ipcLimits()
+	if size < 1 || size > l.shmMax {
 		return sErr(lxEINVAL)
 	}
-	pages := ns.lim.pages(size)
-	if ns.shmTot+pages > ns.lim.shmAll || len(ns.shm) >= shmMni {
+	charge := l.pages(size) * l.page
+	if ns.shmTot+charge > l.shmAll*l.page || len(ns.shm) >= shmMni {
 		return sErr(lxENOSPC)
 	}
 	f, err := os.CreateTemp(g.dfs.tmpDir, "lc-shm-")
@@ -320,8 +322,8 @@ func (ns *ipcNS) shmget(g *dguest, key int32, size uint64, flg int64) int64 {
 	d := &dfile{f: f, gp: "SYSV", stub: -1}
 	d.refs.Add(1)
 	id = ns.newID(kShm, key)
-	ns.shmTot += pages
-	ns.shm[id] = &shmSeg{perm: ipcPerm{key: key, mode: uint32(flg & 0o777)}, size: size, d: d, ctime: now(), cpid: g.tgid}
+	ns.shmTot += charge
+	ns.shm[id] = &shmSeg{perm: ipcPerm{key: key, mode: uint32(flg & 0o777)}, size: size, charge: charge, d: d, ctime: now(), cpid: g.tgid}
 	return int64(id)
 }
 
@@ -404,7 +406,7 @@ func (ns *ipcNS) detach(pid int, at *shmAttach) {
 func (ns *ipcNS) destroyShm(id int, s *shmSeg) {
 	if ns.shm[id] == s {
 		delete(ns.shm, id)
-		ns.shmTot -= ns.lim.pages(s.size)
+		ns.shmTot -= s.charge
 		s.d.unref()
 	}
 }
@@ -413,20 +415,21 @@ func (ns *ipcNS) shmctl(g *dguest, id int, cmd int64, buf uint64) int64 {
 	cmd &^= ipc64
 	ns.mu.Lock()
 	defer ns.mu.Unlock()
+	l := g.ipcLimits()
 	switch cmd {
 	case ipcInfo:
 		var b [72]byte // struct shminfo64
-		put64(b[0:], ns.lim.shmMax)
+		put64(b[0:], l.shmMax)
 		put64(b[8:], 1)
 		put64(b[16:], shmMni)
 		put64(b[24:], shmMni)
-		put64(b[32:], ns.lim.shmAll)
+		put64(b[32:], l.shmAll)
 		return ns.out(g, buf, b[:], ns.maxIndex(kShm))
 	case shmInfo:
 		var b [48]byte // struct shm_info
 		put32(b[0:], uint32(len(ns.shm)))
-		put64(b[8:], ns.shmTot)
-		put64(b[16:], ns.shmTot)
+		put64(b[8:], l.pages(ns.shmTot))
+		put64(b[16:], l.pages(ns.shmTot))
 		return ns.out(g, buf, b[:], ns.maxIndex(kShm))
 	}
 	s := ns.shm[id]
