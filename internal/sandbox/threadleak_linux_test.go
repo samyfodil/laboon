@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -18,6 +19,10 @@ func TestThreadChurnHoldsNoMemory(t *testing.T) {
 	root, prog := guestRoot(t, "threadleak")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	before := map[int]bool{}
+	for _, pid := range descendants(os.Getpid()) {
+		before[pid] = true
+	}
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	done := make(chan struct{})
@@ -30,11 +35,15 @@ func TestThreadChurnHoldsNoMemory(t *testing.T) {
 	}()
 	var out strings.Builder
 	var sizes []uint64
+	stub := 0
 	sc := bufio.NewScanner(outR)
 	for sc.Scan() {
 		out.WriteString(sc.Text() + "\n")
 		if sc.Text() == "ready" {
-			sizes = append(sizes, largestStubOutsideWindow(t))
+			if stub == 0 {
+				stub = newStub(t, before)
+			}
+			sizes = append(sizes, outsideStubWindow(t, stub))
 			inW.Write([]byte{0})
 		}
 	}
@@ -49,34 +58,68 @@ func TestThreadChurnHoldsNoMemory(t *testing.T) {
 	}
 }
 
-// largestStubOutsideWindow is, over this process's descendants, the largest
-// total size of the host mappings that lie outside the stub window: the
-// guest's own and anything the stub maps for it there.
-func largestStubOutsideWindow(t *testing.T) uint64 {
+// newStub is the stub this test's Run started: of this process's
+// descendants absent from before that have a stub window, the first to
+// start. A stub an exec'd child ran in can still be on its way out.
+func newStub(t *testing.T, before map[int]bool) int {
 	t.Helper()
-	var best uint64
+	stub, first := 0, uint64(0)
 	for _, pid := range descendants(os.Getpid()) {
-		f, err := os.Open("/proc/" + strconv.Itoa(pid) + "/maps")
+		if before[pid] {
+			continue
+		}
+		if _, in, ok := stubMaps(pid); !ok || in == 0 {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 		if err != nil {
 			continue
 		}
-		var total uint64
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			lo, rest, _ := strings.Cut(sc.Text(), "-")
-			hi, _, _ := strings.Cut(rest, " ")
-			l, err1 := strconv.ParseUint(lo, 16, 64)
-			h, err2 := strconv.ParseUint(hi, 16, 64)
-			if err1 != nil || err2 != nil || (l >= stubLo && h <= stubHi) {
-				continue
-			}
-			total += h - l
+		f := strings.Fields(string(b[bytes.LastIndexByte(b, ')')+2:]))
+		start, err := strconv.ParseUint(f[19], 10, 64)
+		if err == nil && (stub == 0 || start < first) {
+			stub, first = pid, start
 		}
-		f.Close()
-		best = max(best, total)
 	}
-	if best == 0 {
-		t.Fatal("no stub process found")
+	if stub == 0 {
+		t.Fatal("no stub process of this run found")
 	}
-	return best
+	return stub
+}
+
+// outsideStubWindow is the total size of pid's host mappings that lie
+// outside the stub window: the guest's own and anything the stub maps for it
+// there.
+func outsideStubWindow(t *testing.T, pid int) uint64 {
+	t.Helper()
+	out, _, ok := stubMaps(pid)
+	if !ok {
+		t.Fatalf("stub %d is gone", pid)
+	}
+	return out
+}
+
+// stubMaps sums pid's host mappings outside and inside the stub window.
+func stubMaps(pid int) (out, in uint64, ok bool) {
+	f, err := os.Open("/proc/" + strconv.Itoa(pid) + "/maps")
+	if err != nil {
+		return 0, 0, false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		lo, rest, _ := strings.Cut(sc.Text(), "-")
+		hi, _, _ := strings.Cut(rest, " ")
+		l, err1 := strconv.ParseUint(lo, 16, 64)
+		h, err2 := strconv.ParseUint(hi, 16, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		if l >= stubLo && h <= stubHi {
+			in += h - l
+		} else {
+			out += h - l
+		}
+	}
+	return out, in, true
 }
