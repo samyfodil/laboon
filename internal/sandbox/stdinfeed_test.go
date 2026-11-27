@@ -92,7 +92,7 @@ func TestStdinReaderNotOutlived(t *testing.T) {
 		if given != c.take || inRead != 0 {
 			t.Errorf("%s %v: the reader gave %d bytes, want %d, and has %d Reads outstanding", c.name, c.args, given, c.take, inRead)
 		}
-		if n := hostPipes(); n != pipes {
+		if n := hostPipes(); n > pipes { // files earlier tests dropped may close on GC meanwhile
 			t.Errorf("%s %v: %d pipe fds after the run, %d before", c.name, c.args, n, pipes)
 		}
 		buf := make([]byte, 1<<20)
