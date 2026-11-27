@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -72,7 +74,7 @@ func newID() string {
 // attached connection (if any), and records the exit code.
 func (c *container) run(allowNet bool) {
 	defer close(c.done)
-	opts := []laboon.Option{laboon.WithStdout(c.frame(1)), laboon.WithStderr(c.frame(2))}
+	opts := []laboon.Option{laboon.WithStdout(c.frame(1)), laboon.WithStderr(c.frame(2)), laboon.WithCache(plans)}
 	if len(c.cmd) > 0 {
 		opts = append(opts, laboon.WithArgs(c.cmd...))
 	}
@@ -138,4 +140,16 @@ func (c *container) closeAttach() {
 		c.attachW.Close()
 		c.attachW = nil
 	}
+}
+
+// plans keeps rewrite plans in the user cache directory, shared by every run
+// in this process and by later processes.
+var plans = planCache()
+
+func planCache() *laboon.Cache {
+	d, err := os.UserCacheDir()
+	if err != nil {
+		return laboon.NewCache("")
+	}
+	return laboon.NewCache(filepath.Join(d, "laboon", "plans"))
 }

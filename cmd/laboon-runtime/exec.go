@@ -79,6 +79,7 @@ func runExec(rootfs, processFile string, stdin *os.File, stdout, stderr *os.File
 	}
 	prog, opts := procOptions(p, rootfs, stdin, stdout, stderr)
 	code, err := laboon.Run(context.Background(), prog, opts...)
+	plans.Sync()
 	if err != nil {
 		die(err)
 	}

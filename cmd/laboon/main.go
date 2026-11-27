@@ -161,8 +161,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
+	plans := planCache()
 	opts := []laboon.Option{
 		laboon.WithStdio(os.Stdin, os.Stdout, os.Stderr),
+		laboon.WithCache(plans),
 		laboon.WithAllowDomains(splitList(*allowDomains)...),
 		laboon.WithAllowCIDRs(splitList(*allowCIDRs)...),
 	}
@@ -239,10 +241,21 @@ func main() {
 	if os.Getenv("LABOON_CPUPROFILE") != "" {
 		pprof.StopCPUProfile() // flush before any error exit, so a signal-stopped run still profiles
 	}
+	plans.Sync()
 	if err != nil {
 		fail(err)
 	}
 	os.Exit(code)
+}
+
+// planCache keeps rewrite plans in the user cache directory, so a later run
+// starts without re-analyzing the same binaries.
+func planCache() *laboon.Cache {
+	d, err := os.UserCacheDir()
+	if err != nil {
+		return laboon.NewCache("")
+	}
+	return laboon.NewCache(filepath.Join(d, "laboon", "plans"))
 }
 
 func fail(err error) {

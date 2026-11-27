@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -110,7 +111,7 @@ func (c *toolConfig) run(ctx context.Context, _ *mcp.CallToolRequest, in runInpu
 	var stdout, stderr capped
 	stdout.limit, stderr.limit = c.maxOutput, c.maxOutput
 
-	opts := []laboon.Option{laboon.WithStdout(&stdout), laboon.WithStderr(&stderr)}
+	opts := []laboon.Option{laboon.WithStdout(&stdout), laboon.WithStderr(&stderr), laboon.WithCache(plans)}
 	if len(in.Command) > 0 {
 		opts = append(opts, laboon.WithArgs(in.Command...))
 	}
@@ -201,4 +202,16 @@ func (w *capped) String() string {
 		s += fmt.Sprintf("\n... [%d more bytes truncated]", w.dropped)
 	}
 	return s
+}
+
+// plans keeps rewrite plans in the user cache directory, shared by every run
+// in this process and by later processes.
+var plans = planCache()
+
+func planCache() *laboon.Cache {
+	d, err := os.UserCacheDir()
+	if err != nil {
+		return laboon.NewCache("")
+	}
+	return laboon.NewCache(filepath.Join(d, "laboon", "plans"))
 }

@@ -128,7 +128,8 @@ const codeSalt = "linux-a64-code-2"
 // rewriteCode rewrites code made executable at run time. Code mapped from an
 // ELF file (a shared library) gets the same whole-file analysis as an image;
 // anonymous code has no symbols, so descent starts at its first byte and the
-// inlined-syscall heuristic covers the rest.
+// inlined-syscall heuristic covers the rest. Its sites are kept only in memory
+// unless a file is behind it.
 func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *codeSource) {
 	w := cw.(*rewrite.A64Rewriter)
 	if src != nil {
@@ -137,7 +138,11 @@ func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *cod
 			return
 		}
 	}
-	offs, err := g.cfg.Cache.Offsets(codeSalt, code, func() ([]uint32, error) {
+	memo := g.cfg.Cache.AnonOffsets
+	if _, ok := src.identity(); ok {
+		memo = g.cfg.Cache.Offsets
+	}
+	offs, err := memo(codeSalt, code, func() ([]uint32, error) {
 		var out []uint32
 		for _, o := range rewrite.A64SegmentSites(code, 0, []uint64{0}, 0, uint64(len(code))) {
 			out = append(out, uint32(o))

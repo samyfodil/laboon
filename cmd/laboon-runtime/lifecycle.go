@@ -203,6 +203,7 @@ func cmdMonitor(args []string) int {
 	}()
 
 	code, _ := proc.Wait()
+	plans.Sync()
 	s.Status, s.ExitCode = "stopped", code
 	s.save(root)
 	return code // the shim reaps the monitor; its exit status is the container's

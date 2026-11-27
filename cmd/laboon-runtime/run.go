@@ -30,6 +30,18 @@ func specOptions(s *Spec, rootfs string, stdin io.Reader, stdout, stderr io.Writ
 	return prog, opts
 }
 
+// plans keeps rewrite plans in the user cache directory, so each container
+// process starts without re-analyzing the binaries the last one ran.
+var plans = planCache()
+
+func planCache() *laboon.Cache {
+	d, err := os.UserCacheDir()
+	if err != nil {
+		return laboon.NewCache("")
+	}
+	return laboon.NewCache(filepath.Join(d, "laboon", "plans"))
+}
+
 // procOptions maps an OCI process (the bundle's or an exec's) to a laboon run on
 // rootfs: program resolved on PATH, plus args, env, cwd, user and stdio.
 func procOptions(p *Process, rootfs string, stdin io.Reader, stdout, stderr io.Writer) (string, []laboon.Option) {
@@ -38,6 +50,7 @@ func procOptions(p *Process, rootfs string, stdin io.Reader, stdout, stderr io.W
 		laboon.WithMount("/", hostfs.Dir(rootfs)),
 		laboon.WithArgs(p.Args[1:]...),
 		laboon.WithStdio(stdin, stdout, stderr),
+		laboon.WithCache(plans),
 	}
 	if len(p.Env) > 0 {
 		opts = append(opts, laboon.WithEnv(p.Env...))
@@ -99,6 +112,7 @@ func cmdRun(args []string) int {
 	defer stop()
 	prog, opts := specOptions(s, rootfs, os.Stdin, os.Stdout, os.Stderr)
 	code, err := laboon.Run(ctx, prog, opts...)
+	plans.Sync()
 	if err != nil {
 		die(err)
 	}

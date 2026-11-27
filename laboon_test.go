@@ -18,7 +18,7 @@ import (
 func TestOptionsApply(t *testing.T) {
 	var in bytes.Buffer
 	var out, errw, tr bytes.Buffer
-	c := rewrite.DefaultCache()
+	c := rewrite.NewCache("")
 	o := newOptions([]Option{
 		WithStdin(&in), WithStdout(&out), WithStderr(&errw),
 		WithDir("/work"), WithMount("/", hostfs.Dir("/rootfs")), WithTrace(&tr),

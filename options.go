@@ -250,7 +250,9 @@ func WithMaxImageSize(bytes uint64) Option {
 }
 
 // WithCache memoizes syscall rewriting in c instead of the process-wide
-// default cache.
+// default, which keeps plans in memory only. Make c with NewCache, once, and
+// share it across runs; to keep plans across processes too, give NewCache a
+// directory.
 func WithCache(c *Cache) Option {
 	return func(o *options) { o.cfg.Cache = c }
 }
@@ -259,8 +261,16 @@ func WithCache(c *Cache) Option {
 // WithCache need not import an internal package.
 type Cache = rewrite.Cache
 
-// DefaultCache is the process-wide rewrite cache that WithCache replaces.
-func DefaultCache() *Cache { return rewrite.DefaultCache() }
+// NewCache returns a rewrite cache for WithCache. With a directory dir it
+// also keeps plans there, so a later process starts without re-analyzing
+// the same binaries; cmd/laboon uses the user cache directory's
+// laboon/plans. Plans for code made at run time with no file behind it (a
+// JIT's) stay in memory only. The directory is held to a bounded number of
+// files and bytes, least recently used out first, and files of an older
+// plan format are deleted. Writes happen in the background: call the
+// cache's Sync before the process exits so they are not lost. An empty dir
+// keeps plans in memory only.
+func NewCache(dir string) *Cache { return rewrite.NewCache(dir) }
 
 // WithNoRewrite skips syscall rewriting, so the guest's syscalls reach the
 // backstop, which kills it (ErrKilled). It exists to demonstrate the backstop.

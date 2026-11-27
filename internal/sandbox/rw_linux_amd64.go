@@ -160,7 +160,8 @@ const codeSalt = "linux-amd64-code-3"
 // data in its text); a non-ELF region or a stale/closed fd (a JIT region
 // re-protected after its file was closed) descends from the region start and
 // scavenges, leaving any syscall it cannot prove is code as a raw 0f 05 for
-// seccomp to catch loudly rather than patching a data word.
+// seccomp to catch loudly rather than patching a data word. A plan is kept by
+// the file's identity, or, for code with no file behind it, only in memory.
 func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *codeSource) {
 	id, ok := src.identity()
 	if src != nil && src.r != nil {
@@ -174,7 +175,7 @@ func (g *dguest) rewriteCode(cw codeRewriter, code []byte, addr uint64, src *cod
 		}
 	}
 	plan := func() (rewrite.Plan, error) {
-		return g.cfg.Cache.Entries(code, []int{0}, [][2]int{{0, len(code)}}), nil
+		return g.cfg.Cache.AnonEntries(code, []int{0}, [][2]int{{0, len(code)}}), nil
 	}
 	var p rewrite.Plan
 	if ok {

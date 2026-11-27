@@ -110,13 +110,15 @@ func TestPatchRun(t *testing.T) {
 
 func TestCacheRoundTrip(t *testing.T) {
 	code := []byte{0xb8, 0x3c, 0, 0, 0, 0x0f, 0x05, 0x89, 0xf8, 0x0f, 0x05, 0xc3}
-	c := &Cache{Dir: t.TempDir()}
+	dir := t.TempDir()
+	c := NewCache(dir)
 	want := Analyze(code)
 	if got := c.Plan(code); len(got.Sites) != 2 {
 		t.Fatalf("plan = %+v", got)
 	}
+	c.Sync()
 	// A fresh cache must load the same plan from disk.
-	got := (&Cache{Dir: c.Dir}).Plan(code)
+	got := NewCache(dir).Plan(code)
 	if len(got.Sites) != len(want.Sites) || got.Sites[0] != want.Sites[0] || got.Sites[1] != want.Sites[1] {
 		t.Fatalf("disk plan = %+v, want %+v", got, want)
 	}

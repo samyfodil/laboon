@@ -24,7 +24,7 @@ var ErrKilled = errors.New("guest killed by the syscall backstop: rejected sysca
 // mediate the guest's raw syscalls (windows/arm64).
 var errNoBackstop = errors.New("syscall rewriting cannot be turned off on this host: it has no syscall backstop")
 
-var defaultCache = sync.OnceValue(rewrite.DefaultCache)
+var defaultCache = sync.OnceValue(func() *rewrite.Cache { return rewrite.NewCache("") })
 
 // discarded reports whether w is a standard output stream that goes to the
 // null device.
@@ -89,8 +89,8 @@ type Config struct {
 	// Devices attach character devices to the guest, backed by the host, for a
 	// direct host-guest channel with no network. Each appears under /dev.
 	Devices []*Device
-	// Cache memoizes rewriting by code content. Nil uses
-	// rewrite.DefaultCache, shared by all runs in this process.
+	// Cache memoizes rewriting by code content. Nil uses an in-memory
+	// cache shared by all runs in this process.
 	Cache *rewrite.Cache
 	// NoRewrite skips syscall rewriting, so every guest syscall is a raw one
 	// that reaches the host's backstop: on Linux and macOS it is served
