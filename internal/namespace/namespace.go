@@ -539,9 +539,6 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, st *walkState, fl
 			if hops++; hops > maxSymlinkHops {
 				return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: ErrLoop}
 			}
-			if isLast {
-				st.lastLink = true
-			}
 			// A magic link names an object (an absolute target, or a token); a
 			// relative target on a MagicLinker is an ordinary symlink (/proc/self).
 			if m, ok := child.(MagicLinker); ok && o != nil {
@@ -555,10 +552,12 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, st *walkState, fl
 						if !isLast {
 							return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: ErrNotDir}
 						}
+						st.lastLink = true
 						cur = Loc{FS: cur.FS, Node: child, Path: childPath}
 						continue
 					}
 					next, err := ns.walk(tgt, true, hops, st, "", o.forLink(isLast))
+					st.lastLink = isLast
 					if err != nil {
 						return Loc{}, err
 					}
@@ -604,6 +603,9 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, st *walkState, fl
 			// passing st through propagates a mount a symlink target traverses
 			// (e.g. a /proc/self/fd link) so the outer result is not cached.
 			next, err := ns.walk(target, true, hops, st, symFloor, o.forLink(isLast))
+			// The target's walk set lastLink for its own final name; this
+			// frame's link is what counts here, also for a dangling one.
+			st.lastLink = isLast
 			if err != nil {
 				return Loc{}, err
 			}

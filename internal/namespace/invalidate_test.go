@@ -224,6 +224,54 @@ func TestResolveCacheFollowLast(t *testing.T) {
 	}
 }
 
+// TestResolveCacheLinkChain checks that a link followed partway through a path
+// whose target itself ends in a link does not count as the path's final link:
+// an lstat ending at a symlink must not answer a later stat, nor the reverse.
+func TestResolveCacheLinkChain(t *testing.T) {
+	ofs, c, ns := cacheTree(t, map[string]string{"f": "file", "d": ""})
+	root := mustLoc(t, ns, "/", true)
+	ddir := mustLoc(t, ns, "/d", true)
+	for _, l := range []struct {
+		dir          Node
+		name, target string
+	}{{root.Node, "l1", "/l2"}, {root.Node, "l2", "/d"}, {ddir.Node, "z", "/f"}, {ddir.Node, "dz", "/nope"}} {
+		if _, err := ofs.Create(l.dir, l.name, CreateSpec{Kind: Symlink, Target: l.target, Mode: 0o777}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(follow bool) {
+		t.Helper()
+		loc := mustLoc(t, ns, "/l1/z", follow)
+		want, path := Symlink, "/d/z"
+		if follow {
+			want, path = Reg, "/f"
+		}
+		if loc.Node.Kind() != want || loc.Path != path {
+			t.Fatalf("resolve /l1/z follow=%v = %q kind %v", follow, loc.Path, loc.Node.Kind())
+		}
+		if follow {
+			wantGone(t, ns, "/l1/dz")
+		} else if k := mustLoc(t, ns, "/l1/dz", false).Node.Kind(); k != Symlink {
+			t.Fatalf("lstat /l1/dz kind %v", k)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if i == 1 {
+			c.lookups.Store(0)
+		}
+		check(false)
+		check(true)
+	}
+	if n := c.lookups.Load(); n != 0 {
+		t.Errorf("cached lstat/stat of a link chain still made %d lookups", n)
+	}
+	ns.Invalidate()
+	for i := 0; i < 2; i++ {
+		check(true)
+		check(false)
+	}
+}
+
 // TestResolveCacheMount checks a mount and an unmount void entries under the
 // mount point, and nothing past a mount point is served from the cache.
 func TestResolveCacheMount(t *testing.T) {
