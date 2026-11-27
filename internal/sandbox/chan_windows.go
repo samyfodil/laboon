@@ -262,8 +262,39 @@ func (g *dguest) forceWriteMem(addr uint64, data []byte) error {
 		return nil
 	}
 	var put uintptr
-	if err := windows.WriteProcessMemory(g.ch.proc, uintptr(addr), &data[0], uintptr(len(data)), &put); err != nil || int(put) != len(data) {
-		return errFault
+	if err := windows.WriteProcessMemory(g.ch.proc, uintptr(addr), &data[0], uintptr(len(data)), &put); err == nil && int(put) == len(data) {
+		return nil
+	}
+	return writeCopy(g.ch.proc, addr, data)
+}
+
+// writeCopy writes data into pages of a copy-on-write view, a saved image's
+// code: WriteProcessMemory asks for a writable page, which such a view never
+// is, so each page is made copy-on-write for the write, which takes its
+// private copy, and given back its protection.
+func writeCopy(proc windows.Handle, addr uint64, data []byte) error {
+	for len(data) > 0 {
+		page := addr &^ (pageSize - 1)
+		n := min(uint64(len(data)), page+pageSize-addr)
+		var mbi windows.MemoryBasicInformation
+		if windows.VirtualQueryEx(proc, uintptr(page), &mbi, unsafe.Sizeof(mbi)) != nil || mbi.Type != memMapped {
+			return errFault
+		}
+		cow := uint32(windows.PAGE_WRITECOPY)
+		if mbi.Protect&(windows.PAGE_EXECUTE|windows.PAGE_EXECUTE_READ|windows.PAGE_EXECUTE_WRITECOPY) != 0 {
+			cow = windows.PAGE_EXECUTE_WRITECOPY
+		}
+		var old uint32
+		if windows.VirtualProtectEx(proc, uintptr(page), pageSize, cow, &old) != nil {
+			return errFault
+		}
+		ok := ntWrite(proc, addr, data[:n])
+		windows.VirtualProtectEx(proc, uintptr(page), pageSize, old, &old)
+		procFlushInstructionCache.Call(uintptr(proc), uintptr(page), pageSize)
+		if !ok {
+			return errFault
+		}
+		addr, data = addr+n, data[n:]
 	}
 	return nil
 }

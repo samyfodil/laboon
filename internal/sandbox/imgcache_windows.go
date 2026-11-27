@@ -138,7 +138,9 @@ func cachedImage(st *imgStore, name string) *wimage {
 			return nil
 		}
 	}
-	sec, err := windows.CreateFileMapping(h, nil, windows.PAGE_EXECUTE_READ, uint32(m.View>>32), uint32(m.View), nil)
+	// Copy-on-write, so a write into the code (a ptrace breakpoint, a guest
+	// that makes its text writable) takes a private copy of the page.
+	sec, err := windows.CreateFileMapping(h, nil, windows.PAGE_EXECUTE_WRITECOPY, uint32(m.View>>32), uint32(m.View), nil)
 	if err != nil {
 		return nil
 	}
@@ -233,7 +235,7 @@ func (g *wguest) mapImageView(img *wimage) error {
 	base, size = uintptr(lo), uintptr(mid-lo)
 	var off int64
 	if st, _, _ := procNtMapViewOfSectionEx.Call(uintptr(img.view.sec), proc, uintptr(unsafe.Pointer(&base)),
-		uintptr(unsafe.Pointer(&off)), uintptr(unsafe.Pointer(&size)), memReplacePlaceholder, windows.PAGE_EXECUTE_READ, 0, 0); st != 0 {
+		uintptr(unsafe.Pointer(&off)), uintptr(unsafe.Pointer(&size)), memReplacePlaceholder, windows.PAGE_EXECUTE_WRITECOPY, 0, 0); st != 0 {
 		return ntErr("map image", st)
 	}
 	if mid < hi {
