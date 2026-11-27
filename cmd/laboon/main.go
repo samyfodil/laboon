@@ -257,6 +257,9 @@ func planCache() *laboon.Cache {
 	if err != nil {
 		return laboon.NewCache("")
 	}
+	// Windows kept prepared images here, unbounded, before they moved
+	// into the plan cache.
+	os.RemoveAll(filepath.Join(d, "laboon", "img"))
 	return laboon.NewCache(filepath.Join(d, "laboon", "plans"))
 }
 
