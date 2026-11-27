@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"bytes"
-	"container/list"
 	"errors"
 	"io"
 	"io/fs"
@@ -16,30 +15,26 @@ import (
 
 // imgStore bounds a directory of prepared images (imgcache_windows.go). An
 // entry is two files, the image named by its key and its metadata beside it
-// with imgMetaExt; the metadata's mtime is the entry's last use. The
-// directory is listed once per process, on its first save; from then on the
-// process keeps the count, the bytes and the least-recently-used order itself
-// and prunes on each save, so a run that only maps entries never lists it.
-// Processes sharing the directory each hold it near the bound as they see it.
+// with imgMetaExt; the metadata's mtime is the entry's last use. Each save
+// lists the directory and prunes it, so every process sharing it holds it to
+// one bound; a run that only maps entries never lists it. A save already
+// writes a whole image, so the listing costs it little.
 //
-// A file in use cannot be deleted on Windows (a run has its view mapped):
-// such an entry is skipped and stays indexed, and the next one goes instead.
+// A file in use cannot be deleted on Windows (a run has its view mapped, a
+// writer has its temporary open): such an entry is skipped, and the next one
+// goes instead.
 type imgStore struct {
 	dir      string
 	maxFiles int
 	maxBytes int64
 	remove   func(string) error
-
-	mu      sync.Mutex
-	scanned bool
-	bytes   int64
-	lru     list.List // least recently used first: *imgEntry
-	idx     map[string]*list.Element
 }
 
 type imgEntry struct {
 	name string
 	size int64
+	used time.Time
+	meta bool
 }
 
 // Prepared images are as large as the programs' code, tens of MiB for a
@@ -51,78 +46,38 @@ const (
 	imgTempPfx  = ".img-"
 )
 
-var imgStores = struct {
-	sync.Mutex
-	m map[string]*imgStore
-}{m: map[string]*imgStore{}}
-
-// imgStoreAt is the process's store for dir, shared by every run using it.
-func imgStoreAt(dir string) *imgStore {
-	imgStores.Lock()
-	defer imgStores.Unlock()
-	s := imgStores.m[dir]
-	if s == nil {
-		s = newImgStore(dir, maxImgFiles, maxImgBytes)
-		imgStores.m[dir] = s
-	}
-	return s
-}
+// imgSaves serializes the process's prunes.
+var imgSaves sync.Mutex
 
 func newImgStore(dir string, maxFiles int, maxBytes int64) *imgStore {
-	return &imgStore{dir: dir, maxFiles: maxFiles, maxBytes: maxBytes, remove: os.Remove, idx: map[string]*list.Element{}}
+	return &imgStore{dir: dir, maxFiles: maxFiles, maxBytes: maxBytes, remove: os.Remove}
 }
 
 func (s *imgStore) path(name string) string { return filepath.Join(s.dir, name) }
 
-// used marks an entry just mapped as recently used, on disk for the next
-// process's listing and in this one's index.
+// used marks an entry just mapped as recently used.
 func (s *imgStore) used(name string) {
 	now := time.Now()
-	if os.Chtimes(s.path(name)+imgMetaExt, now, now) != nil {
-		return
-	}
-	s.mu.Lock()
-	if e := s.idx[name]; e != nil {
-		s.lru.MoveToBack(e)
-	}
-	s.mu.Unlock()
+	os.Chtimes(s.path(name)+imgMetaExt, now, now)
 }
 
 // fits reports whether an entry of size bytes may be stored at all.
 func (s *imgStore) fits(size int64) bool { return size <= s.maxBytes/4 }
 
-// saved records an entry just written, of size bytes in all, and prunes.
-func (s *imgStore) saved(name string, size int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.scanned {
-		s.scan()
-		s.scanned = true
-	}
-	if e := s.idx[name]; e != nil {
-		ent := e.Value.(*imgEntry)
-		s.bytes += size - ent.size
-		ent.size = size
-		s.lru.MoveToBack(e)
-	} else {
-		s.idx[name] = s.lru.PushBack(&imgEntry{name, size})
-		s.bytes += size
-	}
-	s.prune(name)
-}
-
-// prune deletes the least recently used entries past the bounds, never keep
-// (the one just saved). An entry whose image will not go is in use and stays.
-func (s *imgStore) prune(keep string) {
-	for e := s.lru.Front(); e != nil && (s.lru.Len() > s.maxFiles || s.bytes > s.maxBytes); {
-		next := e.Next()
-		ent := e.Value.(*imgEntry)
-		if ent.name != keep && s.drop(ent.name) {
-			s.lru.Remove(e)
-			delete(s.idx, ent.name)
-			s.bytes -= ent.size
+// saved prunes the directory after name was written, never deleting name.
+func (s *imgStore) saved(name string) {
+	imgSaves.Lock()
+	defer imgSaves.Unlock()
+	ents, total := s.scan()
+	n := len(ents)
+	for _, e := range ents {
+		if n <= s.maxFiles && total <= s.maxBytes {
+			return
 		}
-		e = next
+		if e.name != name && s.drop(e.name) {
+			n--
+			total -= e.size
+		}
 	}
 }
 
@@ -136,23 +91,18 @@ func (s *imgStore) drop(name string) bool {
 	return true
 }
 
-// scan indexes the directory's entries, oldest use first, and deletes the
-// temporaries of writers that died before renaming (one still being written
-// by another process is open, so on Windows it stays; elsewhere that write
-// is lost, which only costs a later run the work).
-func (s *imgStore) scan() {
-	ents, err := os.ReadDir(s.dir)
+// scan lists the directory's entries, oldest use first, with their total
+// size, and deletes the temporaries of writers that died before renaming.
+func (s *imgStore) scan() ([]*imgEntry, int64) {
+	dents, err := os.ReadDir(s.dir)
 	if err != nil {
-		return
+		return nil, 0
 	}
-	type found struct {
-		size int64
-		used time.Time
-		meta bool
-	}
-	byName := map[string]*found{}
-	for _, e := range ents {
-		n := e.Name()
+	byName := map[string]*imgEntry{}
+	var ents []*imgEntry
+	var total int64
+	for _, d := range dents {
+		n := d.Name()
 		if strings.HasPrefix(n, imgTempPfx) {
 			s.remove(s.path(n))
 			continue
@@ -161,31 +111,24 @@ func (s *imgStore) scan() {
 		if !isImgName(key) {
 			continue
 		}
-		fi, err := e.Info()
+		fi, err := d.Info()
 		if err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
-		f := byName[key]
-		if f == nil {
-			f = &found{}
-			byName[key] = f
+		e := byName[key]
+		if e == nil {
+			e = &imgEntry{name: key}
+			byName[key] = e
+			ents = append(ents, e)
 		}
-		f.size += fi.Size()
-		if meta || !f.meta {
-			f.used, f.meta = fi.ModTime(), meta
-		}
-	}
-	names := make([]string, 0, len(byName))
-	for n := range byName {
-		if s.idx[n] == nil {
-			names = append(names, n)
+		e.size += fi.Size()
+		total += fi.Size()
+		if meta || !e.meta {
+			e.used, e.meta = fi.ModTime(), meta
 		}
 	}
-	sort.Slice(names, func(i, j int) bool { return byName[names[i]].used.Before(byName[names[j]].used) })
-	for _, n := range names {
-		s.idx[n] = s.lru.PushBack(&imgEntry{n, byName[n].size})
-		s.bytes += byName[n].size
-	}
+	sort.Slice(ents, func(i, j int) bool { return ents[i].used.Before(ents[j].used) })
+	return ents, total
 }
 
 func isImgName(s string) bool {

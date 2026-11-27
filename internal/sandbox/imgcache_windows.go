@@ -106,7 +106,7 @@ func (g *wguest) imgEntryOf(src imageSrc) (*imgStore, string) {
 		b = append(b, 's')
 	}
 	h := sha256.Sum256(b)
-	return imgStoreAt(filepath.Join(g.cache.Dir(), "img")), hex.EncodeToString(h[:16])
+	return newImgStore(filepath.Join(g.cache.Dir(), "img"), maxImgFiles, maxImgBytes), hex.EncodeToString(h[:16])
 }
 
 // cachedImage returns the image stored as name, with its view, or nil.
@@ -192,7 +192,7 @@ func saveImage(st *imgStore, name string, img *wimage, view uint64) {
 	if writeImgAtomic(path+imgMetaExt, mb, nil) != nil {
 		return
 	}
-	st.saved(name, size)
+	st.saved(name)
 }
 
 var (
