@@ -5,6 +5,7 @@ import (
 	"syscall"
 
 	"github.com/samyfodil/laboon/core"
+	"github.com/samyfodil/laboon/filesystems/hostfs"
 )
 
 // This file is laboon's file layer: the operations the kernel's fd/file code
@@ -61,10 +62,18 @@ func (d *dfile) content() io.ReaderAt {
 
 // size0 is the file's current logical size (for SEEK_END, O_APPEND and fstat):
 // from the live backing if there is one, else the open file itself, which stays
-// right after the file is unlinked or replaced.
+// right after the file is unlinked or replaced. A file held only as a host
+// descriptor (a memfd's) is sized from that.
 func (d *dfile) size0() (int64, error) {
 	if sb := d.shared(); sb != nil {
 		return sb.size0(), nil
+	}
+	if d.vf == nil && d.f != nil {
+		fi, err := hostfs.FileStat(d.f)
+		if err != nil {
+			return 0, err
+		}
+		return fi.Size(), nil
 	}
 	info, err := d.vf.Stat()
 	if err != nil {
