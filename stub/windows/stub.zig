@@ -111,7 +111,7 @@ const REP_ADOPT: u64 = 13; // a pooled stub moves to the slot at offset args[0]
 const REP_WRITABLE: u64 = 15; // make [args[0], +args[1]) writable for the supervisor's write, reply MSG_HOSTRET: ret 1 when the guest may not write all of it, 2 when a page of it is frozen for memory another process runs (mem.makeWritable)
 const REP_CODE: u64 = 23; // the service thread: serve the shared-code registry's request (mem.serveCode)
 const MSG_HOSTRET: u64 = 3;
-const SCRATCH_OFF: u64 = 128;
+pub const SCRATCH_OFF: u64 = 128;
 const ST_REQ: u32 = 1;
 const ST_REP: u32 = 2;
 const SPIN = 20000;
@@ -561,6 +561,7 @@ pub export fn wWinMainCRTStartup() callconv(win.WINAPI) noreturn {
     arch.tebStore(0x10, ch.args[2] - GUEST_STACK);
     arch.tebStore(0x1478, ch.args[2] - GUEST_STACK);
     mem.init(ch.args[4], ch.args[5], ch.args[3]);
+    if (!mem.adoptImages()) die(0xE0000012);
     const entry = ch.args[0];
     const sp = ch.args[1];
     setVdso(sp, mem.mapVdso());

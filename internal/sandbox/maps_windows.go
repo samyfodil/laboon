@@ -9,9 +9,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// hostMaps lists the guest's mappings: the stub's mmap area and heap, and
-// the images and main stack the supervisor placed, split where the page
-// protection changes.
+// hostMaps lists the guest's mappings: what the stub's region table holds
+// (its mmap area, the images the supervisor placed, as their kinds and file
+// offsets, with the guest's protection) and its heap, and the main stack.
 // otherMaps has nothing to add for another process: its mappings are read the
 // usual way.
 func (g *dguest) otherMaps(p *dguest) ([]mapEnt, bool) { return nil, false }
@@ -26,34 +26,21 @@ func (g *dguest) hostMaps() ([]mapEnt, bool) {
 	if img == nil || w == nil {
 		return es, true
 	}
-	add := func(lo, hi, off, kind uint64) {
-		for a := lo; a < hi; {
-			var mbi windows.MemoryBasicInformation
-			if windows.VirtualQueryEx(w.sp.proc, uintptr(a), &mbi, unsafe.Sizeof(mbi)) != nil {
-				return
-			}
-			end := min(uint64(mbi.BaseAddress)+uint64(mbi.RegionSize), hi)
-			if mbi.State != memFree {
-				prot := uint64(0)
-				if mbi.State == windows.MEM_COMMIT {
-					prot = linuxProt(mbi.Protect)
-				}
-				es = append(es, mapEnt{lo: a, hi: end, off: off + a - lo, attr: kind<<8 | prot})
-			}
-			a = end
+	for a := img.stackLo; a < img.stackHi; {
+		var mbi windows.MemoryBasicInformation
+		if windows.VirtualQueryEx(w.sp.proc, uintptr(a), &mbi, unsafe.Sizeof(mbi)) != nil {
+			break
 		}
-	}
-	for _, s := range w.segs {
-		kind := s.attr
-		if kind == mapFile {
-			kind = mapMain
-			if s.lo >= img.interpLo && s.hi <= img.interpHi {
-				kind = mapInterp
+		end := min(uint64(mbi.BaseAddress)+uint64(mbi.RegionSize), img.stackHi)
+		if mbi.State != memFree {
+			prot := uint64(0)
+			if mbi.State == windows.MEM_COMMIT {
+				prot = linuxProt(mbi.Protect)
 			}
+			es = append(es, mapEnt{lo: a, hi: end, attr: mapStack<<8 | prot})
 		}
-		add(s.lo, s.hi, s.off, kind)
+		a = end
 	}
-	add(img.stackLo, img.stackHi, 0, mapStack)
 	sort.Slice(es, func(i, j int) bool { return es[i].lo < es[j].lo })
 	return es, true
 }

@@ -47,6 +47,7 @@ type imgMeta struct {
 	Prots                            [][3]uint64
 	Segs                             [][5]uint64
 	Traps                            []uint64
+	Tramps                           [][2]uint64
 }
 
 // buildKey names what a prepared image depends on besides its file: the
@@ -75,7 +76,7 @@ var buildKey = sync.OnceValue(func() []byte {
 })
 
 // imgCacheVersion changes when what an entry holds does.
-const imgCacheVersion = 2
+const imgCacheVersion = 3
 
 func idBytes(id rewrite.FileID) []byte {
 	b := binary.LittleEndian.AppendUint64(nil, id.Dev)
@@ -152,6 +153,9 @@ func cachedImage(st *imgStore, name string) *wimage {
 	for _, s := range m.Segs {
 		img.segs = append(img.segs, mapEnt{s[0], s[1], s[2], s[3], s[4]})
 	}
+	for _, t := range m.Tramps {
+		img.tramps = append(img.tramps, trampArea{t[0], t[1]})
+	}
 	st.used(name)
 	return img
 }
@@ -174,6 +178,9 @@ func saveImage(st *imgStore, name string, img *wimage, view uint64) {
 	}
 	for _, s := range img.segs {
 		m.Segs = append(m.Segs, [5]uint64{s.lo, s.hi, s.off, s.aux, s.attr})
+	}
+	for _, t := range img.tramps {
+		m.Tramps = append(m.Tramps, [2]uint64{t.base, t.size})
 	}
 	mb, err := json.Marshal(m)
 	if err != nil {

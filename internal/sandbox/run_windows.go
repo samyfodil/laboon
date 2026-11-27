@@ -406,6 +406,13 @@ func (r *procRun) boot(dg *dguest, src imageSrc, argv, env []string, ready func(
 	if lay.legacy {
 		edge |= 1
 	}
+	regions := img.regions(mapMain)
+	if interp != nil {
+		regions = append(regions, interp.regions(mapInterp)...)
+	}
+	if err := putImgRegions(dg.scratch(), regions); err != nil {
+		return w, err
+	}
 	pg.args = [6]uint64{entry, gsp, top, edge, w.brkAt, w.brkEnd}
 	ch.reply(repStart)
 	return w, nil
@@ -541,6 +548,7 @@ type wimage struct {
 	segs               []mapEnt // its PT_LOADs for /proc/<pid>/maps: range and file offset
 	view               *imgView // from the image cache: bytes is then only what follows the view
 	traps              []uint64 // where the rewriter left traps in it (traps_windows.go)
+	tramps             []trampArea
 }
 
 type wrun struct {
@@ -564,6 +572,9 @@ func (img *wimage) relocate(d uint64) {
 	}
 	for i := range img.traps {
 		img.traps[i] += d
+	}
+	for i := range img.tramps {
+		img.tramps[i].base += d
 	}
 }
 
@@ -807,6 +818,7 @@ func (g *wguest) loadELF(src imageSrc, dynBias uint64) (*wimage, error) {
 		areas = append(areas, trampArea{at, size})
 	}
 	rw.place(areas)
+	img.tramps = areas
 	img.bytes = make([]byte, img.hi-img.lo)
 	// What a view of the cached image can hold: everything below the first
 	// writable segment, when no read-only one lies past it.

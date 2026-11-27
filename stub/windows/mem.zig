@@ -163,6 +163,10 @@ const Region = struct {
     shm: u64 = 0, // a SysV attachment cookie, for shmdt and exit accounting
     hot: bool = false, // a shadow of a view's page (anon, its view's fields kept): see "code in shared memory"
     vdso: bool = false, // the guest's vDSO (mapVdso)
+    image: bool = false, // of a program image the supervisor placed (adoptImages): not a placeholder, never unmapped
+    cow: bool = false, // image: a copy-on-write view of a saved image, which takes the write-copy protections
+    written: bool = false, // code: the guest made it writable since it was rewritten, so it runs only once rewritten again
+    mkind: u8 = 0, // image: what /proc/<pid>/maps lists it as (sandbox/lx_procgen.go), 0 for nothing
     fh: HANDLE = 0, // a shared file mapping's (view or eof) file, for what past its end it grows to reach, and its views to map again (detachFile)
 };
 
@@ -201,11 +205,66 @@ fn hostProt(i: usize, p: u64) u32 {
 }
 
 // ownCode reports whether region i, with protection p, is anonymous memory
-// the guest makes executable itself: not rewritten file code, a trampoline
-// area or the stub's own page.
+// the guest makes executable itself: not rewritten file code (unless the
+// guest has made it writable since), a trampoline area or the stub's own page.
 fn ownCode(i: usize, p: u64) bool {
     const r = regs[i];
-    return r.kind == .anon and p & PROT_EXEC != 0 and !r.code and !r.is_tramp and !r.pinned;
+    return r.kind == .anon and p & PROT_EXEC != 0 and (!r.code or r.written) and !r.is_tramp and !r.pinned;
+}
+
+// cowProt is protection w as a copy-on-write view takes it: a write makes the
+// page's private copy.
+fn cowProt(w: u32) u32 {
+    return switch (w) {
+        0x04 => 0x08,
+        0x40 => 0x80,
+        else => w,
+    };
+}
+
+// hostProtAt is hostProt as region i's memory takes it.
+fn hostProtAt(i: usize, p: u64) u32 {
+    const w = hostProt(i, p);
+    return if (regs[i].cow) cowProt(w) else w;
+}
+
+const IMG_CODE: u64 = 1 << 8;
+const IMG_TRAMP: u64 = 2 << 8;
+const IMG_COW: u64 = 4 << 8;
+
+// adoptImages takes the program images the supervisor placed into the table,
+// from the regions the start reply left in the scratch (count, then lo, hi,
+// attr, off, tramp, tramp2 each; sandbox/imgregions_windows.go), so the
+// guest changes their protection as any mapping's.
+pub fn adoptImages() bool {
+    const sc: [*]const u64 = @ptrCast(@alignCast(root.scratch()));
+    const n = sc[0];
+    if (n > (root.SLOT_SIZE - root.SCRATCH_OFF - 8) / 48) return false;
+    var k: usize = 0;
+    while (k < n) : (k += 1) {
+        const e = sc[1 + 6 * k ..][0..6];
+        const attr = e[2];
+        if (e[0] >= e[1] or e[0] & (PAGE - 1) != 0 or e[1] & (PAGE - 1) != 0) return false;
+        var i: usize = 0;
+        while (i < nreg and regs[i].lo < e[0]) : (i += 1) {}
+        if ((i < nreg and regs[i].lo < e[1]) or (i > 0 and regs[i - 1].hi > e[0])) return false;
+        if (!insertAt(i, .{
+            .lo = e[0],
+            .hi = e[1],
+            .kind = .anon,
+            .prot = attr & 7,
+            .sec = 0,
+            .off = e[3],
+            .code = attr & IMG_CODE != 0,
+            .tramp = e[4],
+            .tramp2 = e[5],
+            .is_tramp = attr & IMG_TRAMP != 0,
+            .image = true,
+            .cow = attr & IMG_COW != 0,
+            .mkind = @truncate(attr >> 16),
+        })) return false;
+    }
+    return true;
 }
 
 // emulated reports whether region i is such memory now.
@@ -446,6 +505,7 @@ fn mapView(i: usize, sec: HANDLE, off: u64, prot: u64, key: u64, size: u64) bool
 
 // release turns the part [lo, hi) of region i back into a free placeholder.
 fn release(i: usize, lo: u64, hi: u64) bool {
+    if (regs[i].image) return false;
     if (regs[i].hot and !cool(i)) return false;
     thawIn(lo, hi);
     const r = regs[i];
@@ -601,7 +661,7 @@ fn unmapRange(lo: u64, hi: u64) bool {
         if (i == nreg or regs[i].lo >= hi) break;
         const s = @max(a, regs[i].lo);
         const end = @min(hi, regs[i].hi);
-        if (regs[i].pinned) {
+        if (regs[i].pinned or regs[i].image) {
             a = end;
             continue;
         }
@@ -677,6 +737,7 @@ fn mark(lo: u64, hi: u64, tramp: u64, tramp2: u64) void {
     var i = find(lo);
     while (i < nreg and regs[i].lo < hi) : (i += 1) {
         regs[i].code = true;
+        regs[i].written = false;
         regs[i].tramp = tramp;
         regs[i].tramp2 = tramp2;
     }
@@ -966,10 +1027,18 @@ fn protect(lo: u64, hi: u64, prot: u64) bool {
             a = end;
             continue;
         }
+        if (regs[i].code and !regs[i].written and prot & PROT_WRITE != 0) {
+            // Rewritten code the guest may write runs, from now on, only once
+            // rewritten again, as code made executable at run time does: its
+            // trampolines stay, for the sites it keeps.
+            if (!splitAt(a) or !splitAt(end)) return false;
+            regs[find(a)].written = true;
+            continue;
+        }
         var b: usize = a;
         var s: usize = end - a;
         var old: u32 = 0;
-        if (regs[i].kind == .anon and prot != 0) {
+        if (regs[i].kind == .anon and prot != 0 and !regs[i].image) {
             if (NtAllocateVirtualMemory(SELF, &b, 0, &s, MEM_COMMIT, hostProt(i, prot)) < 0) return false;
             b = a;
             s = end - a;
@@ -997,7 +1066,7 @@ fn protect(lo: u64, hi: u64, prot: u64) bool {
             a = end;
             continue;
         }
-        const st = NtProtectVirtualMemory(SELF, &b, &s, if (regs[i].kind == .anon) hostProt(i, prot) else winProt(prot), &old);
+        const st = NtProtectVirtualMemory(SELF, &b, &s, if (regs[i].kind == .anon) hostProtAt(i, prot) else winProt(prot), &old);
         if (st < 0 and prot != 0) return false;
         if (!splitAt(a) or !splitAt(end)) return false;
         regs[find(a)].prot = prot;
@@ -1035,7 +1104,7 @@ fn mremap(old: u64, oldlen0: u64, newlen0: u64, flags: u64, newaddr: u64) u64 {
     if (!inArea(old, old + oldlen)) return neg(EINVAL);
     coolIn(old, old + oldlen);
     const i = find(old);
-    if (i == nreg or regs[i].kind != .anon) return neg(EINVAL);
+    if (i == nreg or regs[i].kind != .anon or regs[i].image) return neg(EINVAL);
     if (regs[i].vdso) return moveVdso(i, old, oldlen, newlen, flags, newaddr);
     const prot = regs[i].prot;
     // The range may span regions (a mapping grown in place is two): all
@@ -1147,7 +1216,7 @@ fn madvise(addr: u64, len0: u64, advice: u64) u64 {
         const i = find(a);
         if (i == nreg) break;
         const end = @min(hi, regs[i].hi);
-        if (regs[i].kind == .anon and regs[i].prot != 0 and !regs[i].code and !regs[i].is_tramp and !regs[i].pinned and !regs[i].hot) {
+        if (regs[i].kind == .anon and regs[i].prot != 0 and !regs[i].code and !regs[i].is_tramp and !regs[i].pinned and !regs[i].hot and !regs[i].image) {
             // Linux refills dropped anonymous pages with zeros; code made
             // executable at run time runs only once rewritten again.
             dropOwn(a, end, false);
@@ -1284,9 +1353,15 @@ pub fn maps(out: [*]MapEnt, cap: usize, from: u64, next: *u64) u64 {
     }
     for (regs[0..nreg]) |r| {
         if (r.kind == .free or r.pinned or r.hi <= from) continue;
+        if (r.image and r.mkind == 0) continue;
         if (n == cap) {
             next.* = r.lo;
             break;
+        }
+        if (r.image) {
+            out[n] = .{ .lo = r.lo, .hi = r.hi, .off = r.off, .aux = 0, .attr = @as(u64, r.mkind) << 8 | (r.prot & 7) };
+            n += 1;
+            continue;
         }
         const view = r.kind == .view or r.kind == .eof or r.hot;
         const shared: u64 = if (view and (r.prot & PROT_WRITE != 0 or !r.file)) 8 else 0;
@@ -1358,6 +1433,7 @@ const PAGE_READONLY: u32 = 0x02;
 const PAGE_READWRITE: u32 = 0x04;
 const PAGE_EXECUTE_READ: u32 = 0x20;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
 
 // Verdict is what a fault wxFault looked at needs: nothing more (handled,
 // the access runs again), the same but noted, a store that may lose to a
@@ -1412,7 +1488,7 @@ pub fn wxFault(addr: u64, kind: u64, pc: u64, st: *Step) Verdict {
             }
         } else if (emulated(i)) {
             const host = pageProt(page) orelse return .none;
-            const exec = host & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE) != 0;
+            const exec = host & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY) != 0;
             if (kind == 8) {
                 if (exec) return .handled;
                 if (heldMem(0, page)) {
@@ -2224,7 +2300,7 @@ fn stopPages(lo: u64, hi: u64) void {
         const i = find(page);
         if (i == nreg or !emulated(i)) continue;
         const host = pageProt(page) orelse continue;
-        if (host & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE) == 0) continue;
+        if (host & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY) == 0) continue;
         _ = stopPage(page, winProt(regs[i].prot & ~PROT_EXEC));
     }
 }
@@ -2560,7 +2636,8 @@ fn setProt(page: u64, prot: u32) bool {
     var b: usize = page;
     var s: usize = PAGE;
     var old: u32 = 0;
-    return NtProtectVirtualMemory(SELF, &b, &s, prot, &old) >= 0;
+    const i = find(page);
+    return NtProtectVirtualMemory(SELF, &b, &s, if (i != nreg and regs[i].cow) cowProt(prot) else prot, &old) >= 0;
 }
 
 // readable reports whether [a, a+n) is readable guest memory: one region
