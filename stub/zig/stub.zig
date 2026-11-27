@@ -124,11 +124,19 @@ pub inline fn scratchAddr() u64 {
 }
 pub const SCRATCH_SIZE: u64 = 64 << 10;
 
-// mapStackChunk maps chunk c of the three per-slot stack arrays. The
+// One per-slot bootstrap stack, indexed like the slots: a clone child starts
+// on its slot's (the supervisor passes its top) and leaves it for the guest's
+// stack before running guest code, so the slot's next thread can reuse it.
+pub inline fn bootsAddr() u64 {
+    return winBase + 0x27000000000;
+}
+pub const BOOT_SIZE: u64 = 16 << 10;
+
+// mapStackChunk maps chunk c of the four per-slot stack arrays. The
 // supervisor maps the others through the hop thread (sandbox/stacks_linux.go).
 fn mapStackChunk(c: u64) bool {
     const flags = 0x02 | 0x10 | 0x20 | 0x4000; // PRIVATE|FIXED|ANONYMOUS|NORESERVE
-    const arrays = [_][2]u64{ .{ altsAddr(), ALT_SIZE }, .{ execsAddr(), EXEC_SIZE }, .{ scratchAddr(), SCRATCH_SIZE } };
+    const arrays = [_][2]u64{ .{ altsAddr(), ALT_SIZE }, .{ execsAddr(), EXEC_SIZE }, .{ scratchAddr(), SCRATCH_SIZE }, .{ bootsAddr(), BOOT_SIZE } };
     inline for (arrays) |a| {
         const at = a[0] + c * STACK_CHUNK * a[1];
         if (sys(nr(.mmap), at, STACK_CHUNK * a[1], PROT_RW, flags, ~@as(u64, 0), 0) != at) return false;
@@ -174,7 +182,8 @@ const ARGS_OFF: u64 = HOP_OFF + 2 * MAX_SLOTS * SLOT_SIZE;
 // 0x150_ hop request and reply pages, 0x158_ the hop stack, 0x160_ the tid
 // table (arch), 0x168_ left free for the guest's parked vDSO (sandbox/
 // vdso_linux.go specialPark), 0x170_ exec stacks, 0x1b0_ alternate stacks,
-// 0x230_ service stacks (to 0x270_), all within WIN_SIZE.
+// 0x230_ service stacks, 0x270_ bootstrap stacks (to 0x280_), all within
+// WIN_SIZE.
 pub inline fn hopReqAddr() u64 {
     return winBase + 0x15000000000;
 }

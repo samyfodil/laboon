@@ -245,10 +245,6 @@ func endProcess(child *dguest, code int, err error) {
 	fs.childDone(child, code, err)
 }
 
-// bootstrapStack is the stub stack a new thread starts on (see clone in
-// stub/zig) until it switches to the guest's.
-var bootstrapStack = 2 * pageSize
-
 func (g *dguest) cloneThread(r cloneReq, cfg Config) int {
 	fail := func(e lxErrno) int {
 		g.ch.page.ret = errno(e)
@@ -262,16 +258,9 @@ func (g *dguest) cloneThread(r cloneReq, cfg Config) int {
 		return fail(lxEAGAIN)
 	}
 	g.mp.mu.Lock()
-	bstack := int64(-1)
-	if g.mapSlotStacks(idx) {
-		bstack = g.host(unix.SYS_MMAP, 0, bootstrapStack, unix.PROT_READ|unix.PROT_WRITE,
-			unix.MAP_PRIVATE|unix.MAP_ANONYMOUS, ^uint64(0), 0)
-	}
-	if bstack >= 0 {
-		g.reserve(uint64(bstack), bootstrapStack)
-	}
+	mapped := g.mapSlotStacks(idx)
 	g.mp.mu.Unlock()
-	if bstack < 0 {
+	if !mapped {
 		fs.freeSlot(idx)
 		return fail(lxENOMEM)
 	}
@@ -321,7 +310,7 @@ func (g *dguest) cloneThread(r cloneReq, cfg Config) int {
 	fs.wg.Add(1)
 	go serveThread(child)
 	// The stub spawns the host thread and reports its tid, which is not used.
-	g.ch.clone(r.stack, tls, (slotsAddr + uint64(idx*slotSize)), uint64(bstack)+bootstrapStack)
+	g.ch.clone(r.stack, tls, (slotsAddr + uint64(idx*slotSize)), bootStackTop(idx))
 	if event != 0 {
 		g.ptraceEvent(event, uint64(tid))
 	}
@@ -404,16 +393,9 @@ func (g *dguest) cloneVMProc(r cloneReq, cfg Config) int {
 		return fail(lxEAGAIN)
 	}
 	g.mp.mu.Lock()
-	bstack := int64(-1)
-	if g.mapSlotStacks(idx) {
-		bstack = g.host(unix.SYS_MMAP, 0, bootstrapStack, unix.PROT_READ|unix.PROT_WRITE,
-			unix.MAP_PRIVATE|unix.MAP_ANONYMOUS, ^uint64(0), 0)
-	}
-	if bstack >= 0 {
-		g.reserve(uint64(bstack), bootstrapStack)
-	}
+	mapped := g.mapSlotStacks(idx)
 	g.mp.mu.Unlock()
-	if bstack < 0 {
+	if !mapped {
 		fs.freeSlot(idx)
 		return fail(lxENOMEM)
 	}
@@ -486,7 +468,7 @@ func (g *dguest) cloneVMProc(r cloneReq, cfg Config) int {
 	atomic.StoreUint32(&cch.page.alive, 1)
 	fs.wg.Add(1)
 	go serveVMProc(child)
-	g.ch.clone(r.stack, tls, (slotsAddr + uint64(idx*slotSize)), uint64(bstack)+bootstrapStack)
+	g.ch.clone(r.stack, tls, (slotsAddr + uint64(idx*slotSize)), bootStackTop(idx))
 	if event != 0 {
 		g.ptraceEvent(event, uint64(gpid))
 	}
