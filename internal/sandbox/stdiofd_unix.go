@@ -107,9 +107,12 @@ func (g *dguest) stdioMask() uint64 {
 //
 // A regular file never waits. Neither does a blocking read of a terminal in
 // non-canonical mode with VMIN 0: the host read applies VTIME itself.
-// A read of a feed's pipe asks the feed for ask bytes while it waits.
+// A read of a feed's empty pipe asks the feed for ask bytes while it waits.
+// Only the feed writes the pipe, so a read that finds bytes there does not
+// wait and asks for nothing: a want left standing after it took them would
+// have the feed read more.
 func (g *dguest) stdioRead(d *dfile, bufAddr uint64, n, ask int64) int64 {
-	if d.feed == nil || n == 0 {
+	if d.feed == nil || n == 0 || d.feed.held() > 0 {
 		return g.stdioReadHost(d, bufAddr, n)
 	}
 	d.feed.want(int(ask))
