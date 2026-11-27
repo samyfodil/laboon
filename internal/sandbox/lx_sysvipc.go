@@ -758,6 +758,7 @@ func (ns *ipcNS) semctl(g *dguest, id, num int, cmd int64, arg uint64) int64 {
 		s.removed = true
 		delete(ns.sem, id)
 		ns.semUsed -= len(s.vals)
+		ns.clearUndo(id, -1)
 		if ns.keys[kSem][s.perm.key] == id {
 			delete(ns.keys[kSem], s.perm.key)
 		}
@@ -821,14 +822,22 @@ func (ns *ipcNS) semctl(g *dguest, id, num int, cmd int64, arg uint64) int64 {
 }
 
 // clearUndo forgets SEM_UNDO adjustments for one semaphore (num) or the whole
-// set (-1), as SETVAL and SETALL do on Linux. ns.mu is held.
+// set (-1), as SETVAL, SETALL and IPC_RMID do on Linux. A process left with
+// none leaves ns.undo, since only a process with adjustments undoes them at
+// exit. ns.mu is held.
 func (ns *ipcNS) clearUndo(id, num int) {
 	for m := range ns.undo {
 		m.mu.Lock()
-		if num < 0 {
-			delete(m.semadj, id)
-		} else if adj := m.semadj[id]; adj != nil {
-			delete(adj, uint16(num))
+		if adj := m.semadj[id]; adj != nil {
+			if num >= 0 {
+				delete(adj, uint16(num))
+			}
+			if num < 0 || len(adj) == 0 {
+				delete(m.semadj, id)
+			}
+		}
+		if len(m.semadj) == 0 {
+			delete(ns.undo, m)
 		}
 		m.mu.Unlock()
 	}

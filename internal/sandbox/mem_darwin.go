@@ -349,9 +349,16 @@ func (m *memProc) share() *memProc {
 // (exec_darwin.go execRespawn): SEM_UNDO adjustments survive exec, the old
 // stub's fds and SysV attachments do not.
 func (m *memProc) renew(g *dguest, nm *memProc) *memProc {
+	ns := g.ipc()
+	ns.mu.Lock()
 	m.mu.Lock()
 	nm.semadj, m.semadj = m.semadj, map[int]map[uint16]int{}
+	if len(nm.semadj) > 0 {
+		ns.undo[nm] = true
+	}
+	delete(ns.undo, m)
 	m.mu.Unlock()
+	ns.mu.Unlock()
 	m.release(g)
 	return nm
 }
