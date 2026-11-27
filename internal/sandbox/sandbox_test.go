@@ -216,6 +216,18 @@ func TestSysVIPC(t *testing.T) {
 	}
 }
 
+// Each System V IPC limit IPC_INFO and /proc/sys/kernel report is enforced
+// with Linux's errno, and removing an object makes room again. The memory cap
+// bounds the segments' total, so SHMALL is reached at 64 MiB.
+func TestSysVIPCLimits(t *testing.T) {
+	root, out := guestRoot(t, "ipclimit")
+	var o bytes.Buffer
+	code, err := Run(context.Background(), out, Config{RootFS: HostRoot(root), Args: []string{"ipclimit"}, Stdout: &o, Stderr: &o, MaxBytes: 64 << 20})
+	if err != nil || code != 0 || !strings.HasSuffix(o.String(), "ALL OK\n") {
+		t.Fatalf("code = %d, err = %v, out = %q", code, err, o.String())
+	}
+}
+
 // Every stub shares the socket descriptors to map are passed over: one
 // killed mid-transfer must not leave its descriptor for the next mapping.
 func TestKillWhileMapping(t *testing.T) {

@@ -230,6 +230,7 @@ func procUptime() []byte {
 
 func (g *dguest) procSysKids() []pchild {
 	sysFile := func(s string) *pnode { return pwfile(s + "\n") }
+	ipc := g.ipcLimits()
 	dir := func(kids ...pchild) *pnode { return pdir(func() []pchild { return kids }) }
 	// net/ipv{4,6}/conf: a directory per interface (plus all/default), each a set
 	// of writable per-interface sysctls. A created interface (a runtime's bridge
@@ -277,13 +278,13 @@ func (g *dguest) procSysKids() []pchild {
 			pchild{"overflowuid", sysFile("65534")},
 			pchild{"overflowgid", sysFile("65534")},
 			pchild{"randomize_va_space", sysFile("2")},
-			pchild{"shmmax", sysFile("18446744073692774399")},
-			pchild{"shmall", sysFile("18446744073692774399")},
-			pchild{"shmmni", sysFile("4096")},
-			pchild{"sem", sysFile("32000\t1024000000\t500\t32000")},
-			pchild{"msgmax", sysFile("8192")},
-			pchild{"msgmnb", sysFile("16384")},
-			pchild{"msgmni", sysFile("32000")},
+			pchild{"shmmax", sysFile(strconv.FormatUint(ipc.shmMax, 10))},
+			pchild{"shmall", sysFile(strconv.FormatUint(ipc.shmAll, 10))},
+			pchild{"shmmni", sysFile(strconv.Itoa(shmMni))},
+			pchild{"sem", sysFile(fmt.Sprintf("%d\t%d\t%d\t%d", semMsl, semMns, semOpm, semMni))},
+			pchild{"msgmax", sysFile(strconv.Itoa(msgMax))},
+			pchild{"msgmnb", sysFile(strconv.Itoa(msgMnb))},
+			pchild{"msgmni", sysFile(strconv.Itoa(msgMni))},
 			pchild{"perf_event_paranoid", sysFile("2")},
 			pchild{"core_pattern", sysFile("core")},
 			pchild{"tainted", sysFile("0")},
