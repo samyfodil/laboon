@@ -441,6 +441,8 @@ type imageSrc struct {
 	r     io.ReaderAt // a regular file's File, read in place of f
 	id    rewrite.FileID
 	hasID bool
+	// stable: a later run sees the same file with the same identity (openRead).
+	stable bool
 }
 
 func (s imageSrc) reader() io.ReaderAt {
@@ -740,9 +742,9 @@ func randBelow(n uint64) uint64 {
 // loadELF prepares an image, loaded at dynBias if it is ET_DYN: segments,
 // rewritten code, and below it the trampoline area the rewriter fills.
 func (g *wguest) loadELF(src imageSrc, dynBias uint64) (*wimage, error) {
-	cache := g.imgPath(src)
-	if cache != "" {
-		if img := cachedImage(cache); img != nil {
+	st, name := g.imgEntryOf(src)
+	if st != nil {
+		if img := cachedImage(st, name); img != nil {
 			if img.base != 0 { // position-independent: it moves whole, trampolines with it
 				img.relocate(dynBias - img.base)
 			}
@@ -857,7 +859,7 @@ func (g *wguest) loadELF(src imageSrc, dynBias uint64) (*wimage, error) {
 		img.prots = append(img.prots, wrun{a.base, a.base + a.size, windows.PAGE_EXECUTE_READ})
 	}
 	if areas[0].base == img.lo && roEnd <= wLo {
-		saveImage(cache, img, wLo-img.lo)
+		saveImage(st, name, img, wLo-img.lo)
 	}
 	return img, nil
 }

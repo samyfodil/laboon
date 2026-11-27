@@ -657,13 +657,13 @@ func endWinProcess(child *dguest, code int, err error) {
 
 // readImage reads all of the program, with its file identity.
 func (g *dguest) readImage(s execSrc) (imageSrc, lxErrno) {
-	f := s.f
+	f, stable := s.f, false
 	if f == nil {
 		rp, e := g.resolve(s.gp, true)
 		if e != 0 {
 			return imageSrc{}, e
 		}
-		if f, e = g.openFile(rp); e != 0 {
+		if f, stable, e = g.openRead(rp); e != 0 {
 			return imageSrc{}, e
 		}
 		defer f.Close()
@@ -679,7 +679,7 @@ func (g *dguest) readImage(s execSrc) (imageSrc, lxErrno) {
 	}
 	b = b[:n]
 	id, ok := fileIdentity(f)
-	return imageSrc{data: b, id: id, hasID: ok}, 0
+	return imageSrc{data: b, id: id, hasID: ok, stable: stable}, 0
 }
 
 // winArgMax bounds what an execve's argv and envp may hold together: the

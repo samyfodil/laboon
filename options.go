@@ -272,6 +272,12 @@ type Cache = rewrite.Cache
 // gone unused for a week, are taken for plans of an older format and deleted.
 // Writes happen in the background: call the cache's Sync before the process
 // exits so they are not lost. An empty dir keeps plans in memory only.
+//
+// On Windows the cache also keeps prepared images, programs already
+// rewritten that a later run maps instead of rewriting, in dir/img: only
+// those of files no guest writes (an image's lower layers, read-only
+// mounts), held to 256 entries and 1 GiB, least recently used out first.
+// Without a directory each run prepares its programs again.
 func NewCache(dir string) *Cache { return rewrite.NewCache(dir) }
 
 // WithNoRewrite skips syscall rewriting, so the guest's syscalls reach the

@@ -24,12 +24,16 @@ import (
 // process that runs the image and kept by a fork child, as the stub's own
 // shared mappings are.
 //
-// An entry is keyed by the file's identity, the stub's entry points and this
-// supervisor's own executable, so a rebuilt supervisor or stub never maps code
-// another one rewrote. A position-independent image is stored at the bias it
-// was first loaded at and moved to each load's (wimage.relocate): its
-// trampolines address the guest only relative to the code. Entries are not
-// pruned.
+// Images live in the img subdirectory of the rewrite cache's directory
+// (NewCache), so a cache in memory only keeps none, and only images of
+// stable files (imageSrc.stable) are kept: a binary a guest builds and runs
+// would add one each run. The directory is bounded (imgStore). An entry is
+// keyed by the file's identity, the stub, its entry points and the build of
+// the supervisor that rewrote it, since the trampolines are that build's
+// code; a rebuilt supervisor's entries replace the old ones as they go
+// unused. A position-independent image is stored at the bias it was first
+// loaded at and moved to each load's (wimage.relocate): its trampolines
+// address the guest only relative to the code.
 
 type imgView struct {
 	sec  windows.Handle
@@ -45,16 +49,10 @@ type imgMeta struct {
 	Traps                            []uint64
 }
 
-var imgDir = sync.OnceValue(func() string {
-	d, err := os.UserCacheDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(d, "laboon", "img")
-})
-
-// selfID identifies this supervisor's executable and its stub.
-var selfID = sync.OnceValue(func() []byte {
+// buildKey names what a prepared image depends on besides its file: the
+// stub, this supervisor's build and the entry format. A supervisor with no
+// build ID (linked with -buildid=) is named by its executable's identity.
+var buildKey = sync.OnceValue(func() []byte {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil
@@ -64,12 +62,16 @@ var selfID = sync.OnceValue(func() []byte {
 		return nil
 	}
 	defer f.Close()
+	s := sha256.Sum256(winstub.Binary)
+	b := binary.LittleEndian.AppendUint64(s[:8], imgCacheVersion)
+	if id := goBuildID(f); id != "" {
+		return append(b, id...)
+	}
 	id, ok := fileIdentity(f)
 	if !ok {
 		return nil
 	}
-	s := sha256.Sum256(winstub.Binary)
-	return binary.LittleEndian.AppendUint64(append(s[:8], idBytes(id)...), imgCacheVersion)
+	return append(b, idBytes(id)...)
 })
 
 // imgCacheVersion changes when what an entry holds does.
@@ -83,13 +85,16 @@ func idBytes(id rewrite.FileID) []byte {
 	return binary.LittleEndian.AppendUint64(b, uint64(id.Ctime))
 }
 
-// imgPath is the cache entry for src, or "" when it has none.
-func (g *wguest) imgPath(src imageSrc) string {
-	self := selfID()
-	if !src.hasID || self == nil || imgDir() == "" || testNoImgCache {
-		return ""
+// imgEntryOf is the store and entry name for src, or nil when it has none.
+func (g *wguest) imgEntryOf(src imageSrc) (*imgStore, string) {
+	if !src.stable || !src.hasID || src.id.Unlinked || testNoImgCache || g.cache.Dir() == "" {
+		return nil, ""
 	}
-	b := append([]byte(guestArch), self...)
+	key := buildKey()
+	if key == nil {
+		return nil, ""
+	}
+	b := append([]byte(guestArch), key...)
 	b = append(b, idBytes(src.id)...)
 	for _, v := range []uint64{g.entry, g.exitEntry} {
 		b = binary.LittleEndian.AppendUint64(b, v)
@@ -101,12 +106,13 @@ func (g *wguest) imgPath(src imageSrc) string {
 		b = append(b, 's')
 	}
 	h := sha256.Sum256(b)
-	return filepath.Join(imgDir(), hex.EncodeToString(h[:16]))
+	return imgStoreAt(filepath.Join(g.cache.Dir(), "img")), hex.EncodeToString(h[:16])
 }
 
-// cachedImage returns the image stored at path, with its view, or nil.
-func cachedImage(path string) *wimage {
-	mb, err := os.ReadFile(path + ".json")
+// cachedImage returns the image stored as name, with its view, or nil.
+func cachedImage(st *imgStore, name string) *wimage {
+	path := st.path(name)
+	mb, err := os.ReadFile(path + imgMetaExt)
 	if err != nil {
 		return nil
 	}
@@ -144,14 +150,15 @@ func cachedImage(path string) *wimage {
 	for _, s := range m.Segs {
 		img.segs = append(img.segs, mapEnt{s[0], s[1], s[2], s[3], s[4]})
 	}
+	st.used(name)
 	return img
 }
 
-// saveImage stores img, prepared by loadELF with its trampolines at its lo
-// and no read-only segment past view, so later loads can map it. A failure
-// only costs those loads the work.
-func saveImage(path string, img *wimage, view uint64) {
-	if path == "" || view == 0 || view > img.hi-img.lo {
+// saveImage stores img as name, prepared by loadELF with its trampolines at
+// its lo and no read-only segment past view, so later loads can map it. A
+// failure only costs those loads the work.
+func saveImage(st *imgStore, name string, img *wimage, view uint64) {
+	if st == nil || view == 0 || view > img.hi-img.lo {
 		return
 	}
 	tail := img.bytes[view:]
@@ -170,35 +177,22 @@ func saveImage(path string, img *wimage, view uint64) {
 	if err != nil {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	size := int64(view) + int64(len(tail)) + int64(len(mb))
+	if !st.fits(size) {
+		return
+	}
+	if err := os.MkdirAll(st.dir, 0o700); err != nil {
 		return
 	}
 	// The data first, the metadata last: an entry is only used whole.
-	if writeFileAtomic(path, img.bytes[:view], tail) != nil {
+	path := st.path(name)
+	if writeImgAtomic(path, img.bytes[:view], tail) != nil {
 		return
 	}
-	writeFileAtomic(path+".json", mb, nil)
-}
-
-func writeFileAtomic(path string, a, b []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".img-*")
-	if err != nil {
-		return err
+	if writeImgAtomic(path+imgMetaExt, mb, nil) != nil {
+		return
 	}
-	_, err = f.Write(a)
-	if err == nil {
-		_, err = f.Write(b)
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(f.Name(), path)
-	}
-	if err != nil {
-		os.Remove(f.Name())
-	}
-	return err
+	st.saved(name, size)
 }
 
 var (

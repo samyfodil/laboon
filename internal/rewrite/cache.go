@@ -54,6 +54,16 @@ func NewCache(dir string) *Cache {
 	return c
 }
 
+// Dir is the directory NewCache was given, "" for a cache in memory only.
+// Other products of rewriting that outlive a process (Windows keeps prepared
+// images in its img subdirectory) live under it, so one directory holds them.
+func (c *Cache) Dir() string {
+	if c == nil || c.disk == nil {
+		return ""
+	}
+	return c.disk.root
+}
+
 // Sync waits until the plans queued for disk are written. Writes happen in
 // the background, off the caller's path; a process about to exit calls Sync
 // so they are not lost.

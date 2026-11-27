@@ -41,6 +41,7 @@ type dfs struct {
 	rootFS    core.FileSystem // Config.RootFS: the guest root as a backend, "" rootAbs — any FileSystem, no host path behind it
 	rootAbs   string          // cleaned absolute Config.Root (lower layer), "" if none
 	upperAbs  string          // ephemeral writable upper dir, "" if no root
+	upper     core.FileSystem // the root union's writable top layer (upperAbs), nil if none
 	workAbs   string          // private dir beside the upper layer for staging host objects
 	keepUpper bool            // upperAbs is the caller's, kept after the run
 	tmpDir    string          // the run's temp directory (newRunTmp)
@@ -264,6 +265,7 @@ func (fs *dfs) buildNS() {
 			up.SetConfine(true)
 			up.SetMeta(fs.ov.store) // the leaf and the sandbox share one metadata authority
 			fs.overlay = overlayfs.OverlayFS(fs.rootFS, up)
+			fs.upper = up
 		}
 	default:
 		lower := hostfs.NewHostDirFS(fs.rootAbs, fs.hostFS)
@@ -275,6 +277,7 @@ func (fs *dfs) buildNS() {
 			up.SetConfine(true) // the writable, guest-mutable layer
 			up.SetMeta(fs.ov.store)
 			layers = append(layers, up)
+			fs.upper = up
 		}
 		fs.overlay = overlayfs.OverlayFS(layers...)
 	}
@@ -1247,9 +1250,18 @@ const (
 // already symlink-free, so the final component is not followed (a symlink there
 // is refused, as the confined host open would).
 func (g *dguest) openFile(gp string) (*os.File, lxErrno) {
+	f, _, e := g.openRead(gp)
+	return f, e
+}
+
+// openRead is openFile, also reporting whether the file is stable: a host
+// file no guest writes in place, in the root union's lower layer or in a
+// read-only filesystem, which a later run sees with the same identity. A file
+// in the upper, in a writable mount or copied to the host here is not.
+func (g *dguest) openRead(gp string) (*os.File, bool, lxErrno) {
 	loc, err := g.vns().Resolve(gp, false)
 	if err != nil {
-		return nil, osErrno(err)
+		return nil, false, osErrno(err)
 	}
 	f, err := loc.Node.Open(os.O_RDONLY)
 	if (err == errPseudoOpen || errors.Is(err, core.ErrNoHostFile)) && loc.Node.Kind() == core.Dir {
@@ -1261,12 +1273,12 @@ func (g *dguest) openFile(gp string) (*os.File, lxErrno) {
 		// <rootfs>/sys to create mount points under it.
 		of, e := g.dfs.openEmpty()
 		if e != nil {
-			return nil, osErrno(e)
+			return nil, false, osErrno(e)
 		}
-		return of, 0
+		return of, false, 0
 	}
 	if err != nil {
-		return nil, osErrno(err)
+		return nil, false, osErrno(err)
 	}
 	of, ok := hostDupOf(f, gp)
 	if !ok {
@@ -1274,10 +1286,16 @@ func (g *dguest) openFile(gp string) (*os.File, lxErrno) {
 		// here must read as a host file — loading an executable to map and rewrite.
 		// Copy it into a temporary host file. (A plain read-only open does not reach
 		// here; it is served through the core.File directly.)
-		return g.spillToHost(f)
+		of, e := g.spillToHost(f)
+		return of, false, e
 	}
 	f.Close()
-	return of, 0
+	stable := core.IsReadOnly(loc.FS)
+	if l, ok := loc.FS.(core.Layered); ok && g.dfs.upper != nil && loc.FS == g.dfs.overlay {
+		lf, _ := l.Layer(loc.Node)
+		stable = lf != g.dfs.upper
+	}
+	return of, stable, 0
 }
 
 // spillToHost copies a non-host file's content into a temporary host file and
