@@ -22,16 +22,19 @@ type Namespace struct {
 
 	// Path resolution is a hot path (every stat/open walks every component
 	// through both overlay layers). When the root reports a mutation generation
-	// (generational), cache the walked location per (path, followLast) and reuse
-	// it while the generation is unchanged. Any mutation bumps the generation and
-	// so invalidates every entry; Mount clears the cache since mounts are not
-	// part of the overlay's generation.
+	// (generational), cache the walked location per path and reuse it while the
+	// generation is unchanged. A change to the root's name space bumps the
+	// generation and so invalidates every entry; Mount clears the cache since
+	// mounts are not part of the overlay's generation.
 	genOf   func() uint64 // nil if the root does not report a generation
 	touch   func()        // bumps the root's generation, for Invalidate
 	cacheMu sync.Mutex
-	cache   map[resolveKey]resolveEnt
+	cache   resolveCache
 }
 
+// resolveKey names a cached answer. followLast is set only for a walk that
+// followed a symlink in its final component: any other answer is the same
+// whether the last symlink is followed or not, and is kept once, unfollowed.
 type resolveKey struct {
 	p          string
 	followLast bool
@@ -40,18 +43,70 @@ type resolveKey struct {
 
 // resolveEnt caches a resolution: a location (loc.Node is a private pristine
 // node; a hit returns a clone), or a definite miss (err), or for a walk key
-// the path a missing p ends at.
+// the path a missing p ends at. prev and next link it into the cache's
+// recency list.
 type resolveEnt struct {
-	gen  uint64
-	loc  Loc
-	err  error
-	path string
+	key        resolveKey
+	gen        uint64
+	loc        Loc
+	err        error
+	path       string
+	prev, next *resolveEnt
 }
 
-// resolveCacheMax bounds the cache; at the limit it is dropped whole (the next
-// resolutions refill it), which is simpler than an LRU and fine for a cache
-// whose entries are cheap to recompute.
+// resolveCacheMax bounds the cache; past it the least recently used entry is
+// evicted. Each Namespace view keeps its own cache, so this is per view.
 const resolveCacheMax = 1 << 14
+
+// resolveCache is an LRU map of resolutions. Its zero value is empty and
+// ready; the caller holds cacheMu.
+type resolveCache struct {
+	m    map[resolveKey]*resolveEnt
+	list resolveEnt // sentinel: list.next is the most recent entry
+}
+
+// get returns key's entry if it was stored at generation gen, marking it
+// recently used. An entry from an older generation is dropped.
+func (c *resolveCache) get(key resolveKey, gen uint64) *resolveEnt {
+	e, ok := c.m[key]
+	if !ok {
+		return nil
+	}
+	c.unlink(e)
+	if e.gen != gen {
+		delete(c.m, key)
+		return nil
+	}
+	c.front(e)
+	return e
+}
+
+func (c *resolveCache) put(e *resolveEnt) {
+	if c.m == nil {
+		c.m = make(map[resolveKey]*resolveEnt)
+		c.list.prev, c.list.next = &c.list, &c.list
+	}
+	if old, ok := c.m[e.key]; ok {
+		c.unlink(old)
+	} else if len(c.m) >= resolveCacheMax {
+		lru := c.list.prev
+		c.unlink(lru)
+		delete(c.m, lru.key)
+	}
+	c.m[e.key] = e
+	c.front(e)
+}
+
+func (c *resolveCache) unlink(e *resolveEnt) {
+	e.prev.next, e.next.prev = e.next, e.prev
+	e.prev, e.next = nil, nil
+}
+
+func (c *resolveCache) front(e *resolveEnt) {
+	e.prev, e.next = &c.list, c.list.next
+	c.list.next.prev = e
+	c.list.next = e
+}
 
 // Policy decides what operation op may do at the resolved absolute path:
 //   - return ("", nil) to allow it,
@@ -118,7 +173,7 @@ func (ns *Namespace) Mount(at string, mfs FileSystem) error {
 	}
 	ns.mounts[at] = mfs
 	ns.cacheMu.Lock()
-	ns.cache = nil // mounts changed; mounts are not in the root's generation
+	ns.cache = resolveCache{} // mounts changed; mounts are not in the root's generation
 	ns.cacheMu.Unlock()
 	return nil
 }
@@ -131,7 +186,7 @@ func (ns *Namespace) MountShadow(at string, mfs FileSystem) {
 	at = "/" + clean(at)
 	ns.mounts[at] = mfs
 	ns.cacheMu.Lock()
-	ns.cache = nil
+	ns.cache = resolveCache{}
 	ns.cacheMu.Unlock()
 }
 
@@ -144,7 +199,7 @@ func (ns *Namespace) Unmount(at string) bool {
 	}
 	delete(ns.mounts, at)
 	ns.cacheMu.Lock()
-	ns.cache = nil
+	ns.cache = resolveCache{}
 	ns.cacheMu.Unlock()
 	return true
 }
@@ -196,53 +251,74 @@ func (ns *Namespace) ResolveOp(op, p string, followLast bool) (Loc, error) {
 // not stored. Only a success or a not-exist miss is cached.
 func (ns *Namespace) resolve(p string, followLast bool, hops int) (Loc, error) {
 	if ns.genOf == nil || hops != 0 {
-		var crossed bool
-		return ns.walk(p, followLast, hops, &crossed, "", nil)
+		var st walkState
+		return ns.walk(p, followLast, hops, &st, "", nil)
 	}
 	g := ns.genOf()
-	key := resolveKey{p: p, followLast: followLast}
-	ns.cacheMu.Lock()
-	if e, ok := ns.cache[key]; ok && e.gen == g {
-		ns.cacheMu.Unlock()
-		if e.err != nil {
-			return Loc{}, e.err
-		}
-		loc := e.loc
-		loc.Node = cloneNode(loc.Node) // a fresh node per hit: copy-up mutates the node in place, so hits must not share one
-		return loc, nil
+	if loc, err, ok := ns.cached(p, followLast, g); ok {
+		return loc, err
 	}
-	ns.cacheMu.Unlock()
-	var crossed bool
-	loc, err := ns.walk(p, followLast, 0, &crossed, "", nil)
+	var st walkState
+	loc, err := ns.walk(p, followLast, 0, &st, "", nil)
 	// Cache only a result that stayed within the versioned overlay root. Skip
 	// it if the walk crossed a mount (a dynamic fs like /proc is not covered by
 	// the overlay's generation, and a /proc/self/fd link can resolve back into
 	// the overlay), or if a mutation bumped the generation during the walk. Of
 	// the errors only a definite miss is kept: a lookup that failed for another
 	// reason reads as a miss too, and must not stick as one.
-	if crossed || ns.genOf() != g {
+	if st.crossed || ns.genOf() != g {
 		return loc, err
 	}
+	key := resolveKey{p: p, followLast: st.lastLink}
 	switch {
 	case err == nil:
 		if cn := cloneNode(loc.Node); cn != nil {
 			stored := loc
 			stored.Node = cn
-			ns.store(key, resolveEnt{gen: g, loc: stored})
+			ns.store(&resolveEnt{key: key, gen: g, loc: stored})
 		}
 	case DefinitelyNotExist(err):
-		ns.store(key, resolveEnt{gen: g, err: err})
+		ns.store(&resolveEnt{key: key, gen: g, err: err})
 	}
 	return loc, err
 }
 
-func (ns *Namespace) store(key resolveKey, e resolveEnt) {
+// cached is the cached resolution of p at generation g. The unfollowed entry
+// answers a following walk too unless it ends at a symlink: a final component
+// that is missing or not a link resolves the same either way.
+func (ns *Namespace) cached(p string, followLast bool, g uint64) (Loc, error, bool) {
 	ns.cacheMu.Lock()
-	if ns.cache == nil || len(ns.cache) >= resolveCacheMax {
-		ns.cache = make(map[resolveKey]resolveEnt)
+	e := ns.cache.get(resolveKey{p: p}, g)
+	if e != nil && followLast && e.err == nil && e.loc.Node.Kind() == Symlink {
+		e = nil
 	}
-	ns.cache[key] = e
+	if e == nil && followLast {
+		e = ns.cache.get(resolveKey{p: p, followLast: true}, g)
+	}
 	ns.cacheMu.Unlock()
+	if e == nil {
+		return Loc{}, nil, false
+	}
+	if e.err != nil {
+		return Loc{}, e.err, true
+	}
+	loc := e.loc
+	loc.Node = cloneNode(loc.Node) // a fresh node per hit: copy-up mutates the node in place, so hits must not share one
+	return loc, nil, true
+}
+
+func (ns *Namespace) store(e *resolveEnt) {
+	ns.cacheMu.Lock()
+	ns.cache.put(e)
+	ns.cacheMu.Unlock()
+}
+
+// walkState is what a walk learns besides its result: whether it crossed a
+// mount, whose filesystem the root's generation does not cover, and whether
+// it followed a symlink as its final component.
+type walkState struct {
+	crossed  bool
+	lastLink bool
 }
 
 // walkMiss is the cached Walk.Path answer for p, a path that did not exist.
@@ -252,9 +328,9 @@ func (ns *Namespace) walkMiss(p string, followLast bool) (string, error, bool) {
 	}
 	g := ns.genOf()
 	ns.cacheMu.Lock()
-	e, ok := ns.cache[resolveKey{p: p, followLast: followLast, walk: true}]
+	e := ns.cache.get(resolveKey{p: p, followLast: followLast, walk: true}, g)
 	ns.cacheMu.Unlock()
-	if !ok || e.gen != g {
+	if e == nil {
 		return "", nil, false
 	}
 	return e.path, e.err, true
@@ -302,13 +378,18 @@ func (w Walk) Path(ns *Namespace, p string) (string, error) {
 	} else {
 		p = "/"
 	}
+	plain := !o.scoped && o.root == "" && !o.noSymlinks && !o.noMagic
+	if plain && !path.IsAbs(p) {
+		// Unscoped and unchrooted, a relative walk is the walk of the joined
+		// absolute string from the namespace root, so it shares that key.
+		p = start + "/" + p
+	}
 	if path.IsAbs(p) {
 		if o.beneath {
 			return "", &fs.PathError{Op: "resolve", Path: p, Err: ErrCrossDevice}
 		}
 		start = o.root
 	}
-	plain := !o.scoped && o.root == "" && !o.noSymlinks && !o.noMagic && path.IsAbs(p)
 	// keep is whether the walk's answer may be cached: an unchrooted absolute
 	// path Resolve found definitely missing, so the walk ends at the same
 	// missing name (a doubtful miss reads as missing to the walk too).
@@ -329,13 +410,13 @@ func (w Walk) Path(ns *Namespace, p string) (string, error) {
 		}
 		keep = ns.genOf != nil && DefinitelyNotExist(err)
 	}
-	var crossed bool
-	loc, err := ns.walk(start+"/"+p, w.FollowLast, 0, &crossed, "", o)
+	var st walkState
+	loc, err := ns.walk(start+"/"+p, w.FollowLast, 0, &st, "", o)
 	if err == nil {
 		loc.Path = absPath(loc.Path)
 	}
-	if keep && !crossed && ns.genOf() == g && (err == nil || DefinitelyNotExist(err)) {
-		ns.store(resolveKey{p: p, followLast: w.FollowLast, walk: true}, resolveEnt{gen: g, path: loc.Path, err: err})
+	if keep && !st.crossed && ns.genOf() == g && (err == nil || DefinitelyNotExist(err)) {
+		ns.store(&resolveEnt{key: resolveKey{p: p, followLast: w.FollowLast, walk: true}, gen: g, path: loc.Path, err: err})
 	}
 	if err != nil {
 		return "", err
@@ -350,7 +431,7 @@ func absPath(p string) string {
 	return p
 }
 
-func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, floor string, o *walkOpts) (Loc, error) {
+func (ns *Namespace) walk(p string, followLast bool, hops int, st *walkState, floor string, o *walkOpts) (Loc, error) {
 	cur := ns.at("")
 	// Split raw, not cleaned: path.Clean collapses "a/link/.." to "a" lexically,
 	// which skips following link. POSIX resolves ".." against the symlink target,
@@ -378,7 +459,7 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, fl
 			}
 			cur = ns.at(par)
 			if cur.FS != ns.root {
-				*crossed = true // ".." landed in a mounted (unversioned) filesystem
+				st.crossed = true // ".." landed in a mounted (unversioned) filesystem
 			}
 			continue
 		}
@@ -388,7 +469,7 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, fl
 		// a bind at a path the backing fs lacks still resolves (a mount point
 		// that does exist ends up here too, with the same result).
 		if mfs, ok := ns.mounts[childPath]; ok {
-			*crossed = true
+			st.crossed = true
 			cur = Loc{FS: mfs, Node: mfs.Root(), Path: childPath}
 			continue
 		}
@@ -410,6 +491,9 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, fl
 			if hops++; hops > maxSymlinkHops {
 				return Loc{}, &fs.PathError{Op: "resolve", Path: p, Err: ErrLoop}
 			}
+			if isLast {
+				st.lastLink = true
+			}
 			// A magic link names an object (an absolute target, or a token); a
 			// relative target on a MagicLinker is an ordinary symlink (/proc/self).
 			if m, ok := child.(MagicLinker); ok && o != nil {
@@ -426,7 +510,7 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, fl
 						cur = Loc{FS: cur.FS, Node: child, Path: childPath}
 						continue
 					}
-					next, err := ns.walk(tgt, true, hops, crossed, "", o.forLink(isLast))
+					next, err := ns.walk(tgt, true, hops, st, "", o.forLink(isLast))
 					if err != nil {
 						return Loc{}, err
 					}
@@ -469,9 +553,9 @@ func (ns *Namespace) walk(p string, followLast bool, hops int, crossed *bool, fl
 				target = base + "/" + tgt
 			}
 			// Resolve the target with walk, not resolve: hops>0 never caches, and
-			// passing crossed through propagates a mount a symlink target traverses
+			// passing st through propagates a mount a symlink target traverses
 			// (e.g. a /proc/self/fd link) so the outer result is not cached.
-			next, err := ns.walk(target, true, hops, crossed, symFloor, o.forLink(isLast))
+			next, err := ns.walk(target, true, hops, st, symFloor, o.forLink(isLast))
 			if err != nil {
 				return Loc{}, err
 			}

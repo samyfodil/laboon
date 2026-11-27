@@ -197,12 +197,14 @@ func (f *overlay) topDir(p string) (Node, error) {
 }
 
 // copyUp makes the overlay path p present and writable in the top layer: a
-// lower-only object is copied up with its contents and metadata.
+// lower-only object is copied up with its contents and metadata. Only a real
+// copy changes what the path resolves to (its node gains a top layer), so only
+// that bumps the generation.
 func (f *overlay) copyUp(n *overlayNode) (Node, error) {
-	defer f.Touch()
 	if tn := n.nodes[len(f.layers)-1]; tn != nil {
 		return tn, nil // already in the top
 	}
+	defer f.Touch()
 	src := n.nodes[n.owner]
 	a, err := src.Stat()
 	if err != nil {
@@ -589,7 +591,6 @@ func (n *overlayNode) Listxattr() ([]byte, error) {
 }
 
 func (n *overlayNode) Setxattr(name string, value []byte, flags int) error {
-	defer n.fs.Touch()
 	tn, err := n.fs.copyUp(n)
 	if err != nil {
 		return err
@@ -602,7 +603,6 @@ func (n *overlayNode) Setxattr(name string, value []byte, flags int) error {
 }
 
 func (n *overlayNode) Removexattr(name string) error {
-	defer n.fs.Touch()
 	tn, err := n.fs.copyUp(n)
 	if err != nil {
 		return err
@@ -641,8 +641,9 @@ func (n *overlayNode) Stat() (Attr, error) {
 	return a, nil
 }
 
+// SetAttr changes no name, so beyond its copy-up it leaves cached resolutions
+// valid: they hold the node, whose attributes are read live.
 func (n *overlayNode) SetAttr(u AttrUpdate) error {
-	defer n.fs.Touch()
 	tn, err := n.fs.copyUp(n)
 	if err != nil {
 		return err
