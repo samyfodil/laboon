@@ -1,0 +1,207 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 684" width="800" height="684" role="img" aria-labelledby="title desc">
+<title id="title">How laboon runs a Linux program</title>
+<desc id="desc">An unmodified Linux program or container is loaded into one host process, with no VM and no second kernel. Its machine code runs as is on the host CPU; only its syscall instructions are rewritten, without a disassembler, to trap into a small stub in the same address space. The stub keeps thread control, signal trampolines and the stdio fast path, and forwards every other call over a shared-memory channel to the supervisor, which emulates the Linux ABI and owns all file and network I/O through one confined vfs Namespace, then replies so the program resumes. A syscall the rewriter missed reaches the host sandbox (seccomp on Linux, Seatbelt on macOS, AppContainer on Windows), which kills the guest.</desc>
+<style>
+svg { --card: #151b23; --stroke: #3d444d; --text: #f0f6fc; --muted: #9198a1; --pill: #0d1117; --pillstroke: #3d444d; --line: #656c76; --mod1: #0f2138; --mod2: #1d1736; --modstroke: #1f6feb; --green: #3fb950; --amber: #d29922; --blue: #4493f8; --violet: #ab7df8; --red: #f85149; --dot: #79c0ff; }
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; fill: var(--text); }
+.mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+.tag { font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px; }
+.title { font-size: 17px; font-weight: 600; }
+.sub { font-size: 13px; fill: var(--muted); }
+.small { font-size: 11.5px; fill: var(--muted); }
+.chip { font-size: 11px; fill: var(--text); }
+.procname { font-size: 14px; font-weight: 600; fill: var(--blue); }
+.card { fill: var(--card); stroke: var(--stroke); stroke-width: 1; }
+.pill { fill: var(--pill); stroke: var(--pillstroke); stroke-width: 1; }
+.labelpill { fill: var(--card); stroke: var(--stroke); stroke-width: 1; }
+.module { fill: url(#module); stroke: var(--modstroke); stroke-width: 1.2; }
+.wire { stroke: var(--line); stroke-width: 1.5; fill: none; }
+.head { stroke: var(--line); stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.miss { stroke: var(--red); stroke-width: 1.5; fill: none; stroke-dasharray: 4 4; opacity: 0.55; }
+.misshead { stroke: var(--red); stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; opacity: 0.7; }
+.badge { stroke-width: 1; fill-opacity: 0.12; }
+.badgetext { font-size: 11px; font-weight: 600; }
+.badgetext.green { fill: var(--green); } .badgetext.amber { fill: var(--amber); } .badgetext.blue { fill: var(--blue); }
+.badgetext.violet { fill: var(--violet); } .badgetext.red { fill: var(--red); }
+.tag.green { fill: var(--green); } .tag.amber { fill: var(--amber); } .tag.blue { fill: var(--blue); } .tag.violet { fill: var(--violet); } .tag.red { fill: var(--red); }
+.glow { fill-opacity: 0.22; stroke-width: 1.5; }
+.glowcard { fill-opacity: 0.09; stroke-width: 1.8; }
+.dot { fill: var(--dot); }
+.reddot { fill: var(--red); }
+.mod1 { stop-color: var(--mod1); } .mod2 { stop-color: var(--mod2); }
+</style>
+<defs><linearGradient id="module" x1="0" y1="0" x2="1" y2="1"><stop offset="0" class="mod1"/><stop offset="1" class="mod2"/></linearGradient></defs>
+<rect x="110" y="14" width="580" height="76" rx="12" class="card"/>
+<text x="400.0" y="37.0" class="tag green" text-anchor="middle">GUEST</text>
+<text x="400.0" y="59.0" class="title" text-anchor="middle">Unmodified Linux programs and containers</text>
+<text x="400.0" y="78.0" class="sub" text-anchor="middle">static or dynamic ELF · whole OCI images · glibc or musl · amd64 or arm64</text>
+<rect x="20" y="140" width="760" height="372" rx="16" class="module"/>
+<text x="760.0" y="168.0" class="procname mono" text-anchor="end">laboon: one host process</text>
+<text x="760.0" y="186.0" class="small" text-anchor="end">no VM, no second kernel</text>
+<path d="M210,90 L210,196" class="wire"/>
+<path d="M205,191 L210,196 L215,191" class="head"/>
+<rect x="101.8" y="106" width="216.4" height="22" rx="11" class="labelpill"/>
+<text x="210.0" y="121.0" class="small" text-anchor="middle">loaded, syscall sites rewritten</text>
+<rect x="40" y="196" width="320" height="148" rx="12" class="card"/>
+<text x="58.0" y="221.0" class="tag green" text-anchor="start">GUEST CODE</text>
+<rect x="250.8" y="207" width="95.2" height="22" rx="11" class="badge" style="fill:var(--green);stroke:var(--green)"/>
+<text x="298.4" y="222.0" class="badgetext green" text-anchor="middle">native speed</text>
+<text x="58.0" y="246.0" class="title" text-anchor="start">Runs as is on the host CPU</text>
+<text x="58.0" y="267.0" class="small" text-anchor="start">Every instruction executes untouched except</text>
+<text x="58.0" y="283.0" class="small" text-anchor="start">syscall sites, found without a disassembler.</text>
+<rect x="56.0" y="300" width="38.1" height="24" rx="6" class="pill"/>
+<text x="75.1" y="316.0" class="chip mono" text-anchor="middle">mov</text>
+<rect x="100.1" y="300" width="38.1" height="24" rx="6" class="pill"/>
+<text x="119.2" y="316.0" class="chip mono" text-anchor="middle">add</text>
+<rect x="144.3" y="300" width="38.1" height="24" rx="6" class="pill"/>
+<text x="163.3" y="316.0" class="chip mono" text-anchor="middle">ldr</text>
+<rect x="188.4" y="300" width="31.4" height="24" rx="6" class="pill"/>
+<text x="204.1" y="316.0" class="chip mono" text-anchor="middle">bl</text>
+<rect x="225.8" y="300" width="65.0" height="24" rx="6" class="pill"/>
+<text x="258.3" y="316.0" class="chip mono" text-anchor="middle">syscall</text>
+<rect x="296.8" y="300" width="38.1" height="24" rx="6" class="pill"/>
+<text x="315.8" y="316.0" class="chip mono" text-anchor="middle">cmp</text>
+<rect x="40" y="366" width="320" height="128" rx="12" class="card"/>
+<text x="58.0" y="391.0" class="tag amber" text-anchor="start">STUB</text>
+<text x="58.0" y="416.0" class="title" text-anchor="start">In the guest's address space</text>
+<rect x="56.0" y="428" width="49.3" height="24" rx="6" class="pill"/>
+<text x="80.7" y="444.0" class="chip" text-anchor="middle">clone</text>
+<rect x="111.3" y="428" width="49.3" height="24" rx="6" class="pill"/>
+<text x="136.0" y="444.0" class="chip" text-anchor="middle">futex</text>
+<rect x="166.7" y="428" width="130.9" height="24" rx="6" class="pill"/>
+<text x="232.1" y="444.0" class="chip" text-anchor="middle">signal trampolines</text>
+<rect x="56.0" y="458" width="87.0" height="24" rx="6" class="pill"/>
+<text x="99.5" y="474.0" class="chip" text-anchor="middle">thread exit</text>
+<rect x="149.0" y="458" width="112.0" height="24" rx="6" class="pill"/>
+<text x="205.0" y="474.0" class="chip" text-anchor="middle">stdio fast path</text>
+<rect x="440" y="196" width="320" height="298" rx="12" class="card"/>
+<text x="458.0" y="221.0" class="tag blue" text-anchor="start">SUPERVISOR</text>
+<text x="458.0" y="246.0" class="title" text-anchor="start">The Linux ABI, emulated</text>
+<text x="458.0" y="267.0" class="small" text-anchor="start">Owns all file and network I/O.</text>
+<rect x="456.0" y="282" width="99.5" height="24" rx="6" class="pill"/>
+<text x="505.8" y="298.0" class="chip" text-anchor="middle">vfs Namespace</text>
+<rect x="561.5" y="282" width="61.9" height="24" rx="6" class="pill"/>
+<text x="592.5" y="298.0" class="chip" text-anchor="middle">overlay</text>
+<rect x="629.4" y="282" width="49.3" height="24" rx="6" class="pill"/>
+<text x="654.1" y="298.0" class="chip" text-anchor="middle">tmpfs</text>
+<rect x="456.0" y="312" width="51.5" height="24" rx="6" class="pill"/>
+<text x="481.8" y="328.0" class="chip mono" text-anchor="middle">/proc</text>
+<rect x="513.5" y="312" width="44.8" height="24" rx="6" class="pill"/>
+<text x="536.0" y="328.0" class="chip mono" text-anchor="middle">/sys</text>
+<rect x="564.4" y="312" width="44.8" height="24" rx="6" class="pill"/>
+<text x="586.8" y="328.0" class="chip mono" text-anchor="middle">/dev</text>
+<rect x="615.2" y="312" width="61.9" height="24" rx="6" class="pill"/>
+<text x="646.2" y="328.0" class="chip" text-anchor="middle">cgroups</text>
+<rect x="683.1" y="312" width="55.6" height="24" rx="6" class="pill"/>
+<text x="710.9" y="328.0" class="chip" text-anchor="middle">mounts</text>
+<rect x="456.0" y="342" width="61.9" height="24" rx="6" class="pill"/>
+<text x="486.9" y="358.0" class="chip" text-anchor="middle">sockets</text>
+<rect x="523.9" y="342" width="118.3" height="24" rx="6" class="pill"/>
+<text x="583.0" y="358.0" class="chip" text-anchor="middle">egress allowlist</text>
+<rect x="648.2" y="342" width="49.3" height="24" rx="6" class="pill"/>
+<text x="672.9" y="358.0" class="chip" text-anchor="middle">epoll</text>
+<rect x="456.0" y="372" width="49.3" height="24" rx="6" class="pill"/>
+<text x="480.7" y="388.0" class="chip" text-anchor="middle">pipes</text>
+<rect x="511.4" y="372" width="43.1" height="24" rx="6" class="pill"/>
+<text x="532.9" y="388.0" class="chip" text-anchor="middle">ptys</text>
+<rect x="560.4" y="372" width="61.9" height="24" rx="6" class="pill"/>
+<text x="591.4" y="388.0" class="chip" text-anchor="middle">signals</text>
+<rect x="628.3" y="372" width="68.2" height="24" rx="6" class="pill"/>
+<text x="662.4" y="388.0" class="chip" text-anchor="middle">SysV IPC</text>
+<rect x="456.0" y="402" width="43.1" height="24" rx="6" class="pill"/>
+<text x="477.5" y="418.0" class="chip" text-anchor="middle">fork</text>
+<rect x="505.1" y="402" width="43.1" height="24" rx="6" class="pill"/>
+<text x="526.6" y="418.0" class="chip" text-anchor="middle">exec</text>
+<rect x="554.2" y="402" width="55.6" height="24" rx="6" class="pill"/>
+<text x="582.0" y="418.0" class="chip" text-anchor="middle">ptrace</text>
+<rect x="615.8" y="402" width="55.6" height="24" rx="6" class="pill"/>
+<text x="643.6" y="418.0" class="chip" text-anchor="middle">timers</text>
+<rect x="677.4" y="402" width="61.9" height="24" rx="6" class="pill"/>
+<text x="708.3" y="418.0" class="chip" text-anchor="middle">inotify</text>
+<rect x="456.0" y="432" width="49.3" height="24" rx="6" class="pill"/>
+<text x="480.7" y="448.0" class="chip" text-anchor="middle">users</text>
+<rect x="511.4" y="432" width="93.2" height="24" rx="6" class="pill"/>
+<text x="558.0" y="448.0" class="chip" text-anchor="middle">capabilities</text>
+<rect x="610.6" y="432" width="80.7" height="24" rx="6" class="pill"/>
+<text x="650.9" y="448.0" class="chip" text-anchor="middle">namespaces</text>
+<path d="M360,406 L440,406" class="wire"/>
+<path d="M435,401 L440,406 L435,411" class="head"/>
+<path d="M440,450 L360,450" class="wire"/>
+<path d="M365,445 L360,450 L365,455" class="head"/>
+<text x="400.0" y="398.0" class="small" text-anchor="middle">request</text>
+<text x="400.0" y="468.0" class="small" text-anchor="middle">reply</text>
+<text x="400.0" y="432.0" class="small" text-anchor="middle">shared</text>
+<text x="400.0" y="446.0" class="small" text-anchor="middle">memory</text>
+<path d="M258.3,324 L258.3,366" class="wire"/>
+<path d="M253.29500000000002,361 L258.295,366 L263.295,361" class="head"/>
+<path d="M253.29500000000002,329 L258.295,324 L263.295,329" class="head"/>
+<text x="268.3" y="360.0" class="small" text-anchor="start">trap · resume</text>
+<rect x="110" y="540" width="580" height="82" rx="12" class="card"/>
+<text x="400.0" y="564.0" class="tag red" text-anchor="middle">HOST BACKSTOP</text>
+<text x="400.0" y="587.0" class="title" text-anchor="middle">seccomp · Seatbelt · AppContainer</text>
+<text x="400.0" y="607.0" class="sub" text-anchor="middle">a syscall the rewriter missed kills the guest: ErrKilled</text>
+<path d="M40,312 L30,312 L30,581 L110,581" class="miss"/>
+<path d="M105,576 L110,581 L105,586" class="misshead"/>
+<text x="400.0" y="650.0" class="small" text-anchor="middle">Hosts: Linux, macOS and Windows, on amd64 and arm64.</text>
+<text x="400.0" y="667.0" class="small" text-anchor="middle">A guest runs on a host of its own architecture; an Apple Silicon Mac also runs x86-64 guests through Rosetta.</text>
+<circle r="4.5" class="dot" opacity="0">
+  <animateMotion path="M210,90 L210,196" keyPoints="0;0;1;1" keyTimes="0;0.000;0.050;1" calcMode="linear" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.000;0.000;0.055;0.067;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</circle>
+<rect x="56.0" y="300" width="38.1" height="24" rx="6" class="glow" style="fill:var(--green);stroke:var(--green)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.048;0.060;0.090;0.102;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+<rect x="100.1" y="300" width="38.1" height="24" rx="6" class="glow" style="fill:var(--green);stroke:var(--green)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.083;0.095;0.125;0.137;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+<rect x="144.3" y="300" width="38.1" height="24" rx="6" class="glow" style="fill:var(--green);stroke:var(--green)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.118;0.130;0.160;0.172;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+<rect x="188.4" y="300" width="31.4" height="24" rx="6" class="glow" style="fill:var(--green);stroke:var(--green)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.153;0.165;0.195;0.207;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+<rect x="225.8" y="300" width="65.0" height="24" rx="6" class="glow" style="fill:var(--amber);stroke:var(--amber)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.188;0.200;0.300;0.312;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+<circle r="4.5" class="dot" opacity="0">
+  <animateMotion path="M258.3,324 L258.3,366" keyPoints="0;0;1;1" keyTimes="0;0.210;0.260;1" calcMode="linear" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.198;0.210;0.265;0.277;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</circle>
+<rect x="40.0" y="366" width="320.0" height="128" rx="12" class="glowcard" style="fill:var(--amber);stroke:var(--amber)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.248;0.260;0.300;0.312;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+<circle r="4.5" class="dot" opacity="0">
+  <animateMotion path="M360,406 L440,406" keyPoints="0;0;1;1" keyTimes="0;0.310;0.370;1" calcMode="linear" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.298;0.310;0.375;0.387;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</circle>
+<rect x="456.0" y="282" width="99.5" height="24" rx="6" class="glow" style="fill:var(--blue);stroke:var(--blue)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.358;0.370;0.450;0.462;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+<rect x="456.0" y="312" width="51.5" height="24" rx="6" class="glow" style="fill:var(--blue);stroke:var(--blue)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.378;0.390;0.450;0.462;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+<circle r="4.5" class="dot" opacity="0">
+  <animateMotion path="M440,450 L360,450" keyPoints="0;0;1;1" keyTimes="0;0.450;0.510;1" calcMode="linear" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.438;0.450;0.515;0.527;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</circle>
+<circle r="4.5" class="dot" opacity="0">
+  <animateMotion path="M258.3,366 L258.3,324" keyPoints="0;0;1;1" keyTimes="0;0.520;0.570;1" calcMode="linear" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.508;0.520;0.575;0.587;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</circle>
+<rect x="296.8" y="300" width="38.1" height="24" rx="6" class="glow" style="fill:var(--green);stroke:var(--green)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.558;0.570;0.620;0.632;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+<rect x="225.8" y="300" width="65.0" height="24" rx="6" class="glow" style="fill:var(--red);stroke:var(--red)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.668;0.680;0.740;0.752;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+<circle r="4.5" class="reddot" opacity="0">
+  <animateMotion path="M40,312 L30,312 L30,581 L110,581" keyPoints="0;0;1;1" keyTimes="0;0.700;0.840;1" calcMode="linear" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.688;0.700;0.845;0.857;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</circle>
+<rect x="110.0" y="540" width="580.0" height="82" rx="12" class="glowcard" style="fill:var(--red);stroke:var(--red)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.828;0.840;0.970;0.982;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+<rect x="40.0" y="196" width="320.0" height="148" rx="12" class="glowcard" style="fill:var(--red);stroke:var(--red)" opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0.000;0.848;0.860;0.970;0.982;1.000" dur="9.0s" begin="0.4s" repeatCount="indefinite"/>
+</rect>
+</svg>

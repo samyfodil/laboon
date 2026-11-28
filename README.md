@@ -27,8 +27,9 @@ laboon runs unmodified Linux binaries and OCI containers with the guest's
 machine code executing natively on the host CPU. It intercepts only syscall
 instructions: a supervisor emulates the Linux ABI, with no second kernel or
 instruction emulator. This is the syscall-interception class of design, like
-gVisor. Native execution means no VM on any supported host, but requires a
-matching CPU architecture: amd64 or arm64, with no translation between them.
+gVisor. Native execution means no VM on any supported host, and a guest runs
+on a host of its own architecture, amd64 or arm64. The exception is an Apple
+Silicon Mac, which also runs x86-64 guests, translated by Rosetta.
 
 Isolation has **two independent layers**: supervisor mediation through a
 confined filesystem with no direct host paths, a fixed device allowlist, and
@@ -43,6 +44,13 @@ Linux, macOS, and Windows, subject to the documented
 [platform limits](docs/permissions-and-limits.md). laboon is newer, with a small host
 surface by design; its daemon and OCI runtime should not be read as claims
 of production maturity or complete engine compatibility.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+    <img src="docs/assets/architecture-light.svg" alt="An unmodified Linux program or container is loaded into one laboon host process, with no VM and no second kernel. Its code runs as is on the host CPU; only its syscall instructions are rewritten to trap into a stub in the same address space, which forwards the call over a shared-memory channel to the supervisor. The supervisor emulates the Linux ABI, with the vfs Namespace, /proc, /sys, /dev, sockets, an egress allowlist, signals, ptys, fork, exec and ptrace, and replies so the program resumes. A syscall the rewriter missed reaches the host backstop, seccomp, Seatbelt or AppContainer, which kills the guest." width="100%">
+  </picture>
+</p>
 
 [Install](#install) · [Get started](#get-started) · [Ways to run it](#ways-to-run-it) ·
 [How it works](#how-it-works) · [Performance](#performance) ·
