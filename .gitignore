@@ -27,3 +27,4 @@
 /macos/m*/*.elf
 /macos/m*/*.elf.o
 /macos/m*/*.bin
+.gstack/
