@@ -78,6 +78,7 @@ const L1_IPA: u64 = 0x3FE0_1000;
 const L0_IPA: u64 = 0x3FE0_2000;
 const VBAR: u64 = 0x3FE1_0000;
 const TLBI_TRAMP: u64 = VBAR + 0x800; // tlbi; dsb; isb; hvc -- run to flush the guest TLB
+const IC_TRAMP: u64 = VBAR + 0x880; // dsb; ic ialluis; dsb; isb; hvc -- run to drop stale guest instructions
 // rt_sigreturn restorer trampoline (`mov x8, #139; svc #0`). A signal handler
 // with no SA_RESTORER returns (ret to x30) to the kernel's VDSO sigreturn
 // trampoline; we have no VDSO, so deliverSignal points x30 here instead. Go and
@@ -284,6 +285,12 @@ pub const Vmm = struct {
         v.put32(TLBI_TRAMP + 4, 0xD5033B9F);
         v.put32(TLBI_TRAMP + 8, 0xD5033FDF);
         v.put32(TLBI_TRAMP + 12, 0xD4000022);
+        // Instruction-cache trampoline: dsb ish; ic ialluis; dsb ish; isb; hvc #1.
+        v.put32(IC_TRAMP + 0, 0xD5033B9F);
+        v.put32(IC_TRAMP + 4, 0xD508711F);
+        v.put32(IC_TRAMP + 8, 0xD5033B9F);
+        v.put32(IC_TRAMP + 12, 0xD5033FDF);
+        v.put32(IC_TRAMP + 16, 0xD4000022);
         // rt_sigreturn restorer: mov x8, #139 (0x8b); svc #0.
         v.put32(SIG_RESTORER + 0, 0xD2801168);
         v.put32(SIG_RESTORER + 4, 0xD4000001);
@@ -634,15 +641,28 @@ pub const Vmm = struct {
     // the x86 entry). It points the vcpu at a one-shot trampoline (tlbi vmalle1;
     // dsb; isb; hvc) and runs it, then the caller resumes the guest normally.
     fn flushTlb(v: *Vmm) void {
+        v.runTramp(TLBI_TRAMP, 16);
+    }
+
+    // syncCode has the guest drop the instructions it holds, after the stub
+    // writes guest memory for a tracer, which may be code the guest has run:
+    // as with the TLB, the host cannot do it for the guest.
+    fn syncCode(v: *Vmm) void {
+        v.runTramp(IC_TRAMP, 20);
+    }
+
+    // runTramp runs the trampoline at at, n bytes ending in its hvc, on the
+    // vcpu, then puts the guest's pc back for the caller to resume it.
+    fn runTramp(v: *Vmm, at: u64, n: u64) void {
         var pc: u64 = 0;
         _ = hv_vcpu_get_reg(v.vcpu, REG_PC, &pc);
-        _ = hv_vcpu_set_reg(v.vcpu, REG_PC, TLBI_TRAMP);
-        // Runs tlbi; dsb; isb; hvc and exits back here. A kick may cancel the
-        // run before the trampoline ends: it goes on from where it stood.
+        _ = hv_vcpu_set_reg(v.vcpu, REG_PC, at);
+        // It exits back here at its hvc. A kick may cancel the run before the
+        // trampoline ends: it goes on from where it stood.
         while (hv_vcpu_run(v.vcpu) == HV_SUCCESS and v.exit.reason != EXIT_EXCEPTION) {
-            var at: u64 = 0;
-            _ = hv_vcpu_get_reg(v.vcpu, REG_PC, &at);
-            if (at == TLBI_TRAMP + 16) break;
+            var cur: u64 = 0;
+            _ = hv_vcpu_get_reg(v.vcpu, REG_PC, &cur);
+            if (cur == at + n) break;
         }
         _ = hv_vcpu_set_reg(v.vcpu, REG_PC, pc);
     }
@@ -1005,6 +1025,7 @@ pub const Vmm = struct {
                 if (ch.ret == 0) {
                     const n: usize = @intCast(ch.args[1]);
                     @memcpy((v.ram + @as(usize, @intCast(ch.args[0])))[0..n], window(ch)[0..n]);
+                    if (ch.kind == chan.REP_FORCEPOKE) v.syncCode();
                 }
             },
             // Perform a Darwin syscall the supervisor delegated. Pointer args
