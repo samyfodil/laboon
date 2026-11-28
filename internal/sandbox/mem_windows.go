@@ -423,7 +423,7 @@ func (g *wguest) codeFill(dg *dguest, fd, off, n, addr uint64, areas []trampArea
 			return nil, nil, nil, func() {}, osErrno(err)
 		}
 	}
-	if g.cfg.NoRewrite {
+	if g.cfg.NoRewrite && !rewritesRawSyscalls {
 		return buf, nil, nil, release, 0
 	}
 	src := imageSrc{data: img}

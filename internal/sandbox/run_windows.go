@@ -850,7 +850,7 @@ func (g *wguest) loadELF(src imageSrc, dynBias uint64) (*wimage, error) {
 				return nil, errors.New("writable and executable segment refused (W^X)")
 			}
 			prot |= 4
-			if !g.cfg.NoRewrite {
+			if !g.cfg.NoRewrite || rewritesRawSyscalls {
 				rw.segment(seg, bias+p.Vaddr, p.Vaddr)
 			}
 		}
@@ -878,11 +878,10 @@ func (g *wguest) loadELF(src imageSrc, dynBias uint64) (*wimage, error) {
 
 // strayPolicy reports the stray syscall encodings a rewrite left: they are
 // not at an instruction boundary (an immediate, a displacement, a data word
-// in text), so only a jump into the middle of an instruction runs one. On
-// x86-64 the stub's instrumentation-callback backstop (stub/windows/instrcb.zig)
-// then kills the guest (ErrKilled), like seccomp on Linux; on arm64 (no backstop
-// yet) only the AppContainer bounds it. strictRewrite refuses such an image
-// instead, for a provably complete rewrite.
+// in text), so only a jump into the middle of an instruction runs one. The
+// stub's instrumentation-callback backstop (stub/windows/instrcb.zig) then
+// kills the guest (ErrKilled), like seccomp on Linux. strictRewrite refuses
+// such an image instead, for a provably complete rewrite.
 func (g *wguest) strayPolicy(stray []uint64) error {
 	for _, a := range stray {
 		g.tracef("[lc] stray syscall encoding at %#x left in place\n", a)

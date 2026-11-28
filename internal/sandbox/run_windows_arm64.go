@@ -93,11 +93,12 @@ func (r *imageRewriter) place(areas []trampArea) {
 	}
 }
 
+// rewritesRawSyscalls: an image whose syscalls stay raw (NoRewrite) still has
+// its system-register sites rewritten, as the stub keeps the TEB in tpidr_el0.
+const rewritesRawSyscalls = true
+
 func (g *wguest) newRewriter(src imageSrc) (*imageRewriter, error) {
 	r := &imageRewriter{g: g}
-	if g.cfg.NoRewrite {
-		return nil, errNoBackstop
-	}
 	f, err := elf.NewFile(src.reader())
 	if err != nil {
 		return nil, err
@@ -157,7 +158,9 @@ func (r *imageRewriter) segment(seg []byte, vaddr, elfVaddr uint64) {
 			svc = append(svc, int(o))
 		}
 	}
-	r.w.Apply(svc, seg, vaddr)
+	if !r.g.cfg.NoRewrite {
+		r.w.Apply(svc, seg, vaddr)
+	}
 	r.left = append(r.left, r.w.Sysreg(sys, seg, vaddr, tebSlotTP, ctrEL0)...)
 	r.dcNops += nopDataCacheOps(seg)
 }

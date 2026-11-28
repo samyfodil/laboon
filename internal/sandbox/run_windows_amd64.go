@@ -59,6 +59,10 @@ type imageRewriter struct {
 	areas int // the areas place was given
 }
 
+// rewritesRawSyscalls: an image whose syscalls stay raw (NoRewrite) is left
+// as it is.
+const rewritesRawSyscalls = false
+
 func (g *wguest) newRewriter(src imageSrc) (*imageRewriter, error) {
 	r := &imageRewriter{g: g}
 	if !g.cfg.NoRewrite {

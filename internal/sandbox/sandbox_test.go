@@ -49,9 +49,8 @@ func TestRunHello(t *testing.T) {
 // fatal; it is now mediated, never executed raw, so the sandbox boundary is
 // unchanged.)
 //
-// Windows has no trap to serve a raw syscall from: on amd64 its
-// instrumentation-callback backstop kills the guest, and arm64, which has no
-// backstop, refuses to run without rewriting.
+// Windows has no trap to serve a raw syscall from: its instrumentation-
+// callback backstop kills the guest.
 func TestNoRewriteRunsViaTrap(t *testing.T) {
 	var stdout bytes.Buffer
 	code, err := Run(context.Background(), buildHello(t), Config{
@@ -61,14 +60,9 @@ func TestNoRewriteRunsViaTrap(t *testing.T) {
 		NoRewrite: true,
 	})
 	switch {
-	case runtime.GOOS == "windows" && runtime.GOARCH == "amd64":
+	case runtime.GOOS == "windows":
 		if !errors.Is(err, ErrKilled) {
 			t.Fatalf("code=%d err=%v, want ErrKilled (the backstop kills a raw syscall)", code, err)
-		}
-		return
-	case runtime.GOOS == "windows":
-		if !errors.Is(err, errNoBackstop) {
-			t.Fatalf("code=%d err=%v, want errNoBackstop", code, err)
 		}
 		return
 	}

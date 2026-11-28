@@ -28,6 +28,7 @@ const ool = @import("ool.zig");
 const win = std.os.windows;
 const stub = @import("stub.zig");
 const sig = @import("sig.zig");
+const instrcb = @import("instrcb.zig");
 const sigx = @import("sig_aarch64.zig");
 const thread = @import("thread.zig");
 
@@ -788,6 +789,11 @@ pub fn onException(ep: *win.EXCEPTION_POINTERS) callconv(win.WINAPI) i32 {
         c.Pc += 8;
         return -1;
     }
+    // A guest thread faulting in ntdll got there by a raw syscall the
+    // backstop let through because the kernel resumed it in ntdll (a
+    // service that transfers control, as a callback return does): it is no
+    // guest fault, and ends the guest as the backstop does.
+    if (!stub.ownCode(c.Pc) and sig.inGuest() and instrcb.inNtdll(c.Pc)) stub.die(instrcb.BACKSTOP_KILL);
     // Hold the thread for the handler: it talks to the supervisor (isTrap,
     // wxFault's hot/cool, exclTrap, sig.fault) and must not be context-stolen
     // mid-exchange. A signal that arrives meanwhile is taken on the way out: a

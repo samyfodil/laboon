@@ -1,4 +1,4 @@
-// instrcb.zig — the Windows syscall backstop (x86-64): the seccomp analog.
+// instrcb.zig — the Windows syscall backstop: the seccomp analog.
 //
 // The guest shares the stub's address space. The rewriter turns its syscall
 // sites into trampolines or ud2 traps, but it cannot be provably complete (a
@@ -6,7 +6,9 @@
 // the rewriter missed goes straight to the NT dispatcher with no VEH-catchable
 // trap (windows/probes/p4). The instrumentation callback is the one mechanism
 // that sees it: the kernel enters lc_instr_thunk on every return to user mode
-// with r10 = the address the syscall returns to and rax = its result.
+// with the address the syscall returns to in r10 (x86-64) or x16 (arm64), and
+// its result in rax or x0. A stray arm64 `svc #0` would otherwise run as the
+// NT service 0 with the guest's registers.
 //
 // The stub emits no raw `syscall` and reaches the kernel only through ntdll, so
 // a syscall returning into ntdll is the stub's own and a return anywhere else
@@ -14,8 +16,7 @@
 // ErrKilled. This is the Linux seccomp text-range check (stub/zig/seccomp.zig)
 // expressed as a module range. Unlike seccomp it is revocable, so it is a
 // backstop over the LPAC AppContainer, not a sole boundary; the hypervisor
-// (WHP) backend is the airtight form. arm64 has a different callback-entry ABI
-// (its own probe and thunk); until then arm64 keeps strict rewriting.
+// (WHP) backend is the airtight form.
 
 const std = @import("std");
 const win = std.os.windows;
@@ -33,12 +34,34 @@ extern "ntdll" fn NtSetInformationProcess(h: stub.HANDLE, class: u32, info: *con
 export var lc_ntdll_lo: u64 = 0;
 export var lc_ntdll_span: u64 = 0;
 
-// The callback. On entry r10 = return address and rax = the syscall result;
-// r11 is syscall-dead, so it is free scratch. We touch only r11 and the flags
-// (saved and restored around the compare), leave rax intact, and jmp r10 on the
-// common ntdll path so the stub's own syscall return is undisturbed.
+// The callback. x86-64: r11 is syscall-dead, so it is free scratch; we touch
+// only r11 and the flags (saved and restored around the compare), leave rax
+// intact, and jmp r10 on the common ntdll path so the stub's own syscall
+// return is undisturbed. arm64: x17 is free (the kernel hands it over
+// cleared) and x0, x1 and the flags are kept on the stack around the
+// compare, below sp, where nothing lives; a stray loads the TEB into x18
+// from tpidr_el0 (aarch64.zig threadInit), as the guest's x18 is in place.
 comptime {
-    asm (
+    if (@import("builtin").cpu.arch == .aarch64) asm (
+        \\.globl lc_instr_thunk
+        \\lc_instr_thunk:
+        \\  stp x0, x1, [sp, #-16]!
+        \\  mrs x1, nzcv
+        \\  adrp x17, lc_ntdll_lo
+        \\  ldr x17, [x17, :lo12:lc_ntdll_lo]
+        \\  sub x0, x16, x17
+        \\  adrp x17, lc_ntdll_span
+        \\  ldr x17, [x17, :lo12:lc_ntdll_span]
+        \\  cmp x0, x17
+        \\  b.hs 1f
+        \\  msr nzcv, x1
+        \\  ldp x0, x1, [sp], #16
+        \\  br x16
+        \\1:
+        \\  ldp x0, x1, [sp], #16
+        \\  mrs x18, tpidr_el0
+        \\  b lc_instr_stray
+    ) else asm (
         \\.globl lc_instr_thunk
         \\lc_instr_thunk:
         \\  pushfq

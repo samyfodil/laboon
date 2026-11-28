@@ -20,10 +20,6 @@ import (
 // out-of-policy call); on macOS the Seatbelt allowlist denies.
 var ErrKilled = errors.New("guest killed by the syscall backstop: rejected syscall")
 
-// errNoBackstop refuses NoRewrite on a host with no syscall backstop to
-// mediate the guest's raw syscalls (windows/arm64).
-var errNoBackstop = errors.New("syscall rewriting cannot be turned off on this host: it has no syscall backstop")
-
 var defaultCache = sync.OnceValue(func() *rewrite.Cache { return rewrite.NewCache("") })
 
 // discarded reports whether w is a standard output stream that goes to the
@@ -94,9 +90,8 @@ type Config struct {
 	Cache *rewrite.Cache
 	// NoRewrite skips syscall rewriting, so every guest syscall is a raw one
 	// that reaches the host's backstop: on Linux and macOS it is served
-	// through the trap, as a rewritten site is; on windows/amd64 the
-	// instrumentation-callback backstop kills the guest (ErrKilled); and
-	// windows/arm64, which has no backstop, refuses to run (errNoBackstop).
+	// through the trap, as a rewritten site is; on Windows the
+	// instrumentation-callback backstop kills the guest (ErrKilled).
 	NoRewrite bool
 	// RejectRWX refuses writable+executable guest memory: a mapping or
 	// protection change asking for both fails with EACCES (W^X). Without it

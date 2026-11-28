@@ -1499,7 +1499,7 @@ pub fn wxFault(addr: u64, kind: u64, pc: u64, st: *Step) Verdict {
             }
             if (regs[i].prot & PROT_WRITE == 0) return .none;
             if (!exec) return .handled; // made writable meanwhile
-            if (pc & ~(PAGE - 1) == page and !st.from_slot) return done(setProt(page, PAGE_EXECUTE_READWRITE)); // self-modifying, its traps kept
+            if (pc & ~(PAGE - 1) == page and !st.from_slot) return ownStore(i, page, addr, pc, st);
             if (!stopPage(page, winProt(regs[i].prot & ~PROT_EXEC))) return .none;
             return storeHeld(0, page, addr, pc, st);
         }
@@ -1737,16 +1737,44 @@ fn storeHeld(key: u64, soff: u64, addr: u64, pc: u64, st: *Step) Verdict {
         return .attach;
     }
     if (!st.lost) return .retry;
+    if (!outOfLine(addr, pc, st)) return .handled;
+    st.hold = hold(key, soff);
+    st.again = true;
+    return .step;
+}
+
+// ownStore readies the write code made executable at run time makes into its
+// own page, from pc, to run out of line: the page stops running, and the next
+// fetch from it waits for the store and has the page rewritten again, so what
+// the store wrote runs only once its syscalls are trapped. A store exclusive,
+// whose loop would lose its monitor to every other thread's stop of the page,
+// and a store that cannot run out of line run in place, the page writable and
+// executable, where a syscall written later meets the backstop (instrcb.zig).
+// The lock is held.
+fn ownStore(i: usize, page: u64, addr: u64, pc: u64, st: *Step) Verdict {
+    const exclusive = @import("builtin").cpu.arch == .aarch64 and ool.storeExclusive(@as(*const u32, @ptrFromInt(pc)).*);
+    if (exclusive or !outOfLine(addr, pc, st)) return done(setProt(page, PAGE_EXECUTE_READWRITE));
+    if (!stopPage(page, winProt(regs[i].prot & ~PROT_EXEC))) return .none;
+    st.hold = hold(0, page);
+    st.again = false;
+    return .step;
+}
+
+// outOfLine puts the store at pc, into addr, in st to run out of line: on
+// arm64 a store exclusive with its window from its load exclusive, when that
+// runs the same again (ool.rerunnable), its memory touched first, as a fault
+// in the window would lose the monitor again. It reports whether it can.
+fn outOfLine(addr: u64, pc: u64, st: *Step) bool {
     st.start = pc;
     switch (@import("builtin").cpu.arch) {
         .aarch64 => {
             const w = @as(*const u32, @ptrFromInt(pc)).*;
             if (ool.storeExclusive(w)) {
                 const cp = pc & ~(PAGE - 1);
-                const n = ool.window(@ptrFromInt(cp), cp, pc, w) orelse return .handled;
+                const n = ool.window(@ptrFromInt(cp), cp, pc, w) orelse return false;
                 const words: [*]u32 = @ptrCast(@alignCast(&st.code));
                 @memcpy(words[0..n], @as([*]const u32, @ptrFromInt(pc - 4 * (n - 1)))[0..n]);
-                if (!ool.rerunnable(words[0..n])) return .handled;
+                if (!ool.rerunnable(words[0..n])) return false;
                 st.n = n;
                 st.start = pc - 4 * (n - 1);
                 touch(addr);
@@ -1755,11 +1783,9 @@ fn storeHeld(key: u64, soff: u64, addr: u64, pc: u64, st: *Step) Verdict {
                 st.n = 1;
             }
         },
-        else => if (!storeAt(pc, st)) return .handled,
+        else => if (!storeAt(pc, st)) return false,
     }
-    st.hold = hold(key, soff);
-    st.again = true;
-    return .step;
+    return true;
 }
 
 // storeAt puts the x86-64 instruction at pc in st, to run out of line, and

@@ -43,11 +43,8 @@ pub const arch = switch (builtin.cpu.arch) {
     else => @compileError("unsupported architecture"),
 };
 
-// instrcb is the x86-64 syscall backstop (the seccomp analog). arm64's
-// callback-entry ABI differs and has no thunk yet, so it stays strict-rewrite.
-const instrcb = if (builtin.cpu.arch == .x86_64) @import("instrcb.zig") else struct {
-    pub fn install() void {}
-};
+// instrcb is the syscall backstop (the seccomp analog).
+const instrcb = @import("instrcb.zig");
 
 pub const SLOT_CONT = 0x1480 + 59 * 8;
 pub const SLOT_STK = 0x1480 + 60 * 8;

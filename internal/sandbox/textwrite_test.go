@@ -23,3 +23,15 @@ func TestTextWrite(t *testing.T) {
 		}
 	}
 }
+
+// TestOwnSyscall: code writes a syscall into the page it runs from, in
+// writable and executable memory, and the program runs it: it is served as
+// the guest's, not run on the host.
+func TestOwnSyscall(t *testing.T) {
+	root, prog := guestRoot(t, "ownsyscall")
+	var o bytes.Buffer
+	code, err := Run(context.Background(), prog, Config{RootFS: HostRoot(root), Args: []string{"ownsyscall"}, Stdout: &o, Stderr: &o})
+	if err != nil || code != 0 || o.String() != "own syscall ok\n" {
+		t.Fatalf("code=%d err=%v\n%s", code, err, o.String())
+	}
+}
