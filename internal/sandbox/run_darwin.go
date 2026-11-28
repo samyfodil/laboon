@@ -908,14 +908,16 @@ func signedStubFor(x64 bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return signAdhoc(b, prefix)
+	return signAdhoc(b, prefix, "")
 }
 
 // signAdhoc writes bin to the user cache directory under its content hash,
-// ad-hoc codesigns it and returns the path, reusing an already-signed copy: the
-// first exec of a newly signed binary costs about 130 ms of signature checking,
-// later execs of the same file about 10 ms.
-func signAdhoc(bin []byte, prefix string) (string, error) {
+// ad-hoc codesigns it, with the entitlements plist ent when it is not empty,
+// and returns the path, reusing an already-signed copy: the first exec of a
+// newly signed binary costs about 130 ms of signature checking, later execs of
+// the same file about 10 ms. Runs signing the same binary at once each sign a
+// copy of their own and rename it into place.
+func signAdhoc(bin []byte, prefix, ent string) (string, error) {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		dir = os.TempDir()
@@ -929,26 +931,47 @@ func signAdhoc(bin []byte, prefix string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	f, err := os.CreateTemp(dir, "."+prefix+"*")
+	tmp, err := writeTemp(dir, "."+prefix+"*", bin, 0o755)
 	if err != nil {
 		return "", err
 	}
-	tmp := f.Name()
 	defer os.Remove(tmp) // a no-op once renamed into place
-	if _, err := f.Write(bin); err != nil {
+	args := []string{"-s", "-", "--force", tmp}
+	if ent != "" {
+		entPath, err := writeTemp(dir, ".entitlements-*.plist", []byte(ent), 0o600)
+		if err != nil {
+			return "", err
+		}
+		defer os.Remove(entPath)
+		args = append([]string{"--entitlements", entPath}, args...)
+	}
+	if out, err := exec.Command("codesign", args...).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("codesign %s: %v: %s", prefix, err, out)
+	}
+	return path, os.Rename(tmp, path)
+}
+
+// writeTemp writes b to a new file in dir named by pattern, with mode perm,
+// and returns its path.
+func writeTemp(dir, pattern string, b []byte, perm os.FileMode) (string, error) {
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.Write(b); err != nil {
 		f.Close()
+		os.Remove(f.Name())
 		return "", err
 	}
 	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
 		return "", err
 	}
-	if err := os.Chmod(tmp, 0o755); err != nil {
+	if err := os.Chmod(f.Name(), perm); err != nil {
+		os.Remove(f.Name())
 		return "", err
 	}
-	if out, err := exec.Command("codesign", "-s", "-", "--force", tmp).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("codesign stub: %v: %s", err, out)
-	}
-	return path, os.Rename(tmp, path)
+	return f.Name(), nil
 }
 
 // hvfEntitlement grants Hypervisor.framework access; the HVF stub is ad-hoc
@@ -960,50 +983,10 @@ const hvfEntitlement = `<?xml version="1.0" encoding="UTF-8"?>
 `
 
 // signedHvfStub returns the path of the embedded HVF stub, ad-hoc codesigned
-// WITH the hypervisor entitlement and cached under its content hash like
-// signedStub. Unlike the native stub it needs no patchStub edits: the guest's
-// Linux code runs in the VM, not in the stub's own registers, so the stub is
-// ordinary macOS code.
-func signedHvfStub() (string, error) {
-	bin := macstub.HvfBinary
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		dir = os.TempDir()
-	}
-	dir = filepath.Join(dir, "laboon")
-	sum := sha256.Sum256(bin)
-	path := filepath.Join(dir, "hvfstub-"+hex.EncodeToString(sum[:8]))
-	if _, err := os.Stat(path); err == nil {
-		return path, nil
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	ent := filepath.Join(dir, "hvf-entitlement.plist")
-	if err := os.WriteFile(ent, []byte(hvfEntitlement), 0o600); err != nil {
-		return "", err
-	}
-	f, err := os.CreateTemp(dir, ".hvfstub-*")
-	if err != nil {
-		return "", err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	if _, err := f.Write(bin); err != nil {
-		f.Close()
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(tmp, 0o755); err != nil {
-		return "", err
-	}
-	if out, err := exec.Command("codesign", "-s", "-", "--entitlements", ent, "--force", tmp).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("codesign hvf stub: %v: %s", err, out)
-	}
-	return path, os.Rename(tmp, path)
-}
+// WITH the hypervisor entitlement and cached under its content hash. Unlike
+// the native stub it needs no patchStub edits: the guest's Linux code runs in
+// the VM, not in the stub's own registers, so the stub is ordinary macOS code.
+func signedHvfStub() (string, error) { return signAdhoc(macstub.HvfBinary, "hvfstub-", hvfEntitlement) }
 
 // pageZeroSize is arm64 macOS's mandatory 4 GiB __PAGEZERO: a non-PIE ET_EXEC
 // whose load segments fall inside it cannot be mapped in the stub's own address
