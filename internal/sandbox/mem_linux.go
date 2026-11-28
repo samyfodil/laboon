@@ -26,8 +26,6 @@ type memProc struct {
 	pid  atomic.Int64 // a live thread of the stub process (its leader's, until an exec from another thread)
 	refs int
 
-	mirrorsP atomic.Pointer[mirrors] // memfd-backed guest ranges mapped in the supervisor (LABOON_SHMEM); nil when none
-
 	// The stub process's host-op thread (hop_linux.go): hopPend is its entry,
 	// hopP the same once the stub runs the thread, which routes host calls.
 	hopPend *hop
@@ -103,16 +101,8 @@ func (m *memProc) release(g *dguest) {
 	}
 }
 
+// read reads guest memory with process_vm_readv.
 func (m *memProc) read(addr uint64, b []byte) error {
-	if m.mirrorsP.Load() != nil && m.readMirror(addr, b) {
-		return nil
-	}
-	return m.readVM(addr, b)
-}
-
-// readVM reads guest memory with process_vm_readv (a syscall per call), the
-// path used when the range is not mirrored.
-func (m *memProc) readVM(addr uint64, b []byte) error {
 	for len(b) > 0 {
 		n, err := unix.ProcessVMReadv(int(m.pid.Load()),
 			[]unix.Iovec{{Base: &b[0], Len: uint64(len(b))}},
@@ -149,13 +139,6 @@ func (m *memProc) readPrefix(addr uint64, b []byte) int {
 }
 
 func (m *memProc) write(addr uint64, b []byte) error {
-	if m.mirrorsP.Load() != nil && m.writeMirror(addr, b) {
-		return nil
-	}
-	return m.writeVM(addr, b)
-}
-
-func (m *memProc) writeVM(addr uint64, b []byte) error {
 	for len(b) > 0 {
 		n, err := unix.ProcessVMWritev(int(m.pid.Load()),
 			[]unix.Iovec{{Base: &b[0], Len: uint64(len(b))}},

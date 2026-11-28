@@ -292,8 +292,6 @@ comptime {
     if (@offsetOf(Chan, "guest_rip") != 104) @compileError("guest_rip must stay at offset 104");
 }
 
-const SPIN = 4000;
-
 // LIFELINE is the read end of a pipe whose write end only the supervisor
 // holds. When the supervisor is gone the kernel sends the stubs' process
 // group SIGIO (O_ASYNC), whose default action ends every stub, waiting or
@@ -350,8 +348,7 @@ fn answered(ch: *Chan) bool {
 // supervisor that has to answer them; parking when answers are slow frees those
 // cores. park_cost (cputicks) starts at the supervisor's calibration, handed
 // over at REP_START, and then follows the wakes this process sees (parkSeen);
-// while it is 0 (not supplied, or LABOON_SPIN pinned a fixed count) the stub
-// uses the fixed SPIN below.
+// while it is 0 (not supplied yet) the stub parks at once.
 pub var park_cost: u64 = 0;
 
 // parkSeen folds the latency of the wake that ended a park into park_cost: a
@@ -469,12 +466,6 @@ pub fn exchange(ch: *Chan) void {
         }
     }
 
-    // Fixed fallback (no park cost yet, or LABOON_SPIN pinned a fixed count).
-    var i: u32 = 0;
-    while (i < SPIN) : (i += 1) {
-        if (answered(ch)) return;
-        arch.pause();
-    }
     park(ch);
 }
 

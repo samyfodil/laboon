@@ -215,8 +215,8 @@ func winDropInjector(sr *sigRun) {
 	winInjectors.Delete(sr)
 }
 
-// winSigDebug gates verbose signal-injection tracing (LC_SIGDEBUG=1).
-var winSigDebug = os.Getenv("LC_SIGDEBUG") == "1"
+// winSigDebug turns on verbose signal-injection tracing, for debugging.
+var winSigDebug bool
 
 // wakeThread reaches thread t in the stub: a cross-process APC to break any
 // alertable wait, and, when the thread is running guest code (not in stub code

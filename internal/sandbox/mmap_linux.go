@@ -131,7 +131,6 @@ func (g *dguest) mmap(a [6]uint64) (r int64) {
 		return sErr(lxENOMEM)
 	}
 	if flags&unix.MAP_FIXED != 0 {
-		g.mp.dropMirror(addr, addr+length) // a fixed mapping replaces any mirror already here
 		g.parkSpecial(addr, addr+alignUp(length))
 	}
 	if flags&unix.MAP_ANONYMOUS == 0 {
@@ -139,16 +138,6 @@ func (g *dguest) mmap(a [6]uint64) (r int64) {
 	}
 	g.dropFileCode(addr, length)
 	// Anonymous memory starts zeroed, so it holds no code to rewrite.
-	// With shared guest RAM on, a sizable non-executable anonymous mapping is
-	// memfd-backed so the supervisor sees it directly (sharedmem_linux.go).
-	// Mirror only readable/writable data mappings -- never a PROT_NONE reservation
-	// (a runtime like Go's reserves a huge range then commits parts with MAP_FIXED,
-	// and mirroring the reservation both wastes a memfd and overlaps the commits).
-	if shmemEnabled() && prot&(unix.PROT_READ|unix.PROT_WRITE) != 0 && prot&unix.PROT_EXEC == 0 && length >= shmemMin {
-		if r, ok := g.mmapMirroredAnon(addr, length, prot, flags); ok {
-			return r
-		}
-	}
 	if flags&unix.MAP_SHARED == 0 {
 		flags |= unix.MAP_PRIVATE
 	}
@@ -183,7 +172,6 @@ func (g *dguest) munmap(addr, length uint64) int64 {
 	g.untrack(addr, length)
 	g.mp.removeShMap(addr, addr+alignUp(length), g.dfs) // release any shared backing this unmaps
 	g.dropFileCode(addr, length)
-	g.mp.dropMirror(addr, addr+length)
 	g.parkSpecial(addr, addr+alignUp(length))
 	if g.onOwnStack(addr, length) {
 		// A detached musl thread's last acts are unmapping its own stack and
@@ -421,7 +409,9 @@ func (g *dguest) mremap(a [6]uint64) int64 {
 	if newLen > oldLen && g.wouldExceed(newLen-oldLen) {
 		return sErr(lxENOMEM)
 	}
-	g.mp.dropMirror(old, old+oldLen) // a moved/resized region falls back to process_vm
+	if g.growsIntoMapped(old, oldLen, newLen, flags) {
+		return sErr(lxENOMEM)
+	}
 	if flags&unix.MREMAP_FIXED != 0 {
 		g.parkSpecial(a[4], a[4]+alignUp(newLen))
 	}
@@ -459,6 +449,22 @@ func (g *dguest) mremap(a [6]uint64) int64 {
 		g.notePerm(uint64(r), newLen, unix.PROT_NONE) // one mapping moved: its protection with it
 	}
 	return r
+}
+
+// growsIntoMapped reports an mremap Linux refuses with ENOMEM before any
+// change: one mapped page grown in place, without MREMAP_MAYMOVE, over a page
+// the guest has mapped. A single page lies in one host mapping, so the host
+// would refuse it the same way; answering here spares a host call to each
+// page of a stack probed this way. g.mp.mu held.
+func (g *dguest) growsIntoMapped(old, oldLen, newLen, flags uint64) bool {
+	if flags != 0 || old%pageSize != 0 || oldLen == 0 || alignUp(oldLen) != pageSize || alignUp(newLen) <= pageSize {
+		return false
+	}
+	if _, ok := g.mp.vm.at(old); !ok {
+		return false
+	}
+	_, ok := g.mp.vm.at(old + pageSize)
+	return ok
 }
 
 // mremapMove grows a mapping in place when the pages above are free, as

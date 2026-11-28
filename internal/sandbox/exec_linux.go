@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
-	"path"
 	"slices"
 	"sync"
 
@@ -111,8 +110,8 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	for _, ch := range dg.takeOverGroup() {
 		ch.awaitGone()
 	}
-	dg.execDone(path.Base(t.gp))
-	dg.noteExec(t.gp, t.gp, argv, exePinOf(pf.f, t.gp))
+	dg.execDone(t.comm)
+	dg.noteExec(t.gp, t.comm, argv, exePinOf(pf.f, t.gp))
 	dg.mp.detachAll(dg) // exec detaches every SysV segment
 	m := dg.mp
 	m.mu.Lock()

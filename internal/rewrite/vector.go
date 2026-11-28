@@ -1,10 +1,6 @@
 package rewrite
 
-import (
-	"os"
-	"sync"
-	"sync/atomic"
-)
+import "sync/atomic"
 
 // Most of the rewriter's work is recursive descent, which is sequential (each
 // instruction's length gates the next) and does not vectorize. But a couple of
@@ -16,25 +12,12 @@ import (
 // nothing to detect. The scalar path is always correct.
 //
 // The only control is an on/off switch, for benchmarking the two paths and for
-// a host whose SIMD is suspect. It defaults on; LABOON_NO_VECTOR=1 in the
-// environment turns it off before the first scan.
+// a host whose SIMD is suspect (SetVectorScan). It defaults on.
 
-var (
-	vecOnce sync.Once
-	vecOff  atomic.Bool // the switch; false means enabled
-)
-
-func vecInit() {
-	vecOnce.Do(func() {
-		if v, ok := os.LookupEnv("LABOON_NO_VECTOR"); ok && v != "0" && v != "" {
-			vecOff.Store(true)
-		}
-	})
-}
+var vecOff atomic.Bool // the switch; false means enabled
 
 // vecEnabled reports whether the SIMD scan kernels should be used.
 func vecEnabled() bool {
-	vecInit()
 	return !vecOff.Load()
 }
 
@@ -42,7 +25,6 @@ func vecEnabled() bool {
 // enabled), forcing the scalar path when off. It takes effect on the next scan
 // and is process-wide, not per sandbox.
 func SetVectorScan(on bool) {
-	vecInit()
 	vecOff.Store(!on)
 }
 

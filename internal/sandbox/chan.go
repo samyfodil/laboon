@@ -38,17 +38,9 @@ const stubWinSize = 0x40000000000
 
 // wait blocks until the stub posts a request. It spins first (catching a
 // request without the cost of a park) and then parks on the futex. How long it
-// spins is adaptive -- learned from how fast this slot's stub keeps answering
-// -- unless LABOON_SPIN pins a fixed count. See adaptspin.go.
+// spins is adaptive -- learned from how fast this slot's stub keeps answering.
+// See adaptspin.go.
 func (c *channel) wait() error {
-	if !adaptive {
-		for range fixedSpin {
-			if atomic.LoadUint32(&c.page.state) == stReq {
-				return nil
-			}
-		}
-		return c.park(0, false)
-	}
 	ensureCalibrated()
 	start := cputicks()
 	if budget := c.sp.budget(); budget > 0 {

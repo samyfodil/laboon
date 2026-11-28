@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path"
 	"sync/atomic"
 
 	"golang.org/x/sys/windows"
@@ -769,8 +768,8 @@ func execve(dg *dguest, dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	fs.mu.Lock()
 	dg.ps.shared, dg.ps.forked = false, false
 	fs.mu.Unlock()
-	dg.execDone(path.Base(t.gp))
-	dg.noteExec(t.gp, t.gp, argv, dg.exePin(&t))
+	dg.execDone(t.comm)
+	dg.noteExec(t.gp, t.comm, argv, dg.exePin(&t))
 	// A tracer sees the exec stop and the call's exit with the new image in
 	// place, before its first instruction.
 	w, err := old.run.boot(dg, src, argv, envv, func(entry, sp uint64) { dg.ptraceExec(oldTid, entry, sp) })

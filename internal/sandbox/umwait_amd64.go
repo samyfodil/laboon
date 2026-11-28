@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"os"
 	"sync/atomic"
 	"unsafe"
 )
@@ -11,13 +10,12 @@ import (
 // the same promptness as a busy spin (tens of nanoseconds) but without burning
 // the core, so under load the cores stay free for the work that has to answer.
 // It replaces the busy spin where the CPU has it; elsewhere the spin remains.
-// LABOON_NO_UMWAIT forces the spin, for comparison.
 
 func cpuidWaitpkg() bool
 func umonitor(addr unsafe.Pointer)
 func umwait(ctrl uint32, deadline uint64)
 
-var hasUmwait = cpuidWaitpkg() && os.Getenv("LABOON_NO_UMWAIT") == ""
+var hasUmwait = cpuidWaitpkg()
 
 // umwaitCtrl selects C0.1 (bit 0 = 1): the lighter sleep, quicker to wake.
 const umwaitCtrl = 1

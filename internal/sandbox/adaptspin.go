@@ -1,10 +1,6 @@
 package sandbox
 
-import (
-	"os"
-	"strconv"
-	"sync/atomic"
-)
+import "sync/atomic"
 
 // cputicks reads the CPU cycle counter (cputicks_amd64.s / cputicks_arm64.s).
 func cputicks() uint64
@@ -28,23 +24,6 @@ func spinHint()
 // that are far apart decay the budget to zero, so the waiter parks at once (pure
 // event-wait, no wasted spin). The only constants are measured on the running
 // machine: the peer's rhythm and the park cost.
-//
-// LABOON_SPIN=<n> replaces this with a fixed n-iteration spin (the old
-// behaviour) for comparison; LABOON_SPIN=0 always parks.
-
-var (
-	adaptive  = true
-	fixedSpin = 20000
-)
-
-func init() {
-	if v, ok := os.LookupEnv("LABOON_SPIN"); ok {
-		if n, err := strconv.Atoi(v); err == nil {
-			adaptive = false
-			fixedSpin = n
-		}
-	}
-}
 
 // parkCostCy is this machine's cost, in cputicks, to park on a futex and be
 // woken: calibrateParkCost's figure at first, then following the wakes the

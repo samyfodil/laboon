@@ -136,7 +136,8 @@ const (
 
 var errSigIntr = errors.New("interrupted by a signal")
 
-var sigDbg = os.Getenv("LC_SIGDEBUG") == "1"
+// sigDbg turns on signal-delivery tracing to stderr, for debugging.
+var sigDbg bool
 
 // sigInfo is the head of a Linux siginfo_t: a and b are its bytes 16..32.
 type sigInfo struct {

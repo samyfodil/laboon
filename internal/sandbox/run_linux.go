@@ -379,13 +379,8 @@ func boot(dg *dguest, src execSrc, argv, env []string) error {
 }
 
 // stubParkCost is the park cost, in cputicks, handed to the stub so its reply
-// spin adapts the same way the supervisor's does. Zero when the adaptive spin
-// is off (LABOON_SPIN pinned a fixed count), which keeps the stub on its fixed
-// spin -- so one binary runs both sides fixed or both sides adaptive.
+// spin adapts the same way the supervisor's does.
 func stubParkCost() uint64 {
-	if !adaptive {
-		return 0
-	}
 	ensureCalibrated()
 	return parkCost()
 }

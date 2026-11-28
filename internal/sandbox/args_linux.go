@@ -3,7 +3,6 @@ package sandbox
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"unsafe"
 )
 
@@ -12,8 +11,8 @@ import (
 // from user memory when it starts. A handler reads its inputs through argRead
 // and argGet, which take them from there and go to guest memory for anything
 // not copied. The area is the guest's to write, so loadArgs bounds-checks each
-// record and the bytes are copied out once. LABOON_ARGS_VALIDATE checks every
-// copy against guest memory.
+// record and the bytes are copied out once. argValidate, set by a test, checks
+// every copy against guest memory.
 //
 // A handler's results go the other way through putOut: left in the slot's
 // window with a record in the area, which the stub copies to guest memory as
@@ -50,7 +49,7 @@ type argSet struct {
 	fault  bool // a flushed result faulted: the call fails with EFAULT
 }
 
-var argValidate = os.Getenv("LABOON_ARGS_VALIDATE") != ""
+var argValidate bool
 
 func (g *dguest) argArea() []byte {
 	o := argOff + g.slot*argSize

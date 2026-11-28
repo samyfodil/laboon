@@ -177,6 +177,38 @@ static int expect(struct sess *s, const char *want, int ms)
 	}
 }
 
+// takes waits until a job of the shell's, not the shell, holds the terminal
+// and its leader no longer ignores sig, so sig typed now reaches the program
+// and not the shell still starting it.
+static int takes(struct sess *s, int sig, int ms)
+{
+	double end = now_ms() + ms;
+	for (;;) {
+		pid_t pg = tcgetpgrp(s->m);
+		if (pg > 0 && pg != s->pid) {
+			char path[64], line[128];
+			snprintf(path, sizeof path, "/proc/%d/status", (int)pg);
+			FILE *f = fopen(path, "r");
+			unsigned long long ign = 0;
+			int seen = 0;
+			while (f && fgets(line, sizeof line, f))
+				if (sscanf(line, "SigIgn: %llx", &ign) == 1)
+					seen = 1;
+			if (f)
+				fclose(f);
+			if (seen && !(ign >> (sig - 1) & 1))
+				return 1;
+		}
+		if (now_ms() >= end || s->eof) {
+			printf("FAIL: no job takes signal %d\n", sig);
+			dump(s);
+			fails++;
+			return 0;
+		}
+		pump(s, 10);
+	}
+}
+
 static void send(struct sess *s, const char *str)
 {
 	MUST(write(s->m, str, strlen(str)) == (ssize_t)strlen(str));
@@ -677,7 +709,7 @@ static int t_sh(void)
 	expect(&s, "P1> ", 10000);
 
 	send(&s, "sleep 30\r");
-	msleep(1500);
+	takes(&s, SIGINT, 10000);
 	send(&s, "\003");
 	expect(&s, "P1> ", 10000);
 	send(&s, "echo rc=$?\r");
@@ -685,7 +717,7 @@ static int t_sh(void)
 	expect(&s, "P1> ", 10000);
 
 	send(&s, "sleep 30\r");
-	msleep(1500);
+	takes(&s, SIGTSTP, 10000);
 	send(&s, "\032");
 	expect(&s, "Stopped", 10000);
 	expect(&s, "P1> ", 10000);
@@ -699,7 +731,7 @@ static int t_sh(void)
 	expect(&s, "P1> ", 10000);
 	send(&s, "fg\r");
 	expect(&s, "sleep 30", 10000);
-	msleep(500);
+	takes(&s, SIGINT, 10000);
 	send(&s, "\003");
 	expect(&s, "P1> ", 10000);
 	send(&s, "echo rc2=$?\r");

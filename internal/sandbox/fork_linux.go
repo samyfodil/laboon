@@ -105,9 +105,6 @@ func (g *dguest) forkProc(r cloneReq, cfg Config) int {
 	if r.flags&cloneFs != 0 && g.pfs != nil {
 		child.pfs = g.pfs // CLONE_FS: share root and cwd, so a chroot here reaches the parent
 	}
-	if shmemEnabled() {
-		g.unmirrorForFork() // a real fork needs private, copy-on-write pages, not shared mirrors
-	}
 	child.mp = g.mp.forkCopy(fs)
 	child.mp.hopPend = h
 	g.mp.forkShm(child.mp, g)    // the child inherits the SysV attachments

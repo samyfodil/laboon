@@ -142,6 +142,21 @@ int main(int argc, char **argv) {
 	char *mv = mremap(r, 2 * MB, 3 * MB, MREMAP_MAYMOVE);
 	CHECK(mv != MAP_FAILED && mv != r, "growth into a taken range did not move (%p)", mv);
 
+	// Without MREMAP_MAYMOVE a page grown over a mapped one fails with ENOMEM
+	// and stays as it was, one grown over a free one grows, and an unmapped
+	// one is EFAULT: the walk musl makes down a stack to size it.
+	char *s = map(0, 3 * pg, 0);
+	s[pg] = 7;
+	errno = 0;
+	CHECK(mremap(s, pg, 2 * pg, 0) == MAP_FAILED && errno == ENOMEM, "first page over a mapped one: errno %d", errno);
+	errno = 0;
+	CHECK(mremap(s + pg, pg, 2 * pg, 0) == MAP_FAILED && errno == ENOMEM && s[pg] == 7, "middle page over a mapped one: errno %d", errno);
+	munmap(s + 2 * pg, pg);
+	CHECK(mremap(s + pg, pg, 2 * pg, 0) == s + pg && s[pg] == 7, "page over a free one did not grow in place");
+	munmap(s, 3 * pg);
+	errno = 0;
+	CHECK(mremap(s, pg, 2 * pg, 0) == MAP_FAILED && errno == EFAULT, "unmapped page: errno %d", errno);
+
 	// The break moves down.
 	char *top = sbrk(0);
 	CHECK(sbrk(16 * pg) == top && sbrk(0) == top + 16 * pg, "brk up");

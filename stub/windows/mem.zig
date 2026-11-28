@@ -104,6 +104,7 @@ const MADV_DONTNEED: u64 = 4;
 
 const ENOMEM: u64 = 12;
 const EACCES: u64 = 13;
+const EFAULT: u64 = 14;
 const ENOEXEC: u64 = 8;
 const EEXIST: u64 = 17;
 const EINVAL: u64 = 22;
@@ -1101,10 +1102,12 @@ fn mremap(old: u64, oldlen0: u64, newlen0: u64, flags: u64, newaddr: u64) u64 {
     const oldlen = up(oldlen0);
     const newlen = up(newlen0);
     if (oldlen == 0) return aliasView(old, newlen, flags, newaddr);
-    if (!inArea(old, old + oldlen)) return neg(EINVAL);
+    // An old range that is not all mapped is EFAULT, as Linux's vma lookup.
+    if (!inArea(old, old + oldlen)) return neg(EFAULT);
     coolIn(old, old + oldlen);
     const i = find(old);
-    if (i == nreg or regs[i].kind != .anon or regs[i].image) return neg(EINVAL);
+    if (i == nreg or regs[i].kind == .free) return neg(EFAULT);
+    if (regs[i].kind != .anon or regs[i].image) return neg(EINVAL);
     if (regs[i].vdso) return moveVdso(i, old, oldlen, newlen, flags, newaddr);
     const prot = regs[i].prot;
     // The range may span regions (a mapping grown in place is two): all
@@ -1112,6 +1115,7 @@ fn mremap(old: u64, oldlen0: u64, newlen0: u64, flags: u64, newaddr: u64) u64 {
     var j = i;
     while (true) : (j += 1) {
         const r = regs[j];
+        if (r.kind == .free) return neg(EFAULT);
         if (r.kind != .anon or r.prot != prot or r.vdso or r.code or r.is_tramp or r.pinned or r.hot) return neg(EINVAL);
         if (r.hi >= old + oldlen) break;
         if (j + 1 == nreg or regs[j + 1].lo != r.hi) return neg(EINVAL);

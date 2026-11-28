@@ -129,21 +129,14 @@ func (h *hop) call(c *channel, nr uintptr, args ...uint64) int64 {
 
 // spin polls for reply s for about the cost of a park, as channel.wait does.
 func (h *hop) spin(s uint32) bool {
-	var end uint64
-	if adaptive {
-		ensureCalibrated()
-		end = cputicks() + parkCost()
-	}
+	ensureCalibrated()
+	end := cputicks() + parkCost()
 	for i := 0; ; i++ {
 		if atomic.LoadUint32(&h.rep.seq) == s {
 			return !h.dead.Load()
 		}
 		spinHint()
-		if adaptive {
-			if i&31 == 31 && cputicks() >= end {
-				return false
-			}
-		} else if i >= fixedSpin {
+		if i&31 == 31 && cputicks() >= end {
 			return false
 		}
 	}

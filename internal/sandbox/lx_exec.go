@@ -17,6 +17,7 @@ import (
 // execTarget is a resolved execve.
 type execTarget struct {
 	gp     string   // the program's guest path
+	comm   string   // the task name the exec gives: the path's last part as the caller named it
 	src    execSrc  // the ELF that runs, as the host reads it
 	prefix []string // argv a #! chain adds
 	skip   uint64   // guest argv entries the prefix replaces
@@ -337,7 +338,9 @@ func (g *dguest) execTarget(dirfd int64, pathAddr, argvAddr uint64, flags int64)
 			return fail(e)
 		}
 		gp, filename, fexec, fexecOwn, fexecChecked, from = d.gp, fmt.Sprintf("/dev/fd/%d", dirfd), rf, own, true, d
+		t.comm = path.Base(d.gp) // as Linux, the file's own name, not the fd's
 	default:
+		t.comm = path.Base(prog)
 		if len(prog) >= 4096 {
 			return fail(lxENAMETOOLONG)
 		}

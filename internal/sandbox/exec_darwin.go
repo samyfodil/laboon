@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"sync"
 	"sync/atomic"
 
@@ -100,8 +99,8 @@ func (g *dguest) execve(dirfd int64, pathAddr, argvAddr, envpAddr uint64, flags 
 	g.closeExec() // drop close-on-exec fds; the rest survive the exec
 	execHook(g)
 	g.endRseq()
-	g.execDone(path.Base(gp))
-	g.noteExec(gp, gp, argv, g.exePin(&t))
+	g.execDone(t.comm)
+	g.noteExec(gp, t.comm, argv, g.exePin(&t))
 	g.dfs.mu.Lock()
 	c := g.ps.cred
 	g.dfs.mu.Unlock()
@@ -327,8 +326,8 @@ func (g *dguest) execRespawn(t *execTarget, host, interpHost, mainSites, interpS
 		fs.awaitStubGone(old)
 	}
 	g.takeOverGroup()
-	g.execDone(path.Base(gp))
-	g.noteExec(gp, gp, argv, g.exePin(t))
+	g.execDone(t.comm)
+	g.noteExec(gp, t.comm, argv, g.exePin(t))
 
 	fs.mu.Lock()
 	c := g.ps.cred

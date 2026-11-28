@@ -355,8 +355,8 @@ func (g *dguest) mapAt(addr, n, flags uint64, anon bool, do func(at, fixed uint6
 }
 
 // vmaValidate checks after a memory call that every range the set holds is
-// mapped in the stub (LABOON_VMA_VALIDATE).
-var vmaValidate = os.Getenv("LABOON_VMA_VALIDATE") != ""
+// mapped in the stub; a test sets it (validateVMAs).
+var vmaValidate bool
 
 func (g *dguest) checkVmas(what string) {
 	if !vmaValidate {

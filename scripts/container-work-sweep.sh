@@ -90,8 +90,9 @@ for i in $(seq 1 400); do mariadb --socket=/tmp/my.sock -e "select 1" >/dev/null
 mariadb --socket=/tmp/my.sock -N -e "select concat('"'"'mariasel'"'"',1+1)"
 mariadb-admin --socket=/tmp/my.sock shutdown >/dev/null 2>&1 || mysqladmin --socket=/tmp/my.sock shutdown >/dev/null 2>&1 || true'
 
-# Bounded so a hang fails in 40s instead of burning the per-image cap.
-run dotnet 8. mcr.microsoft.com/dotnet/sdk:8.0-alpine sh -c 'timeout 40 dotnet --version'
+# Bounded so a hang fails in 120s instead of burning the per-image cap; an
+# emulated arm64 host takes up to a minute.
+run dotnet 8. mcr.microsoft.com/dotnet/sdk:8.0-alpine sh -c 'timeout 120 dotnet --version'
 
 echo "== work sweep done: $pass passed, $fail failed${fails:+ ($fails)}"
 exit $fail
