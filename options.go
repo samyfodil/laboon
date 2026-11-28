@@ -288,6 +288,14 @@ func WithNoRewrite() Option {
 	return func(o *options) { o.cfg.NoRewrite = true }
 }
 
+// WithStrictRewrite refuses a program whose syscall rewrite cannot be proved
+// complete: one with syscall instruction bytes left inside other
+// instructions or data in its text (Windows; elsewhere such a syscall is
+// served through the trap).
+func WithStrictRewrite() Option {
+	return func(o *options) { o.cfg.StrictRewrite = true }
+}
+
 // environ is base with o's environment options applied.
 func (o *options) environ(base []string) []string {
 	env := base

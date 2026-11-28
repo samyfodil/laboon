@@ -93,6 +93,13 @@ type Config struct {
 	// through the trap, as a rewritten site is; on Windows the
 	// instrumentation-callback backstop kills the guest (ErrKilled).
 	NoRewrite bool
+	// StrictRewrite refuses a program, or code it maps, whose rewrite leaves
+	// stray syscall encodings: a syscall instruction's bytes inside another
+	// instruction or data in its text, which only a jump into the middle of
+	// an instruction runs. Without it they stay, and one that runs meets the
+	// backstop. Only Windows looks for them: Linux and macOS serve such a
+	// syscall through the trap, as a rewritten site.
+	StrictRewrite bool
 	// RejectRWX refuses writable+executable guest memory: a mapping or
 	// protection change asking for both fails with EACCES (W^X). Without it
 	// JIT engines like V8 can map RWX code; the syscall backstop holds

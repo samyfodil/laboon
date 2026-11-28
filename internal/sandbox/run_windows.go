@@ -51,10 +51,6 @@ const (
 	exeBias = 0x555555550000
 )
 
-// strictRewrite refuses an image with stray syscall encodings: set with
-// LC_STRICT_REWRITE=1.
-var strictRewrite = os.Getenv("LC_STRICT_REWRITE") == "1"
-
 // testNoFSIslands, when set by a test, leaves every %fs site to the stub's
 // fault handler.
 var testNoFSIslands bool
@@ -880,14 +876,14 @@ func (g *wguest) loadELF(src imageSrc, dynBias uint64) (*wimage, error) {
 // not at an instruction boundary (an immediate, a displacement, a data word
 // in text), so only a jump into the middle of an instruction runs one. The
 // stub's instrumentation-callback backstop (stub/windows/instrcb.zig) then
-// kills the guest (ErrKilled), like seccomp on Linux. strictRewrite refuses
+// kills the guest (ErrKilled), like seccomp on Linux. StrictRewrite refuses
 // such an image instead, for a provably complete rewrite.
 func (g *wguest) strayPolicy(stray []uint64) error {
 	for _, a := range stray {
 		g.tracef("[lc] stray syscall encoding at %#x left in place\n", a)
 	}
-	if strictRewrite && len(stray) > 0 {
-		return fmt.Errorf("cannot rewrite completely: %d stray syscall encodings (LC_STRICT_REWRITE)", len(stray))
+	if g.cfg.StrictRewrite && len(stray) > 0 {
+		return fmt.Errorf("cannot rewrite completely: %d stray syscall encodings (StrictRewrite)", len(stray))
 	}
 	return nil
 }

@@ -137,6 +137,7 @@ func main() {
 	allowCIDRs := flag.String("allow-cidrs", "", "with -net: comma-separated CIDR networks the guest may also connect to directly")
 	allowPorts := flag.String("allow-ports", "", "with -net: comma-separated destination ports the guest may connect to (others refused)")
 	noRewrite := flag.Bool("no-rewrite", false, "skip syscall rewriting (seccomp should kill the guest)")
+	strictRewrite := flag.Bool("strict-rewrite", false, "refuse a program whose syscall rewrite cannot be proved complete (Windows)")
 	quiet := flag.Bool("q", false, "discard the guest's stdout and stderr")
 	discardOut := flag.Bool("discard-stdout", false, "discard the guest's stdout")
 	discardErr := flag.Bool("discard-stderr", false, "discard the guest's stderr")
@@ -217,6 +218,7 @@ func main() {
 		{*noNet, laboon.WithNoNet()},
 		{*user != "", laboon.WithUser(*user)},
 		{*noRewrite, laboon.WithNoRewrite()},
+		{*strictRewrite, laboon.WithStrictRewrite()},
 		{flagSet("entrypoint"), entrypointOpt(*entrypoint)},
 		{*quiet || *discardOut, laboon.WithDiscardStdout()},
 		{*quiet || *discardErr, laboon.WithDiscardStderr()},

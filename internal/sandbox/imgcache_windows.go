@@ -103,7 +103,7 @@ func (g *wguest) imgEntryOf(src imageSrc) (*imgStore, string) {
 	if g.cfg.NoRewrite {
 		b = append(b, 'n')
 	}
-	if strictRewrite {
+	if g.cfg.StrictRewrite {
 		b = append(b, 's')
 	}
 	h := sha256.Sum256(b)

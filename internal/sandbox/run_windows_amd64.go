@@ -107,7 +107,7 @@ func (r *imageRewriter) place(areas []trampArea) {
 	}
 	r.areas = len(areas)
 	r.w = rewrite.New(tramp, size, r.g.entry)
-	r.w.NoStray = r.g.cfg.Trace == nil && !strictRewrite // the scan only feeds the trace and the strict policy
+	r.w.NoStray = r.g.cfg.Trace == nil && !r.g.cfg.StrictRewrite // the scan only feeds the trace and the strict policy
 	r.w.SegmentSlot(tebSlotTP)
 	if r.g.exitEntry != 0 {
 		r.w.ExitStack(tebSlotStk, r.g.exitEntry)
